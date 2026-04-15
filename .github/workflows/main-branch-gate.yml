@@ -1,0 +1,33 @@
+name: main-branch-gate
+
+on:
+  pull_request_target:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  allow-only-testing-source:
+    name: allow-only-testing-source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close non-testing PRs to main
+        if: ${{ github.head_ref != 'testing' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Closing automatically: pull requests into \`main\` must come from \`testing\`. Open or retarget this change against \`testing\` instead."
+          gh pr close "$PR_NUMBER" --repo "$REPO"
+
+      - name: Require testing as the source branch
+        run: |
+          if [ "${{ github.head_ref }}" != "testing" ]; then
+            echo "Pull requests into main must come from testing. Got '${{ github.head_ref }}'."
+            exit 1
+          fi

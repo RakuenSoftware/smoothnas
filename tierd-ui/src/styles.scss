@@ -1,0 +1,148 @@
+// Generic design system imported from @rakuensoftware/smoothgui/styles in main.tsx
+
+// --- SmoothNAS-specific styles ---
+
+// --- Tier cards ---
+.create-card {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 16px;
+
+  h2 { margin: 0 0 16px; font-size: 18px; }
+
+  .create-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+
+    label {
+      display: flex;
+      flex-direction: column;
+      font-size: 13px;
+      color: #666;
+      input, select { margin-top: 4px; padding: 8px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; &:focus { outline: none; border-color: #4fc3f7; } }
+    }
+  }
+
+  .hint { font-size: 12px; color: #999; margin-bottom: 10px; }
+}
+
+.tier-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.tier-card {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 16px;
+  transition: opacity 0.2s;
+
+  &.tier-deleting, &.tier-provisioning {
+    opacity: 0.5;
+    pointer-events: none;
+  }
+
+  .tier-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    h2 { margin: 0; font-size: 18px; flex: 1; }
+  }
+
+  .row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    padding: 4px 0;
+    border-bottom: 1px solid #f5f5f5;
+    .label { color: #888; }
+    code { background: #f5f5f5; padding: 2px 6px; border-radius: 3px; font-size: 12px; font-family: monospace; }
+    &:last-child { border-bottom: none; }
+  }
+
+  .slot-grid {
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .slot-row {
+    display: grid;
+    grid-template-columns: 90px 1fr;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+
+    .slot-name { font-weight: 600; color: #555; font-size: 12px; }
+
+    .slot-add {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      select { flex: 1; padding: 5px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
+      button { padding: 5px 10px; background: #4fc3f7; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; &:disabled { opacity: 0.5; cursor: not-allowed; } }
+      .slot-assigning {
+        font-size: 12px;
+        color: #4fc3f7;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        &::before {
+          content: '';
+          display: inline-block;
+          width: 14px;
+          height: 14px;
+          border: 2px solid #4fc3f7;
+          border-top-color: transparent;
+          border-radius: 50%;
+          animation: slot-spin 0.8s linear infinite;
+        }
+      }
+    }
+
+    @keyframes slot-spin {
+      to { transform: rotate(360deg); }
+    }
+  }
+}
+
+.state-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #f5f5f5;
+  color: #666;
+
+  &.state-healthy { background: #e8f5e9; color: #2e7d32; }
+  &.state-provisioning, &.state-mounted { background: #e3f2fd; color: #1565c0; }
+  &.state-degraded { background: #fff3e0; color: #e65100; }
+  &.state-error, &.state-faulted { background: #ffebee; color: #c62828; }
+  &.state-destroying, &.state-unmounted { background: #f5f5f5; color: #888; }
+}
+
+
+.tier-level-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 1fr 1fr 60px 60px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid #f5f5f5;
+  font-size: 13px;
+  &:last-child { border-bottom: none; }
+  .level-name { font-weight: 600; }
+  .level-fill-input { width: 56px; padding: 3px 6px; border: 1px solid #ddd; border-radius: 3px; font-size: 13px; }
+}
+

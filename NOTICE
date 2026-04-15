@@ -1,0 +1,22 @@
+SmoothNAS Third-Party Software Notice
+
+SmoothNAS does not bundle, distribute, or modify any third-party
+software in its ISO images or release artifacts.
+
+During installation, the SmoothNAS custom installer runs debootstrap
+to install Debian, then apt-get to install packages. All packages are
+downloaded by the user's machine directly from Debian's repositories.
+
+This includes:
+
+  - ZFS (zfsutils-linux, zfs-dkms): downloaded from Debian's "contrib"
+    repository. ZFS is licensed under the CDDL, which is incompatible
+    with the GPL. SmoothNAS does not distribute ZFS.
+
+  - Samba, NFS, targetcli, nginx, and all other system packages:
+    downloaded from Debian's "main" repository during installation.
+
+The SmoothNAS ISO contains only:
+  - A Linux kernel and initrd (from Debian's netboot build)
+  - Boot structures (isolinux for BIOS, GRUB for UEFI)
+  - The SmoothNAS installer script (shell script)

@@ -1,0 +1,168 @@
+name: Release
+
+on:
+  push:
+    branches: [testing, main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.1.0). Leave blank for auto-generated version.'
+        required: false
+        type: string
+      bump:
+        description: 'Version bump type for main (ignored if version is set).'
+        required: false
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    # The fork keeps release publishing lightweight: backend + UI artifacts,
+    # but no ISO build.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version and channel
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          next_stable_version() {
+            local latest_tag version major minor patch bump
+            bump="${1:-patch}"
+
+            latest_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n 1)"
+            if [ -z "${latest_tag}" ]; then
+              echo "0.0.1"
+              return
+            fi
+
+            version="${latest_tag#v}"
+            IFS='.' read -r major minor patch <<< "${version}"
+            case "${bump}" in
+              major) major="$((major + 1))"; minor=0; patch=0 ;;
+              minor) minor="$((minor + 1))"; patch=0 ;;
+              *)     patch="$((patch + 1))" ;;
+            esac
+            echo "${major}.${minor}.${patch}"
+          }
+
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            if [ -n "${{ inputs.version }}" ]; then
+              VERSION="${{ inputs.version }}"
+            else
+              VERSION="$(next_stable_version "${{ inputs.bump }}")"
+            fi
+
+            if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Stable releases on main must use X.Y.Z; got ${VERSION}" >&2
+              exit 1
+            fi
+
+            echo "channel=stable" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "name=SmoothNAS v${VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            VERSION="$(date -u +%Y.%m%d.%H%M)-$(git rev-parse --short HEAD)"
+            if [ -n "${{ inputs.version }}" ]; then
+              VERSION="${{ inputs.version }}"
+            fi
+            echo "channel=testing" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "tag=testing-${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "name=SmoothNAS v${VERSION} (testing)" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          if [ "${{ github.repository }}" = "JBailes/SmoothNAS" ] && [ "${{ github.ref_name }}" != "main" ]; then
+            sudo apt-get install -y libpam0g-dev gcc
+          else
+            sudo apt-get install -y xorriso isolinux syslinux-utils cpio gzip file curl libpam0g-dev gcc
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tierd/go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tierd-ui/package-lock.json
+
+      - name: Build tierd backend
+        working-directory: tierd
+        run: CGO_ENABLED=1 go build -ldflags "-X main.version=${{ steps.meta.outputs.version }}" -o ../bin/tierd ./cmd/tierd/
+
+      - name: Build tierd-ui frontend
+        working-directory: tierd-ui
+        run: |
+          echo '//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}' >> .npmrc
+          npm ci && npm run build
+
+      - name: Package update artifacts
+        run: |
+          mkdir -p dist
+          tar -czf dist/tierd-ui.tar.gz -C tierd-ui/dist/smoothnas-ui .
+          TIERD_SHA=$(sha256sum bin/tierd | awk '{print $1}')
+          UI_SHA=$(sha256sum dist/tierd-ui.tar.gz | awk '{print $1}')
+          cat > dist/manifest.json <<EOFM
+          {
+            "version": "${{ steps.meta.outputs.version }}",
+            "channel": "${{ steps.meta.outputs.channel }}",
+            "tierd_sha256": "${TIERD_SHA}",
+            "ui_sha256": "${UI_SHA}"
+          }
+          EOFM
+
+      - name: Build ISO
+        if: github.repository != 'JBailes/SmoothNAS' || github.ref_name == 'main'
+        run: |
+          chmod +x iso/build-iso.sh
+          ./iso/build-iso.sh ${{ steps.meta.outputs.version }}
+
+      - name: Create GitHub Release
+        if: github.repository != 'JBailes/SmoothNAS' || github.ref_name == 'main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          draft: false
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          files: |
+            iso/output/smoothnas-${{ steps.meta.outputs.version }}.iso
+            bin/tierd
+            dist/tierd-ui.tar.gz
+            dist/manifest.json
+          generate_release_notes: true
+
+      - name: Create Lightweight GitHub Release
+        if: github.repository == 'JBailes/SmoothNAS' && github.ref_name != 'main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          draft: false
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          files: |
+            bin/tierd
+            dist/tierd-ui.tar.gz
+            dist/manifest.json
+          generate_release_notes: true

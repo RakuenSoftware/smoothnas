@@ -1,0 +1,24 @@
+.terminal-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.terminal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  flex-shrink: 0;
+
+  h1 { margin: 0; font-size: 24px; }
+}
+
+.terminal-container {
+  flex: 1;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+  min-height: 400px;
+  padding: 4px;
+}

@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  lint-backend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tierd/go.mod
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpam0g-dev gcc
+
+      - name: Run go vet
+        working-directory: tierd
+        run: CGO_ENABLED=1 go vet ./...
+
+  build-backend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tierd/go.mod
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpam0g-dev gcc
+
+      - name: Build
+        working-directory: tierd
+        run: CGO_ENABLED=1 go build -o ../bin/tierd ./cmd/tierd/
+
+  test-backend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tierd/go.mod
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpam0g-dev gcc
+
+      - name: Run Go tests
+        working-directory: tierd
+        run: CGO_ENABLED=1 go test ./... -count=1
+
+  build-frontend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tierd-ui/package-lock.json
+
+      - name: Install dependencies
+        working-directory: tierd-ui
+        run: |
+          echo '//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}' >> .npmrc
+          npm ci
+
+      - name: Build
+        working-directory: tierd-ui
+        run: npm run build
+
+  test-frontend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tierd-ui/package-lock.json
+
+      - name: Install dependencies
+        working-directory: tierd-ui
+        run: |
+          echo '//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}' >> .npmrc
+          npm ci
+
+      - name: Type check
+        working-directory: tierd-ui
+        run: npx tsc --noEmit

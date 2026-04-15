@@ -1,0 +1,23 @@
+[Unit]
+Description=SimpleNAS Storage Management Daemon
+After=multi-user.target network-online.target smoothnas-firstboot.service mdadm-monitor.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=+/bin/sh -c '[ -f /etc/pam.d/tierd ] || printf "auth [success=1 default=ignore] pam_unix.so nullok\nauth requisite pam_deny.so\nauth required pam_permit.so\naccount [success=1 new_authtok_reqd=done default=ignore] pam_unix.so\naccount requisite pam_deny.so\naccount required pam_permit.so\n" > /etc/pam.d/tierd'
+ExecStart=/usr/local/bin/tierd
+Environment=TIERD_ADDR=127.0.0.1:8420
+Environment=TIERD_DB=/var/lib/tierd/tierd.db
+Environment=HOME=/root
+Environment=USER=root
+Environment=LOGNAME=root
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=tierd tierd/mdadm
+
+PrivateTmp=false
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

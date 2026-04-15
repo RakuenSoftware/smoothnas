@@ -1,0 +1,25 @@
+# Build artifacts
+bin/
+dist/
+tierd/tierd
+
+# Node
+tierd-ui/node_modules/
+tierd-ui/dist/
+tierd-ui/.angular/
+tierd-ui/tsconfig.tsbuildinfo
+
+# ISO build
+iso/cache/
+iso/work/
+iso/output/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.codex/
+.codex
+
+# aimee
+.aimee/
