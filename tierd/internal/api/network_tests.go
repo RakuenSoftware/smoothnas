@@ -19,22 +19,22 @@ func (h *NetworkTestsHandler) Route(w http.ResponseWriter, r *http.Request) {
 			h.listExternalServers(w, r)
 			return
 		}
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		jsonMethodNotAllowed(w)
 	case "/api/network-tests/run":
 		if r.Method == http.MethodPost {
 			h.run(w, r)
 			return
 		}
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		jsonMethodNotAllowed(w)
 	default:
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		jsonNotFound(w)
 	}
 }
 
 func (h *NetworkTestsHandler) run(w http.ResponseWriter, r *http.Request) {
 	var req nettest.Request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 

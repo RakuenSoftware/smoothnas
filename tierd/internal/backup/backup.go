@@ -20,12 +20,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/JBailes/SmoothNAS/tierd/internal/nfs"
 	"golang.org/x/sys/unix"
 )
 
+var statPath = os.Stat
+var statfsBackupPath = unix.Statfs
+
 const (
 	// copyBufSize is the per-goroutine buffer for io.CopyBuffer. 4 MB amortises
-	// NFS RPC and FUSE write overhead over large chunks, giving close to wire speed
+	// NFS RPC and smoothfs write overhead over large chunks, giving close to wire speed
 	// on fast links without meaningful extra memory cost.
 	copyBufSize = 4 * 1024 * 1024
 
@@ -37,41 +41,115 @@ const (
 	// dirWorkers is the number of directories created in parallel. os.MkdirAll
 	// is safe to call concurrently on overlapping paths: racing goroutines that
 	// need the same parent will create it themselves and the EEXIST from the
-	// winner is silently absorbed. More workers hide the FUSE/tierd round-trip
+	// winner is silently absorbed. More workers hide the smoothfs round-trip
 	// latency that makes sequential mkdir the dominant bottleneck on large trees.
 	dirWorkers = 16
 
-	// nfsMountOpts are appended to every NFS mount so the kernel uses large
-	// RPC read/write payloads and opens multiple parallel TCP connections to the
-	// server. rsize/wsize=1M amortises NFS RPC overhead over large chunks.
-	// nconnect=8 opens 8 TCP sessions to the server; a single TCP stream is
-	// often the binding constraint on NFS read throughput because the congestion
-	// window can only grow to fill one pipe — parallel sessions let the kernel
-	// spread RPCs across multiple flows and approach line rate.
-	// vers=4.2 pins the protocol to NFSv4. NFSv3 needs rpc.statd for NLM
-	// locking, which on a fresh boot is not yet running; mount.nfs starts it
-	// lazily, but the first mount can race the server and get "access denied"
-	// before statd has registered. NFSv4 uses in-protocol locking and avoids
-	// the race entirely.
+	// nfsMountOpts are the NFS mount options used for every backup source mount.
 	//
-	// rsize/wsize=2M is the conservative bump we land on. 1M was original
-	// tested-good; 4M regressed against one real NFS server. 2M is a
-	// compromise that helps large-file throughput without the 4M risk —
-	// retest if perf changes show up.
+	// nconnect is deliberately omitted. Operator history on this deployment
+	// shows nconnect>1 reduced overall throughput on the real source NAS —
+	// sticking to a single TCP connection per mount.
 	//
-	// lookupcache=all + actimeo=60 cache directory entries and file attrs
-	// for up to a minute. During rsync's tree walk this turns repeated
-	// stat calls on the same parent dirs into local lookups instead of
-	// NFS RPCs. Initial backups gain modestly (each file still stat'd
-	// once); incremental rsync runs gain a lot.
-	nfsMountOpts = "vers=4.2,rsize=2097152,wsize=2097152,nconnect=8,lookupcache=all,actimeo=60"
+	// rsize/wsize=2M: large RPC payloads amortise per-RPC overhead over fewer
+	// round trips. 4M regressed on one real server; 2M is the safe upper bound.
+	// Note: Linux NFS caps rsize/wsize at 1M by default (max_rsize); requesting
+	// 2M is harmless and future-compatible when the server advertises more.
+	//
+	// vers=4.2: avoids the rpc.statd race that can produce "access denied" on
+	// first mount when NFSv3 locking has not yet registered with statd.
+	//
+	// lookupcache=all + actimeo=60: cache directory entries and file attrs for
+	// up to a minute, turning repeated stat() calls during rsync's tree walk
+	// into local lookups instead of NFS RPCs.
+	//
+	// timeo=50,retrans=3: base RPC timeout of 5 s with three retries before TCP
+	// reconnect (~35 s worst case). The kernel default of 60 s per RPC meant a
+	// single unresponsive server stalled rsync for up to 3 minutes.
+	nfsMountOpts = nfs.DefaultClientMountOptions
 
 	// nfsReadAheadKB raises the per-mount BDI readahead so the kernel
 	// pre-fetches further into a sequential NFS read stream. 4 MB is a
 	// modest bump from the kernel default (~128 KB) — enough to keep the
 	// server's prefetcher warm without risking memory pressure under load.
 	nfsReadAheadKB = 4096
+
+	// minDestFreeBytes is the lower bound on destination free space we
+	// require before starting a backup. Below this we refuse to start —
+	// the run would fail within seconds anyway and leave a confusing
+	// partial-tree on the target.
+	minDestFreeBytes = 1 << 30 // 1 GB
+
+	// criticalDestFreeBytes is the in-flight floor. If a running backup's
+	// destination drops below this, the watchdog cancels rsync so it exits
+	// cleanly with our own error string instead of the kernel returning
+	// ENOSPC mid-file. Enough headroom for rsync to wind down, journald to
+	// keep logging, and the operator to diagnose.
+	criticalDestFreeBytes = 200 << 20 // 200 MB
 )
+
+// destFreeBytes returns the number of bytes available to non-root on the
+// filesystem containing path.
+func destFreeBytes(path string) (uint64, error) {
+	var st unix.Statfs_t
+	if err := statfsBackupPath(path, &st); err != nil {
+		return 0, err
+	}
+	return uint64(st.Bavail) * uint64(st.Bsize), nil
+}
+
+func rsyncArchiveArgs(_ string) []string {
+	// Keep the parts of archive mode that matter for NAS backups without
+	// paying the NFS/ZFS cost of replaying source uid/gid/mode metadata.
+	return []string{"-rltW", "--links", "--inplace",
+		"--omit-dir-times", "--no-perms", "--no-owner", "--no-group",
+		"--timeout=60",
+		"--stats", "--no-human-readable", "--info=progress2",
+	}
+}
+
+var rsyncSupportsOpenNoAtime = sync.OnceValue(func() bool {
+	out, err := exec.Command("rsync", "--help").Output()
+	return err == nil && bytes.Contains(out, []byte("--open-noatime"))
+})
+
+func rsyncMountArgs(dst string) []string {
+	args := rsyncArchiveArgs(dst)
+	// Mounted-source backups run rsync locally as root. When supported, avoid
+	// updating source atime on every file open; on NFS that prevents a read-only
+	// backup from producing avoidable metadata RPC/writeback work on the source.
+	if rsyncSupportsOpenNoAtime() {
+		args = append(args, "--open-noatime")
+	}
+	return args
+}
+
+// watchDestFree polls path's free space every 3s. If it drops below
+// criticalDestFreeBytes, cancel is invoked (which cancels the rsync context)
+// and the reason is delivered via reasonOut. Returns when ctx is done.
+func watchDestFree(ctx context.Context, path string, cancel context.CancelFunc, reasonOut chan<- string) {
+	t := time.NewTicker(3 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			free, err := destFreeBytes(path)
+			if err != nil {
+				continue
+			}
+			if free < criticalDestFreeBytes {
+				select {
+				case reasonOut <- fmt.Sprintf("destination %s has only %d MB free (< %d MB floor); aborting to avoid a silent mid-file ENOSPC", path, free>>20, criticalDestFreeBytes>>20):
+				default:
+				}
+				cancel()
+				return
+			}
+		}
+	}
+}
 
 // speedTracker measures average transfer speed since it was created.
 type speedTracker struct {
@@ -106,23 +184,337 @@ func (t *speedTracker) format() string {
 
 // Config describes a single backup run.
 type Config struct {
-	TargetType  string // "nfs" or "smb"
+	TargetType  string // "nfs" or "smb" — used only when Method=="cp"
 	Host        string
 	Share       string
 	SMBUser     string
 	SMBPass     string
+	SSHUser     string // used when Method=="rsync"; empty = key-based auth as current user
+	SSHPass     string // used when Method=="rsync" and password auth is required; empty = key-based
 	LocalPath   string
-	RemotePath  string // subdirectory within the mounted share; may be empty
+	RemotePath  string // subdirectory within the remote path; may be empty
 	Direction   string // "push" or "pull"
 	Method      string // "cp" or "rsync"
-	Parallelism int    // number of concurrent rsyncs (1 = single stream)
+	Parallelism int    // used only when Method=="cp"; rsync always uses a single stream
+	UseSSH      bool   // Method=="rsync" only: true=direct SSH transport, false=mount NFS/SMB and rsync locally
+	Compress    bool   // rsync --compress (zstd on rsync 3.2+; zlib otherwise)
+	DeleteMode  bool   // rsync --delete
 }
 
-// Run mounts the remote target, executes the backup, and unmounts.
+// Run executes the backup described by cfg.
+//
+// For method="rsync" the remote end is reached via rsync's native SSH
+// transport — no NFS or SMB mount is performed. SSH key-based auth is used
+// by default; set SSHPass for password-based auth (sshpass required).
+//
+// For method="cp" the remote share is mounted via NFS or SMB, the tree is
+// copied with sha256 verification, then the mount is torn down.
+//
 // progress is called with status messages and file counts (done, total) as the
-// job proceeds. done and total are -1 when no count is available (e.g. rsync).
-// Returns a human-readable summary on success.
+// job proceeds. done and total are -1 when no count is available. Returns a
+// human-readable summary on success.
 func Run(ctx context.Context, cfg Config, progress func(msg string, done, total int)) (string, error) {
+	if err := validateMountedLocalPath(cfg.LocalPath); err != nil {
+		return "", err
+	}
+	switch cfg.Method {
+	case "rsync":
+		if cfg.UseSSH {
+			return rsyncSSH(ctx, cfg, progress)
+		}
+		return rsyncMount(ctx, cfg, progress)
+	case "cp":
+		return runCP(ctx, cfg, progress)
+	default:
+		return "", fmt.Errorf("unknown method: %s", cfg.Method)
+	}
+}
+
+func validateMountedLocalPath(localPath string) error {
+	cleaned := filepath.Clean(localPath)
+	if cleaned == "/mnt" || !strings.HasPrefix(cleaned, "/mnt/") {
+		return nil
+	}
+	parts := strings.Split(strings.TrimPrefix(cleaned, "/mnt/"), string(os.PathSeparator))
+	if len(parts) == 0 || parts[0] == "" {
+		return nil
+	}
+	anchor := filepath.Join("/mnt", parts[0])
+
+	for candidate := cleaned; strings.HasPrefix(candidate, "/mnt/"); candidate = filepath.Dir(candidate) {
+		candidateDev, err := statDevice(candidate)
+		if err != nil {
+			parent := filepath.Dir(candidate)
+			if parent == candidate || parent == "/mnt" {
+				return fmt.Errorf("local path %s resolves to the root filesystem because %s is not mounted", localPath, anchor)
+			}
+			continue
+		}
+		rootDev, err := statDevice("/")
+		if err != nil {
+			return fmt.Errorf("stat root filesystem: %w", err)
+		}
+		if candidateDev == rootDev {
+			return fmt.Errorf("local path %s resolves to the root filesystem because %s is not mounted", localPath, candidate)
+		}
+		return nil
+	}
+	return nil
+}
+
+func statDevice(path string) (uint64, error) {
+	info, err := statPath(path)
+	if err != nil {
+		return 0, err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("stat %s: missing device metadata", path)
+	}
+	return uint64(st.Dev), nil
+}
+
+// rsyncSSH runs rsync directly over SSH without mounting any remote filesystem.
+// This avoids per-file NFS RPC overhead and is dramatically faster for
+// small-file workloads: the sender process runs on the remote host, builds
+// the file list locally, and streams a single batched transfer over the
+// SSH pipe rather than issuing individual LOOKUP/READ/WRITE RPCs per file.
+func rsyncSSH(ctx context.Context, cfg Config, progress func(msg string, done, total int)) (string, error) {
+	// Build the remote path: user@host:/share/[remotepath]/
+	remoteBase := cfg.Share
+	if cfg.RemotePath != "" {
+		remoteBase = filepath.Join(cfg.Share, cfg.RemotePath)
+	}
+	if !strings.HasSuffix(remoteBase, "/") {
+		remoteBase += "/"
+	}
+	remoteSpec := fmt.Sprintf("%s:%s", cfg.Host, remoteBase)
+	if cfg.SSHUser != "" {
+		remoteSpec = fmt.Sprintf("%s@%s:%s", cfg.SSHUser, cfg.Host, remoteBase)
+	}
+
+	localPath := cfg.LocalPath
+	if !strings.HasSuffix(localPath, "/") {
+		localPath += "/"
+	}
+	if err := os.MkdirAll(localPath, 0o755); err != nil {
+		return "", fmt.Errorf("create local path: %w", err)
+	}
+
+	// SSH transport args. StrictHostKeyChecking=accept-new accepts first-time
+	// connections automatically (safe for a controlled NAS environment) but
+	// rejects changed host keys so we still detect MITM on known hosts.
+	//
+	// When a password is supplied: disable pubkey auth entirely so SSH goes
+	// straight to password auth without failing on a missing key first.
+	// sshpass reads the password from the SSHPASS env var (-e flag).
+	//
+	// ServerAliveInterval=60/ServerAliveCountMax=3 (3 min total): SSH-level
+	// backstop only — protects against SSH itself freezing at the protocol
+	// layer (request_wait_answer) when the remote end is completely unresponsive.
+	// rsync's own --timeout (below) is the primary stall detector and fires
+	// first; these keepalives are only reached if rsync's I/O layer hangs before
+	// it can observe the data timeout.
+	const sshKeepAlive = "-o ServerAliveInterval=60 -o ServerAliveCountMax=3"
+	var sshArgs string
+	if cfg.SSHPass != "" {
+		sshArgs = "sshpass -e ssh -o StrictHostKeyChecking=accept-new -o BatchMode=no -o PubkeyAuthentication=no -o PreferredAuthentications=password " + sshKeepAlive
+	} else {
+		sshArgs = "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes " + sshKeepAlive
+	}
+
+	var src, dst string
+	if cfg.Direction == "pull" {
+		src = remoteSpec
+		dst = localPath
+	} else {
+		src = localPath
+		dst = remoteSpec
+	}
+
+	// -aW: archive + whole-file (skip delta algorithm — pointless for new/changed
+	// files when the bottleneck is per-file RPC latency, not bandwidth).
+	// --inplace avoids rsync's temp-file + rename path. On smoothfs this is
+	// materially faster for small-file backups because each temp file otherwise
+	// pays a full create, placement, metadata, and rename cycle. New files are
+	// still placed by smoothfs when rsync creates the final path.
+	// --timeout=60: exit if no data moves for 60 seconds. This is the primary
+	// stall detector — it fires at the rsync protocol level based on actual
+	// data flow, independent of SSH keepalives. A server under heavy I/O load
+	// may delay SSH protocol keepalive responses (causing false kills) but
+	// cannot delay actual rsync data without triggering this timeout.
+	args := rsyncArchiveArgs(dst)
+	if cfg.Compress {
+		// rsync 3.2+ negotiates zstd; older rsync falls back to zlib. Either
+		// way this only helps when the wire is slower than available CPU —
+		// for already-compressed media (mp4/mkv/zip) it's net-negative.
+		args = append(args, "--compress")
+	}
+	if cfg.DeleteMode {
+		args = append(args, "--delete")
+	}
+	args = append(args, "-e", sshArgs, src, dst)
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	reasonCh := make(chan string, 1)
+
+	// Pre-flight + watchdog only when dst is a local path we can statfs
+	// (pull). Push writes to a remote share we can't introspect.
+	if cfg.Direction == "pull" {
+		if free, ferr := destFreeBytes(localPath); ferr != nil {
+			log.Printf("backup: statfs %s: %v (skipping pre-flight)", localPath, ferr)
+		} else if free < minDestFreeBytes {
+			return "", fmt.Errorf("destination %s has only %d MB free (< %d MB minimum); refusing to start", localPath, free>>20, minDestFreeBytes>>20)
+		}
+		go watchDestFree(runCtx, localPath, cancel, reasonCh)
+	}
+
+	cmd := exec.CommandContext(runCtx, "rsync", args...)
+	if cfg.SSHPass != "" {
+		cmd.Env = append(os.Environ(), "SSHPASS="+cfg.SSHPass)
+	}
+
+	// Report wire rate in addition to rsync's logical byte counter when the
+	// user has asked for compression — that's the whole point of showing both.
+	summary, err := runRsyncProcess(cmd, "Running rsync over SSH...", cfg.Direction, cfg.Compress, progress)
+	if err != nil {
+		select {
+		case reason := <-reasonCh:
+			return "", fmt.Errorf("%s: %w", reason, err)
+		default:
+			return "", err
+		}
+	}
+	return summary, nil
+}
+
+// runRsyncProcess starts the given rsync exec.Cmd, streams its stdout while
+// emitting live rate updates, waits for exit, and returns the parsed --stats
+// summary. Used by both rsyncSSH and rsyncMount so progress handling stays
+// identical regardless of transport.
+//
+// When showWire is true the emitted rate is formatted as "<wire> (<logical>)"
+// — wire being the NIC delta and logical being rsync's own progress counter,
+// which is pre-compression file offset. That lets users watch the compression
+// ratio in real time. Only meaningful for rsync-over-SSH with --compress;
+// callers pass false for the mount path where rsync can't reach the wire.
+//
+// No stall watchdog here: rsync's own --timeout=60 exits cleanly if no data
+// moves for that long, which is the right place to detect stalls. A net-rate
+// watchdog with an adaptive threshold caused false positives on mixed
+// workloads where large-file phases (280 MB/s) are followed by legitimate
+// small-file phases (10 MB/s).
+func runRsyncProcess(cmd *exec.Cmd, startLabel, direction string, showWire bool, progress func(msg string, done, total int)) (string, error) {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("rsync stdout pipe: %w", err)
+	}
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+
+	progress(startLabel, -1, -1)
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("rsync start: %w", err)
+	}
+
+	type sample struct {
+		t     time.Time
+		bytes int64 // rsync progress2 byte offset (logical / post-decompression)
+		wire  int64 // total NIC tx/rx bytes across non-loopback interfaces
+	}
+	const rateWindow = 3 * time.Second
+	var samples []sample
+	var statsBuf strings.Builder
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	scanner.Split(splitCRLF)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if b, _, ok := parseRsyncProgress(line); ok {
+			now := time.Now()
+			var wire int64
+			if showWire {
+				if w, ok := readNetBytes(direction); ok {
+					wire = int64(w)
+				}
+			}
+			samples = append(samples, sample{t: now, bytes: b, wire: wire})
+			cutoff := now.Add(-rateWindow)
+			for len(samples) > 1 && samples[0].t.Before(cutoff) {
+				samples = samples[1:]
+			}
+			if len(samples) >= 2 {
+				first := samples[0]
+				last := samples[len(samples)-1]
+				elapsed := last.t.Sub(first.t).Seconds()
+				if elapsed > 0 && last.bytes >= first.bytes {
+					logical := float64(last.bytes-first.bytes) / elapsed
+					if showWire && last.wire >= first.wire && first.wire > 0 {
+						wireRate := float64(last.wire-first.wire) / elapsed
+						progress(fmt.Sprintf("rsync: %s (%s)", formatRate(wireRate), formatRate(logical)), -1, -1)
+					} else {
+						progress("rsync: "+formatRate(logical), -1, -1)
+					}
+				}
+			}
+		} else {
+			statsBuf.WriteString(line)
+			statsBuf.WriteByte('\n')
+		}
+	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		if waitErr := cmd.Wait(); waitErr != nil {
+			return "", fmt.Errorf("rsync output scan: %w: %v", scanErr, formatRsyncError(waitErr, errBuf.String()))
+		}
+		return "", fmt.Errorf("rsync output scan: %w", scanErr)
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return "", formatRsyncError(err, errBuf.String())
+	}
+	summary := parsersyncSummary(statsBuf.String())
+	progress("rsync complete", -1, -1)
+	return summary, nil
+}
+
+func formatRsyncError(waitErr error, stderr string) error {
+	stderr = strings.TrimSpace(stderr)
+	if strings.Contains(stderr, "No space left on device") {
+		if path := parseRsyncWriteFailedPath(stderr); path != "" {
+			return fmt.Errorf("rsync: destination filesystem is full at %s", path)
+		}
+		return fmt.Errorf("rsync: destination filesystem is full")
+	}
+	if stderr == "" {
+		return fmt.Errorf("rsync: %w", waitErr)
+	}
+	return fmt.Errorf("rsync: %w: %s", waitErr, stderr)
+}
+
+func parseRsyncWriteFailedPath(stderr string) string {
+	const marker = "write failed on \""
+	idx := strings.Index(stderr, marker)
+	if idx < 0 {
+		return ""
+	}
+	start := idx + len(marker)
+	end := strings.Index(stderr[start:], "\"")
+	if end < 0 {
+		return ""
+	}
+	return stderr[start : start+end]
+}
+
+// rsyncMount mounts the remote NFS/SMB share and runs rsync locally between
+// the smoothfs mount and the mount point. Preferred when rsync over SSH isn't
+// available on the remote, or when the mount-based kernel NFS stack is
+// faster than going through an SSH tunnel (typical on a fast LAN, where
+// SSH crypto is the single-thread bottleneck).
+func rsyncMount(ctx context.Context, cfg Config, progress func(msg string, done, total int)) (string, error) {
 	mountDir, err := os.MkdirTemp("", "smoothnas-backup-*")
 	if err != nil {
 		return "", fmt.Errorf("create mount dir: %w", err)
@@ -135,12 +527,114 @@ func Run(ctx context.Context, cfg Config, progress func(msg string, done, total 
 	}
 	defer umount(mountDir) //nolint:errcheck
 
-	// Resolve the remote subpath within the mount.
 	remoteFull := mountDir
 	if cfg.RemotePath != "" {
 		remoteFull = filepath.Join(mountDir, filepath.Clean("/"+cfg.RemotePath))
-		if err := os.MkdirAll(remoteFull, 0o755); err != nil {
-			return "", fmt.Errorf("create remote subdir: %w", err)
+		if cfg.Direction == "push" {
+			if err := os.MkdirAll(remoteFull, 0o755); err != nil {
+				return "", fmt.Errorf("create remote destination subdir: %w", err)
+			}
+		} else if info, err := os.Stat(remoteFull); err != nil {
+			return "", fmt.Errorf("stat remote source subdir: %w", err)
+		} else if !info.IsDir() {
+			return "", fmt.Errorf("remote source is not a directory: %s", remoteFull)
+		}
+	}
+
+	if cfg.Direction == "pull" {
+		if info, err := os.Stat(remoteFull); err != nil {
+			return "", fmt.Errorf("stat remote source: %w", err)
+		} else if !info.IsDir() {
+			return "", fmt.Errorf("remote source is not a directory: %s", remoteFull)
+		}
+	}
+
+	var src, dst string
+	if cfg.Direction == "push" {
+		src = cfg.LocalPath
+		dst = remoteFull
+	} else {
+		src = remoteFull
+		dst = cfg.LocalPath
+	}
+	if !strings.HasSuffix(src, "/") {
+		src += "/"
+	}
+	if !strings.HasSuffix(dst, "/") {
+		dst += "/"
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return "", fmt.Errorf("create destination: %w", err)
+	}
+
+	if free, err := destFreeBytes(dst); err != nil {
+		log.Printf("backup: statfs %s: %v (skipping pre-flight)", dst, err)
+	} else if free < minDestFreeBytes {
+		return "", fmt.Errorf("destination %s has only %d MB free (< %d MB minimum); refusing to start", dst, free>>20, minDestFreeBytes>>20)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	reasonCh := make(chan string, 1)
+	go watchDestFree(runCtx, dst, cancel, reasonCh)
+
+	// Compression is intentionally ignored on the NFS/SMB mount path:
+	// rsync is copying between local paths, so it cannot compress kernel
+	// RPC traffic and can only add CPU overhead on LAN transfers.
+	args := rsyncMountArgs(dst)
+	if cfg.DeleteMode {
+		args = append(args, "--delete")
+	}
+	args = append(args, src, dst)
+	cmd := exec.CommandContext(runCtx, "rsync", args...)
+	// Mounted NFS/SMB backups copy between local paths. rsync cannot see kernel
+	// RPC wire bytes here, so progress reports logical payload throughput.
+	summary, err := runRsyncProcess(cmd, fmt.Sprintf("Running rsync over %s mount...", strings.ToUpper(cfg.TargetType)), cfg.Direction, false, progress)
+	if err != nil {
+		select {
+		case reason := <-reasonCh:
+			return "", fmt.Errorf("%s: %w", reason, err)
+		default:
+			return "", err
+		}
+	}
+	return summary, nil
+}
+
+// runCP mounts the remote NFS or SMB share, copies the tree with sha256
+// verification, then unmounts.
+func runCP(ctx context.Context, cfg Config, progress func(msg string, done, total int)) (string, error) {
+	mountDir, err := os.MkdirTemp("", "smoothnas-backup-*")
+	if err != nil {
+		return "", fmt.Errorf("create mount dir: %w", err)
+	}
+	defer os.Remove(mountDir)
+
+	progress("Mounting remote target...", -1, -1)
+	if err := mount(cfg, mountDir); err != nil {
+		return "", fmt.Errorf("mount failed: %w", err)
+	}
+	defer umount(mountDir) //nolint:errcheck
+
+	remoteFull := mountDir
+	if cfg.RemotePath != "" {
+		remoteFull = filepath.Join(mountDir, filepath.Clean("/"+cfg.RemotePath))
+		if cfg.Direction == "push" {
+			if err := os.MkdirAll(remoteFull, 0o755); err != nil {
+				return "", fmt.Errorf("create remote destination subdir: %w", err)
+			}
+		} else if info, err := os.Stat(remoteFull); err != nil {
+			return "", fmt.Errorf("stat remote source subdir: %w", err)
+		} else if !info.IsDir() {
+			return "", fmt.Errorf("remote source is not a directory: %s", remoteFull)
+		}
+	}
+
+	if cfg.Direction == "pull" {
+		if info, err := os.Stat(remoteFull); err != nil {
+			return "", fmt.Errorf("stat remote source: %w", err)
+		} else if !info.IsDir() {
+			return "", fmt.Errorf("remote source is not a directory: %s", remoteFull)
 		}
 	}
 
@@ -157,29 +651,27 @@ func Run(ctx context.Context, cfg Config, progress func(msg string, done, total 
 		return "", fmt.Errorf("create destination: %w", err)
 	}
 
-	switch cfg.Method {
-	case "cp":
-		count, err := cpWithHash(ctx, src, dst, progress)
-		if err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("cp backup complete — %d files verified", count), nil
-	case "rsync":
-		progress("Running rsync...", -1, -1)
-		var summary string
-		var err error
-		if cfg.Parallelism > 1 {
-			summary, err = rsyncBackupParallel(ctx, src, dst, cfg.Direction, cfg.Parallelism, progress)
-		} else {
-			summary, err = rsyncBackup(ctx, src, dst, cfg.Direction, progress)
-		}
-		if err != nil {
-			return "", err
-		}
-		return summary, nil
-	default:
-		return "", fmt.Errorf("unknown method: %s", cfg.Method)
+	if free, ferr := destFreeBytes(dst); ferr != nil {
+		log.Printf("backup: statfs %s: %v (skipping pre-flight)", dst, ferr)
+	} else if free < minDestFreeBytes {
+		return "", fmt.Errorf("destination %s has only %d MB free (< %d MB minimum); refusing to start", dst, free>>20, minDestFreeBytes>>20)
 	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	reasonCh := make(chan string, 1)
+	go watchDestFree(runCtx, dst, cancel, reasonCh)
+
+	count, err := cpWithHash(runCtx, src, dst, progress)
+	if err != nil {
+		select {
+		case reason := <-reasonCh:
+			return "", fmt.Errorf("%s: %w", reason, err)
+		default:
+			return "", err
+		}
+	}
+	return fmt.Sprintf("cp backup complete — %d files verified", count), nil
 }
 
 // mount mounts an NFS or SMB share at mountDir.
@@ -235,6 +727,59 @@ func umount(mountDir string) error {
 		return fmt.Errorf("umount: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// CleanupOrphanedMounts tears down any /tmp/smoothnas-backup-* mounts and
+// directories left behind by a previous tierd instance.
+//
+// rsyncMount and runCP use `defer umount` for the normal exit path, but
+// defers do not run when tierd is killed (SIGKILL, OOM, panic, or a
+// systemd stop that races shutdown). Each interrupted backup leaks an
+// NFS/SMB mount into the host namespace; over a series of restarts this
+// accumulates kernel NFS state and leaves stale mount entries in /proc/mounts.
+//
+// Called once at startup before any new backup can begin.
+func CleanupOrphanedMounts() {
+	matches, err := filepath.Glob("/tmp/smoothnas-backup-*")
+	if err != nil {
+		log.Printf("backup: cleanup glob: %v", err)
+		return
+	}
+	mounts, err := readMountedPaths()
+	if err != nil {
+		log.Printf("backup: cleanup read mounts: %v", err)
+		// Fall through — still attempt rmdir on the dirs we can see.
+	}
+	for _, dir := range matches {
+		if mounts[dir] {
+			if err := umount(dir); err != nil {
+				log.Printf("backup: cleanup umount %s: %v", dir, err)
+				continue
+			}
+			log.Printf("backup: cleanup unmounted orphan %s", dir)
+		}
+		if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
+			log.Printf("backup: cleanup remove %s: %v", dir, err)
+		}
+	}
+}
+
+// readMountedPaths returns the set of mount points currently in /proc/mounts.
+func readMountedPaths() (map[string]bool, error) {
+	f, err := os.Open("/proc/mounts")
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	out := make(map[string]bool)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 2 {
+			out[fields[1]] = true
+		}
+	}
+	return out, scanner.Err()
 }
 
 // cpWithHash recursively copies src into dst and verifies sha256 checksums.
@@ -383,7 +928,7 @@ func cpWithHash(ctx context.Context, src, dst string, progress func(msg string, 
 // copyAndVerify copies src to dst and verifies integrity with sha256.
 // The destination is opened O_RDWR so it can be read back after writing
 // using the same file descriptor — avoiding any re-lookup through the
-// FUSE dir cache, which can race with background DIR_UPDATE scans.
+// smoothfs dir cache, which can race with background DIR_UPDATE scans.
 // Returns the number of bytes written.
 func copyAndVerify(src, dst string) (int64, error) {
 	in, err := os.Open(src)
@@ -416,7 +961,7 @@ func copyAndVerify(src, dst string) (int64, error) {
 		return n, fmt.Errorf("sync: %w", err)
 	}
 
-	// Hash destination from the already-open fd to avoid a FUSE path
+	// Hash destination from the already-open fd to avoid a smoothfs path
 	// lookup. Seek back to the start and read from the same descriptor.
 	if _, err := out.Seek(0, io.SeekStart); err != nil {
 		return n, fmt.Errorf("seek destination: %w", err)
@@ -432,394 +977,14 @@ func copyAndVerify(src, dst string) (int64, error) {
 	return n, nil
 }
 
-// rsyncBackupParallel splits the source's top-level entries round-robin
-// across N concurrent rsync processes. Each rsync writes to the same dst
-// (with --relative the source path stays in the right place under dst).
-// Per-stream rates are aggregated into a single live progress value so
-// the UI sees a single "rsync: NN MB/s (parallel × N)" line.
-//
-// Source-side stalls on one stream don't block the others, so aggregate
-// throughput stays much smoother than a single rsync would.
-func rsyncBackupParallel(ctx context.Context, src, dst, direction string, n int, progress func(msg string, done, total int)) (string, error) {
-	if n < 2 {
-		return rsyncBackup(ctx, src, dst, direction, progress)
-	}
-	if !strings.HasSuffix(src, "/") {
-		src += "/"
-	}
-	if !strings.HasSuffix(dst, "/") {
-		dst += "/"
-	}
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return "", fmt.Errorf("read source dir for parallel split: %w", err)
-	}
-	if len(entries) == 0 {
-		return "rsync: nothing to copy", nil
-	}
-	// Round-robin partition by entry name.
-	buckets := make([][]string, n)
-	for i, e := range entries {
-		buckets[i%n] = append(buckets[i%n], e.Name())
-	}
-	// Aggregate rate state shared across streams.
-	var (
-		aggMu        sync.Mutex
-		streamRates  = make([]float64, n)
-		streamFinished = make([]bool, n)
-		lastEmit     time.Time
-	)
-	emitAggregate := func() {
-		aggMu.Lock()
-		var total float64
-		active := 0
-		for i, r := range streamRates {
-			total += r
-			if !streamFinished[i] {
-				active++
-			}
-		}
-		now := time.Now()
-		if now.Sub(lastEmit) >= 500*time.Millisecond {
-			lastEmit = now
-			aggMu.Unlock()
-			progress(fmt.Sprintf("rsync: %s (parallel × %d, %d active)",
-				formatRate(total), n, active), -1, -1)
-			return
-		}
-		aggMu.Unlock()
-	}
-
-	wg := sync.WaitGroup{}
-	errs := make(chan error, n)
-	summaries := make([]string, n)
-
-	streamCtx, cancelAll := context.WithCancel(ctx)
-	defer cancelAll()
-
-	for i := 0; i < n; i++ {
-		if len(buckets[i]) == 0 {
-			streamFinished[i] = true
-			continue
-		}
-		wg.Add(1)
-		go func(idx int, names []string) {
-			defer wg.Done()
-			defer func() {
-				aggMu.Lock()
-				streamFinished[idx] = true
-				streamRates[idx] = 0
-				aggMu.Unlock()
-				emitAggregate()
-			}()
-			perStream := func(msg string, _, _ int) {
-				if !strings.HasPrefix(msg, "rsync: ") {
-					return
-				}
-				rate := parseRateBytes(strings.TrimPrefix(msg, "rsync: "))
-				aggMu.Lock()
-				streamRates[idx] = rate
-				aggMu.Unlock()
-				emitAggregate()
-			}
-			summary, serr := rsyncBackupSubset(streamCtx, src, dst, direction, names, perStream)
-			summaries[idx] = summary
-			if serr != nil {
-				errs <- fmt.Errorf("stream %d: %w", idx, serr)
-				cancelAll()
-			}
-		}(i, buckets[i])
-	}
-	wg.Wait()
-	close(errs)
-	for e := range errs {
-		if e != nil {
-			return "", e
-		}
-	}
-	progress("rsync complete", -1, -1)
-	return fmt.Sprintf("parallel rsync: %d streams completed", n), nil
-}
-
-// rsyncBackupSubset is rsyncBackup that only transfers the named
-// top-level entries of src into dst. Same rate-tracking + watchdog as
-// rsyncBackup, but reports rate via the supplied progress callback so the
-// parallel coordinator can aggregate.
-func rsyncBackupSubset(ctx context.Context, src, dst, direction string, names []string, progress func(msg string, done, total int)) (string, error) {
-	// -W (--whole-file) skips the delta algorithm — pointless for new files
-	// (no dest to delta against) and the per-block hashing is heavy overhead
-	// for tiny files. --inplace writes straight to dest filename instead of
-	// the temp-then-rename dance, saving one fs op per file.
-	args := []string{"-aW", "--inplace", "--stats", "--no-human-readable", "--info=progress2", "--relative"}
-	// Use ./ root so --relative preserves only the names, not the full src path.
-	for _, name := range names {
-		args = append(args, src+"./"+name)
-	}
-	args = append(args, dst)
-
-	cmd := exec.CommandContext(ctx, "rsync", args...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", fmt.Errorf("rsync stdout pipe: %w", err)
-	}
-	var errBuf bytes.Buffer
-	cmd.Stderr = &errBuf
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("rsync start: %w", err)
-	}
-
-	state := &emitState{lastEmit: time.Now()}
-	wgCtx, cancelWG := context.WithCancel(ctx)
-	defer cancelWG()
-	go netRateWatchdog(wgCtx, direction, cmd.Process.Pid, state, progress)
-
-	type sample struct {
-		t     time.Time
-		bytes int64
-	}
-	const rateWindow = 3 * time.Second
-	var samples []sample
-	var statsBuf strings.Builder
-	scanner := bufio.NewScanner(stdout)
-	scanner.Split(splitCRLF)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		if b, _, ok := parseRsyncProgress(line); ok {
-			now := time.Now()
-			samples = append(samples, sample{t: now, bytes: b})
-			cutoff := now.Add(-rateWindow)
-			for len(samples) > 1 && samples[0].t.Before(cutoff) {
-				samples = samples[1:]
-			}
-			if len(samples) >= 2 {
-				first := samples[0]
-				last := samples[len(samples)-1]
-				elapsed := last.t.Sub(first.t).Seconds()
-				if elapsed > 0 && last.bytes >= first.bytes {
-					rate := float64(last.bytes-first.bytes) / elapsed
-					progress("rsync: "+formatRate(rate), -1, -1)
-					state.mu.Lock()
-					state.lastEmit = now
-					state.lastBytes = b
-					state.mu.Unlock()
-				}
-			}
-		} else {
-			statsBuf.WriteString(line)
-			statsBuf.WriteByte('\n')
-		}
-	}
-	if err := cmd.Wait(); err != nil {
-		return "", fmt.Errorf("rsync: %w: %s", err, strings.TrimSpace(errBuf.String()))
-	}
-	return parsersyncSummary(statsBuf.String()), nil
-}
-
-// parseRateBytes inverts formatRate — extracts a bytes/sec float from a
-// "12.3MB/s" / "456KB/s" / "789B/s" string. Returns 0 on parse failure
-// (which means the aggregator just stops counting that stream until its
-// next sample, which is fine).
-func parseRateBytes(s string) float64 {
-	s = strings.TrimSpace(s)
-	// Strip suffixes the watchdog may add, e.g. " (disk)".
-	if i := strings.Index(s, " "); i > 0 {
-		s = s[:i]
-	}
-	mult := 1.0
-	switch {
-	case strings.HasSuffix(s, "GB/s"):
-		mult = 1 << 30
-		s = strings.TrimSuffix(s, "GB/s")
-	case strings.HasSuffix(s, "MB/s"):
-		mult = 1 << 20
-		s = strings.TrimSuffix(s, "MB/s")
-	case strings.HasSuffix(s, "KB/s"):
-		mult = 1 << 10
-		s = strings.TrimSuffix(s, "KB/s")
-	case strings.HasSuffix(s, "B/s"):
-		s = strings.TrimSuffix(s, "B/s")
-	default:
-		return 0
-	}
-	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
-	if err != nil {
-		return 0
-	}
-	return v * mult
-}
-
-// rsyncBackup runs rsync from src/ to dst/ and returns a brief summary.
-// Uses --info=progress2 for byte-count progress and supplements it with a
-// disk-write watchdog so the displayed rate stays accurate even when
-// rsync goes quiet for several seconds mid-large-file (which it does).
-func rsyncBackup(ctx context.Context, src, dst, direction string, progress func(msg string, done, total int)) (string, error) {
-	// Ensure trailing slash so rsync copies contents, not the directory itself.
-	if !strings.HasSuffix(src, "/") {
-		src += "/"
-	}
-	if !strings.HasSuffix(dst, "/") {
-		dst += "/"
-	}
-
-	// -W + --inplace match the parallel-subset variant — see comment there
-	// for rationale (skip delta, skip temp-rename for small files).
-	cmd := exec.CommandContext(ctx, "rsync", "-aW", "--inplace", "--stats", "--no-human-readable",
-		"--info=progress2", src, dst)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", fmt.Errorf("rsync stdout pipe: %w", err)
-	}
-	var errBuf bytes.Buffer
-	cmd.Stderr = &errBuf
-
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("rsync start: %w", err)
-	}
-
-	// Shared progress state. The reader updates lastEmit on every emit;
-	// the watchdog reads it to decide if rsync has gone quiet, and writes
-	// to it when it emits a synthetic update.
-	state := &emitState{lastEmit: time.Now()}
-
-	wgCtx, cancelWG := context.WithCancel(ctx)
-	defer cancelWG()
-	go netRateWatchdog(wgCtx, direction, cmd.Process.Pid, state, progress)
-
-	// Stream stdout line by line. Compute instantaneous rate over a rolling
-	// 3-second window of byte-count samples so dirty-page writeback bursts
-	// (which can spike disk writes to 300+ MB/s between idle periods) don't
-	// show up as wild swings in the UI.
-	type sample struct {
-		t     time.Time
-		bytes int64
-	}
-	const rateWindow = 3 * time.Second
-	const rateMinSamples = 2
-	var samples []sample
-
-	var statsBuf strings.Builder
-	scanner := bufio.NewScanner(stdout)
-	scanner.Split(splitCRLF)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		if b, _, ok := parseRsyncProgress(line); ok {
-			now := time.Now()
-			samples = append(samples, sample{t: now, bytes: b})
-			cutoff := now.Add(-rateWindow)
-			for len(samples) > 1 && samples[0].t.Before(cutoff) {
-				samples = samples[1:]
-			}
-			if len(samples) >= rateMinSamples {
-				first := samples[0]
-				last := samples[len(samples)-1]
-				elapsed := last.t.Sub(first.t).Seconds()
-				if elapsed > 0 && last.bytes >= first.bytes {
-					rate := float64(last.bytes-first.bytes) / elapsed
-					progress("rsync: "+formatRate(rate), -1, -1)
-					state.mu.Lock()
-					state.lastEmit = now
-					state.lastBytes = b
-					state.mu.Unlock()
-				}
-			}
-		} else {
-			statsBuf.WriteString(line)
-			statsBuf.WriteByte('\n')
-		}
-	}
-
-	if err := cmd.Wait(); err != nil {
-		return "", fmt.Errorf("rsync: %w: %s", err, strings.TrimSpace(errBuf.String()))
-	}
-
-	summary := parsersyncSummary(statsBuf.String())
-	progress("rsync complete", -1, -1)
-	return summary, nil
-}
-
-// emitState carries the rsync stdout reader's "last emitted progress"
-// timestamp + bytes so the disk-rate watchdog can detect quiet periods
-// and supplement them with synthetic updates.
-type emitState struct {
-	mu        sync.Mutex
-	lastEmit  time.Time
-	lastBytes int64
-}
-
-// netRateWatchdog samples /proc/net/dev every 1s and emits the network
-// throughput as the user-facing rate. Network is the ground truth: in a
-// pull backup, all data comes in via net rx; in a push, all data goes out
-// via tx. rsync's --info=progress2 byte counter lags actual throughput
-// (it reports based on internal bookkeeping, not what the kernel is
-// actually moving), so we ignore it for rate display and rely on net.
-//
-// Emits unconditionally every tick — no rsync-quiet gate, no fall-through
-// from a rsync-emitted rate. The watchdog is the sole source of "how fast
-// is data flowing" for the UI.
-func netRateWatchdog(ctx context.Context, direction string, rsyncPID int, state *emitState, progress func(msg string, done, total int)) {
-	t := time.NewTicker(time.Second)
-	defer t.Stop()
-
-	prev, ok := readNetBytes(direction)
-	if !ok {
-		return
-	}
-	prevTime := time.Now()
-	loggedWchan := time.Time{}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-
-		now := time.Now()
-		cur, ok := readNetBytes(direction)
-		if !ok {
-			continue
-		}
-		elapsed := now.Sub(prevTime).Seconds()
-		var rate float64
-		if elapsed > 0 && cur >= prev {
-			rate = float64(cur-prev) / elapsed
-		}
-		prev = cur
-		prevTime = now
-
-		// Always emit the net-rate. This is the ground truth: rsync's
-		// own --info=progress2 byte counter lags actual transfer.
-		progress("rsync: "+formatRate(rate), -1, -1)
-		state.mu.Lock()
-		state.lastEmit = now
-		state.mu.Unlock()
-
-		// When the rate drops near zero, log rsync's wchan to tell us
-		// what it's blocked on. Throttle to once per 10s so we don't
-		// spam during sustained stalls.
-		if rate < 1<<20 && time.Since(loggedWchan) > 10*time.Second {
-			if w := readWchan(rsyncPID); w != "" {
-				log.Printf("backup: rate low (%s), rsync wchan=%s",
-					formatRate(rate), w)
-			}
-			loggedWchan = now
-		}
-	}
-}
-
 // readNetBytes returns the cumulative byte counter across all non-loopback
 // interfaces from /proc/net/dev. direction picks rx (pull) vs tx (push).
 //
 // /proc/net/dev format (after splitting "iface:" → strings.Fields):
-//   [0]=rx_bytes  [1]=rx_packets [2]=rx_errs [3]=rx_drop
-//   [4]=rx_fifo   [5]=rx_frame   [6]=rx_compressed [7]=rx_multicast
-//   [8]=tx_bytes  [9]=tx_packets ...
+//
+//	[0]=rx_bytes  [1]=rx_packets [2]=rx_errs [3]=rx_drop
+//	[4]=rx_fifo   [5]=rx_frame   [6]=rx_compressed [7]=rx_multicast
+//	[8]=tx_bytes  [9]=tx_packets ...
 func readNetBytes(direction string) (uint64, bool) {
 	f, err := os.Open("/proc/net/dev")
 	if err != nil {

@@ -7,6 +7,7 @@ It combines:
 - `mdadm` for RAID
 - `LVM` for named tier backing
 - `ZFS` for pool-based storage
+- `smoothfs` — the in-tree stacked kernel filesystem that presents tiered storage as a single mount and drives file placement across tiers
 - `SMART`, benchmarking, networking, and sharing controls
 - a custom Debian installer and a web UI that drives the whole system
 - repo-local `aimee` MCP support for engineering agents
@@ -58,7 +59,15 @@ SmoothNAS intentionally supports multiple storage paths because different worklo
 | --- | --- | --- |
 | `mdadm` arrays | simple RAID-backed storage | Arrays page + backend jobs |
 | named tiers | explicit fast/warm/cold storage design | Tiers page |
+| `smoothfs` pools | tiered storage presented as a single mount, with in-kernel heat-driven placement | Tiers page (per-tier backings) + smoothfs service |
 | `ZFS` | pool-based storage, datasets, snapshots | Pools and ZFS pages |
+
+The data-plane filesystem for tiered pools is `smoothfs`, a stacked kernel
+module (sources under `src/smoothfs/`). tierd is the control plane: it
+provisions per-tier backings with `mdadm`/`LVM`/`ZFS`, writes a systemd
+mount unit that mounts `-t smoothfs` over those lower tiers, and then
+drives planning, movement, and heat tracking through generic-netlink
+with the kernel module. There is no user-space filesystem daemon.
 
 ## User Guide
 
@@ -131,6 +140,7 @@ flowchart LR
     API --> MD["mdadm"]
     API --> LVM["LVM"]
     API --> ZFS["ZFS CLI"]
+    API --> Smoothfs["smoothfs kernel\n(generic netlink)"]
     API --> Net["network config"]
     API --> Share["SMB / NFS / iSCSI"]
     API --> Smart["smartctl + monitoring"]
@@ -141,8 +151,8 @@ flowchart TD
     Disks["Raw disks"] --> Arrays["mdadm arrays"]
     Arrays --> TierSlots["Named tier slots\nNVME / SSD / HDD"]
     TierSlots --> TierInstance["Tier instance\nexample: media"]
-    TierInstance --> LVM["per-tier LVM backing"]
-    LVM --> Mount["mounted path\n/mnt/<tier-name>"]
+    TierInstance --> LVM["per-tier LVM backing\n/mnt/.tierd-backing/<pool>/<tier>"]
+    LVM --> Smoothfs["smoothfs mount\n/mnt/<tier-name>"]
     Arrays --> ZFS["optional separate ZFS path"]
 ```
 
@@ -165,6 +175,7 @@ SmoothNAS is already usable and the active storage model is now the named-tier-i
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for subsystem and data-flow diagrams
 - [docs/OPERATIONS.md](docs/OPERATIONS.md) for build, install, release, and operational notes
 - [docs/AIMEE.md](docs/AIMEE.md) for agents consuming the repo-local `aimee` MCP server
+- [`RakuenSoftware/smoothfs`](https://github.com/RakuenSoftware/smoothfs) for the extracted smoothfs filesystem project consumed by SmoothNAS
 - [docs/proposals](docs/proposals) for the design history behind the storage model
 
 ## Development Snapshot
@@ -172,6 +183,11 @@ SmoothNAS is already usable and the active storage model is now the named-tier-i
 Backend:
 
 ```bash
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf
+export GIT_CONFIG_VALUE_0=https://github.com/
+export GOPRIVATE=github.com/RakuenSoftware/*
+export GONOSUMDB=github.com/RakuenSoftware/*
 cd tierd
 CGO_ENABLED=1 go test ./...
 ```

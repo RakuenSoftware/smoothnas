@@ -1,8 +1,6 @@
 # Proposal: Unified Tiering — 03: ZFS Raw Backend
 
 **Status:** Pending
-**Date:** 2026-04-09
-**Updated:** 2026-04-12
 **Supersedes:** zfs-backend (earlier draft)
 **Depends on:** base appliance (tierd service, web UI shell, disk inventory)
 **Part of:** unified-tiering-control-plane
@@ -169,7 +167,7 @@ Snapshot export files accumulate in the export directory. To prevent unmanaged d
 
 ### Scrub Scheduling
 
-Pools have an optional scrub schedule stored in the `pool_scrub_schedules` table (`pool_name`, `cron_expression`, `last_run_at`, `next_run_at`). The monitor goroutine checks pending scrubs on each poll cycle and triggers `zpool scrub` when due. The default schedule for newly created pools is weekly (Sunday 02:00 local time). Operators may change or remove the schedule per pool.
+Pools have an optional scrub schedule stored in the `pool_scrub_schedules` table (`pool_name`, `cron_expression`, `last_run_at`, `next_run_at`). The monitor goroutine checks pending scrubs on each poll cycle and triggers `zpool scrub` when due. The default schedule for newly created pools is weekly. Operators may change or remove the schedule per pool.
 
 ### Zvol Resize
 

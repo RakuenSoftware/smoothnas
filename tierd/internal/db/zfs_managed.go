@@ -14,7 +14,6 @@ type ZFSManagedTargetRow struct {
 	PoolName     string
 	DatasetName  string
 	DatasetPath  string
-	FUSEMode     string // passthrough | fallback | unknown
 }
 
 // ZFSManagedNamespaceRow is a row in the zfs_managed_namespaces table.
@@ -22,11 +21,7 @@ type ZFSManagedNamespaceRow struct {
 	NamespaceID            string
 	PoolName               string
 	MetaDataset            string
-	SocketPath             string
 	MountPath              string
-	DaemonPID              int    // 0 if not running
-	DaemonState            string // stopped | starting | running | crashed
-	FUSEMode               string // passthrough | fallback | unknown
 	SnapshotMode           string // none | coordinated-namespace
 	SnapshotPoolName       string // non-empty when coordinated-namespace
 	SnapshotQuiesceTimeout int    // seconds, default 30
@@ -50,14 +45,13 @@ type ZFSManagedNamespaceSnapshotRow struct {
 func (s *Store) UpsertZFSManagedTarget(row *ZFSManagedTargetRow) error {
 	_, err := s.db.Exec(`
 		INSERT INTO zfs_managed_targets
-			(tier_target_id, pool_name, dataset_name, dataset_path, fuse_mode)
-		VALUES (?, ?, ?, ?, ?)
+			(tier_target_id, pool_name, dataset_name, dataset_path)
+		VALUES (?, ?, ?, ?)
 		ON CONFLICT(tier_target_id) DO UPDATE SET
 			pool_name    = excluded.pool_name,
 			dataset_name = excluded.dataset_name,
-			dataset_path = excluded.dataset_path,
-			fuse_mode    = excluded.fuse_mode`,
-		row.TierTargetID, row.PoolName, row.DatasetName, row.DatasetPath, row.FUSEMode)
+			dataset_path = excluded.dataset_path`,
+		row.TierTargetID, row.PoolName, row.DatasetName, row.DatasetPath)
 	if err != nil {
 		return fmt.Errorf("upsert zfs managed target: %w", err)
 	}
@@ -68,9 +62,9 @@ func (s *Store) UpsertZFSManagedTarget(row *ZFSManagedTargetRow) error {
 func (s *Store) GetZFSManagedTarget(tierTargetID string) (*ZFSManagedTargetRow, error) {
 	var r ZFSManagedTargetRow
 	err := s.db.QueryRow(`
-		SELECT tier_target_id, pool_name, dataset_name, dataset_path, fuse_mode
+		SELECT tier_target_id, pool_name, dataset_name, dataset_path
 		FROM zfs_managed_targets WHERE tier_target_id = ?`, tierTargetID).
-		Scan(&r.TierTargetID, &r.PoolName, &r.DatasetName, &r.DatasetPath, &r.FUSEMode)
+		Scan(&r.TierTargetID, &r.PoolName, &r.DatasetName, &r.DatasetPath)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
@@ -83,7 +77,7 @@ func (s *Store) GetZFSManagedTarget(tierTargetID string) (*ZFSManagedTargetRow, 
 // ListZFSManagedTargets returns all ZFS managed target rows.
 func (s *Store) ListZFSManagedTargets() ([]ZFSManagedTargetRow, error) {
 	rows, err := s.db.Query(`
-		SELECT tier_target_id, pool_name, dataset_name, dataset_path, fuse_mode
+		SELECT tier_target_id, pool_name, dataset_name, dataset_path
 		FROM zfs_managed_targets
 		ORDER BY tier_target_id`)
 	if err != nil {
@@ -93,7 +87,7 @@ func (s *Store) ListZFSManagedTargets() ([]ZFSManagedTargetRow, error) {
 	var out []ZFSManagedTargetRow
 	for rows.Next() {
 		var r ZFSManagedTargetRow
-		if err := rows.Scan(&r.TierTargetID, &r.PoolName, &r.DatasetName, &r.DatasetPath, &r.FUSEMode); err != nil {
+		if err := rows.Scan(&r.TierTargetID, &r.PoolName, &r.DatasetName, &r.DatasetPath); err != nil {
 			return nil, fmt.Errorf("scan zfs managed target: %w", err)
 		}
 		out = append(out, r)
@@ -109,48 +103,27 @@ func (s *Store) DeleteZFSManagedTarget(tierTargetID string) error {
 	return nil
 }
 
-// UpdateZFSManagedTargetFUSEMode updates the FUSE mode for a managed target.
-func (s *Store) UpdateZFSManagedTargetFUSEMode(tierTargetID, fuseMode string) error {
-	_, err := s.db.Exec(`
-		UPDATE zfs_managed_targets SET fuse_mode = ? WHERE tier_target_id = ?`,
-		fuseMode, tierTargetID)
-	if err != nil {
-		return fmt.Errorf("update zfs managed target fuse mode: %w", err)
-	}
-	return nil
-}
-
 // ---- zfs_managed_namespaces -------------------------------------------------
 
 // UpsertZFSManagedNamespace inserts or replaces a ZFS managed namespace row.
 func (s *Store) UpsertZFSManagedNamespace(row *ZFSManagedNamespaceRow) error {
-	var pid sql.NullInt64
-	if row.DaemonPID > 0 {
-		pid = sql.NullInt64{Int64: int64(row.DaemonPID), Valid: true}
-	}
 	quiesceTimeout := row.SnapshotQuiesceTimeout
 	if quiesceTimeout == 0 {
 		quiesceTimeout = 30
 	}
 	_, err := s.db.Exec(`
 		INSERT INTO zfs_managed_namespaces
-			(namespace_id, pool_name, meta_dataset, socket_path, mount_path,
-			 daemon_pid, daemon_state, fuse_mode,
+			(namespace_id, pool_name, meta_dataset, mount_path,
 			 snapshot_mode, snapshot_pool_name, snapshot_quiesce_timeout_seconds)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(namespace_id) DO UPDATE SET
 			pool_name                        = excluded.pool_name,
 			meta_dataset                     = excluded.meta_dataset,
-			socket_path                      = excluded.socket_path,
 			mount_path                       = excluded.mount_path,
-			daemon_pid                       = excluded.daemon_pid,
-			daemon_state                     = excluded.daemon_state,
-			fuse_mode                        = excluded.fuse_mode,
 			snapshot_mode                    = excluded.snapshot_mode,
 			snapshot_pool_name               = excluded.snapshot_pool_name,
 			snapshot_quiesce_timeout_seconds = excluded.snapshot_quiesce_timeout_seconds`,
-		row.NamespaceID, row.PoolName, row.MetaDataset, row.SocketPath, row.MountPath,
-		pid, row.DaemonState, row.FUSEMode,
+		row.NamespaceID, row.PoolName, row.MetaDataset, row.MountPath,
 		row.SnapshotMode, row.SnapshotPoolName, quiesceTimeout)
 	if err != nil {
 		return fmt.Errorf("upsert zfs managed namespace: %w", err)
@@ -161,14 +134,11 @@ func (s *Store) UpsertZFSManagedNamespace(row *ZFSManagedNamespaceRow) error {
 // GetZFSManagedNamespace returns the ZFS managed namespace row for the given namespace_id.
 func (s *Store) GetZFSManagedNamespace(namespaceID string) (*ZFSManagedNamespaceRow, error) {
 	var r ZFSManagedNamespaceRow
-	var pid sql.NullInt64
 	err := s.db.QueryRow(`
-		SELECT namespace_id, pool_name, meta_dataset, socket_path, mount_path,
-		       daemon_pid, daemon_state, fuse_mode,
+		SELECT namespace_id, pool_name, meta_dataset, mount_path,
 		       snapshot_mode, snapshot_pool_name, snapshot_quiesce_timeout_seconds
 		FROM zfs_managed_namespaces WHERE namespace_id = ?`, namespaceID).
-		Scan(&r.NamespaceID, &r.PoolName, &r.MetaDataset, &r.SocketPath, &r.MountPath,
-			&pid, &r.DaemonState, &r.FUSEMode,
+		Scan(&r.NamespaceID, &r.PoolName, &r.MetaDataset, &r.MountPath,
 			&r.SnapshotMode, &r.SnapshotPoolName, &r.SnapshotQuiesceTimeout)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
@@ -176,17 +146,13 @@ func (s *Store) GetZFSManagedNamespace(namespaceID string) (*ZFSManagedNamespace
 	if err != nil {
 		return nil, fmt.Errorf("get zfs managed namespace %q: %w", namespaceID, err)
 	}
-	if pid.Valid {
-		r.DaemonPID = int(pid.Int64)
-	}
 	return &r, nil
 }
 
 // ListZFSManagedNamespaces returns all ZFS managed namespace rows.
 func (s *Store) ListZFSManagedNamespaces() ([]ZFSManagedNamespaceRow, error) {
 	rows, err := s.db.Query(`
-		SELECT namespace_id, pool_name, meta_dataset, socket_path, mount_path,
-		       daemon_pid, daemon_state, fuse_mode,
+		SELECT namespace_id, pool_name, meta_dataset, mount_path,
 		       snapshot_mode, snapshot_pool_name, snapshot_quiesce_timeout_seconds
 		FROM zfs_managed_namespaces
 		ORDER BY namespace_id`)
@@ -197,14 +163,9 @@ func (s *Store) ListZFSManagedNamespaces() ([]ZFSManagedNamespaceRow, error) {
 	var out []ZFSManagedNamespaceRow
 	for rows.Next() {
 		var r ZFSManagedNamespaceRow
-		var pid sql.NullInt64
-		if err := rows.Scan(&r.NamespaceID, &r.PoolName, &r.MetaDataset, &r.SocketPath, &r.MountPath,
-			&pid, &r.DaemonState, &r.FUSEMode,
+		if err := rows.Scan(&r.NamespaceID, &r.PoolName, &r.MetaDataset, &r.MountPath,
 			&r.SnapshotMode, &r.SnapshotPoolName, &r.SnapshotQuiesceTimeout); err != nil {
 			return nil, fmt.Errorf("scan zfs managed namespace: %w", err)
-		}
-		if pid.Valid {
-			r.DaemonPID = int(pid.Int64)
 		}
 		out = append(out, r)
 	}
@@ -231,33 +192,6 @@ func (s *Store) DeleteZFSManagedNamespace(namespaceID string) error {
 	return nil
 }
 
-// SetZFSManagedNamespaceDaemonState updates the daemon state and PID for a namespace.
-func (s *Store) SetZFSManagedNamespaceDaemonState(namespaceID, daemonState string, pid int) error {
-	var sqlPID sql.NullInt64
-	if pid > 0 {
-		sqlPID = sql.NullInt64{Int64: int64(pid), Valid: true}
-	}
-	_, err := s.db.Exec(`
-		UPDATE zfs_managed_namespaces
-		SET daemon_state = ?, daemon_pid = ?
-		WHERE namespace_id = ?`,
-		daemonState, sqlPID, namespaceID)
-	if err != nil {
-		return fmt.Errorf("set zfs managed namespace daemon state: %w", err)
-	}
-	return nil
-}
-
-// SetZFSManagedNamespaceFUSEMode updates the FUSE mode for a namespace.
-func (s *Store) SetZFSManagedNamespaceFUSEMode(namespaceID, fuseMode string) error {
-	_, err := s.db.Exec(`
-		UPDATE zfs_managed_namespaces SET fuse_mode = ? WHERE namespace_id = ?`,
-		fuseMode, namespaceID)
-	if err != nil {
-		return fmt.Errorf("set zfs managed namespace fuse mode: %w", err)
-	}
-	return nil
-}
 
 // ---- zfs_movement_log ---------------------------------------------------
 

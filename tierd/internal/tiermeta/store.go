@@ -780,7 +780,7 @@ func (s *Store) UpsertTarget(poolName, slotName string, target *TierTargetMeta) 
 }
 
 // UpsertNamespace sets the NamespaceMeta for a pool and persists.
-// Call this after the FUSE namespace daemon has been started.
+// Call this after the namespace daemon has been started.
 func (s *Store) UpsertNamespace(poolName string, ns *NamespaceMeta) error {
 	if err := ValidatePoolName(poolName); err != nil {
 		return err

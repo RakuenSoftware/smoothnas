@@ -13,11 +13,11 @@ import (
 
 // Target represents an iSCSI target.
 type Target struct {
-	IQN       string `json:"iqn"`
-	LUN       string `json:"lun"`       // block device path (e.g. /dev/zvol/tank/lun0)
-	CHAPUser  string `json:"chap_user"`
-	CHAPPass  string `json:"-"`         // never exposed in API responses
-	HasCHAP   bool   `json:"has_chap"`
+	IQN      string `json:"iqn"`
+	LUN      string `json:"lun"` // block device path (e.g. /dev/zvol/tank/lun0)
+	CHAPUser string `json:"chap_user"`
+	CHAPPass string `json:"-"` // never exposed in API responses
+	HasCHAP  bool   `json:"has_chap"`
 }
 
 // ACL represents an initiator access control entry.
@@ -135,6 +135,20 @@ func SetCHAP(iqn, username, password string) error {
 	cmd.Run() // Best effort.
 
 	return saveConfig()
+}
+
+// QuiesceTarget disables the target portal group for iqn. LIO rejects new
+// sessions and tears down target service for the TPG while the backing file
+// remains pinned; callers are responsible for checking the target is a
+// file-backed LUN before exposing this as an active-LUN movement step.
+func QuiesceTarget(iqn string) error {
+	return setTargetPortalGroupState(iqn, false)
+}
+
+// ResumeTarget re-enables the target portal group for iqn after operator
+// maintenance has completed.
+func ResumeTarget(iqn string) error {
+	return setTargetPortalGroupState(iqn, true)
 }
 
 // AddACL adds an initiator ACL to a target.
@@ -263,6 +277,19 @@ func BuildCreateTargetArgs(iqn, blockDevice string) (backstoreArgs, targetArgs, 
 	return backstoreArgs, targetArgs, lunArgs, nil
 }
 
+// BuildSetTargetPortalGroupStateArgs returns the targetcli command needed to
+// enable or disable a target portal group.
+func BuildSetTargetPortalGroupStateArgs(iqn string, enabled bool) ([]string, error) {
+	if err := ValidateIQN(iqn); err != nil {
+		return nil, err
+	}
+	action := "disable"
+	if enabled {
+		action = "enable"
+	}
+	return []string{fmt.Sprintf("/iscsi/%s/tpg1", iqn), action}, nil
+}
+
 // IQNToBackstoreName converts an IQN to a backstore name. Exported for testing.
 func IQNToBackstoreName(iqn string) string {
 	return iqnToBackstoreName(iqn)
@@ -277,6 +304,19 @@ func iqnToBackstoreName(iqn string) string {
 		name = name[:64]
 	}
 	return name
+}
+
+func setTargetPortalGroupState(iqn string, enabled bool) error {
+	args, err := BuildSetTargetPortalGroupStateArgs(iqn, enabled)
+	if err != nil {
+		return err
+	}
+	action := args[len(args)-1]
+	cmd := exec.Command("targetcli", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s target portal group: %s: %w", action, strings.TrimSpace(string(out)), err)
+	}
+	return saveConfig()
 }
 
 func saveConfig() error {

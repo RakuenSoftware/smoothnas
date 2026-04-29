@@ -10,14 +10,11 @@ type MdadmManagedTargetRow struct {
 	MountPath    string
 }
 
-// MdadmManagedNamespaceRow tracks the FUSE daemon for an mdadm namespace.
+// MdadmManagedNamespaceRow records the mount point for an mdadm namespace.
 type MdadmManagedNamespaceRow struct {
 	NamespaceID string
 	PoolName    string
-	SocketPath  string
 	MountPath   string
-	DaemonPID   int
-	DaemonState string
 }
 
 // MdadmMovementLogRow tracks in-flight file movements for crash recovery.
@@ -103,26 +100,21 @@ func (s *Store) DeleteMdadmManagedTarget(tierTargetID string) error {
 // UpsertMdadmManagedNamespace inserts or updates an mdadm managed namespace.
 func (s *Store) UpsertMdadmManagedNamespace(row *MdadmManagedNamespaceRow) error {
 	_, err := s.db.Exec(`INSERT INTO mdadm_managed_namespaces
-		(namespace_id, pool_name, socket_path, mount_path, daemon_pid, daemon_state)
-		VALUES (?, ?, ?, ?, ?, ?)
+		(namespace_id, pool_name, mount_path)
+		VALUES (?, ?, ?)
 		ON CONFLICT (namespace_id) DO UPDATE SET
-			pool_name    = excluded.pool_name,
-			socket_path  = excluded.socket_path,
-			mount_path   = excluded.mount_path,
-			daemon_pid   = excluded.daemon_pid,
-			daemon_state = excluded.daemon_state`,
-		row.NamespaceID, row.PoolName, row.SocketPath,
-		row.MountPath, row.DaemonPID, row.DaemonState)
+			pool_name  = excluded.pool_name,
+			mount_path = excluded.mount_path`,
+		row.NamespaceID, row.PoolName, row.MountPath)
 	return err
 }
 
 // GetMdadmManagedNamespace returns the mdadm managed namespace.
 func (s *Store) GetMdadmManagedNamespace(namespaceID string) (*MdadmManagedNamespaceRow, error) {
-	row := s.db.QueryRow(`SELECT namespace_id, pool_name, socket_path, mount_path, daemon_pid, daemon_state
+	row := s.db.QueryRow(`SELECT namespace_id, pool_name, mount_path
 		FROM mdadm_managed_namespaces WHERE namespace_id = ?`, namespaceID)
 	var r MdadmManagedNamespaceRow
-	if err := row.Scan(&r.NamespaceID, &r.PoolName, &r.SocketPath,
-		&r.MountPath, &r.DaemonPID, &r.DaemonState); err != nil {
+	if err := row.Scan(&r.NamespaceID, &r.PoolName, &r.MountPath); err != nil {
 		return nil, err
 	}
 	return &r, nil
@@ -130,11 +122,10 @@ func (s *Store) GetMdadmManagedNamespace(namespaceID string) (*MdadmManagedNames
 
 // GetMdadmManagedNamespaceByPool returns the namespace for a pool name.
 func (s *Store) GetMdadmManagedNamespaceByPool(poolName string) (*MdadmManagedNamespaceRow, error) {
-	row := s.db.QueryRow(`SELECT namespace_id, pool_name, socket_path, mount_path, daemon_pid, daemon_state
+	row := s.db.QueryRow(`SELECT namespace_id, pool_name, mount_path
 		FROM mdadm_managed_namespaces WHERE pool_name = ?`, poolName)
 	var r MdadmManagedNamespaceRow
-	if err := row.Scan(&r.NamespaceID, &r.PoolName, &r.SocketPath,
-		&r.MountPath, &r.DaemonPID, &r.DaemonState); err != nil {
+	if err := row.Scan(&r.NamespaceID, &r.PoolName, &r.MountPath); err != nil {
 		return nil, err
 	}
 	return &r, nil
@@ -142,7 +133,7 @@ func (s *Store) GetMdadmManagedNamespaceByPool(poolName string) (*MdadmManagedNa
 
 // ListMdadmManagedNamespaces returns all mdadm managed namespaces.
 func (s *Store) ListMdadmManagedNamespaces() ([]MdadmManagedNamespaceRow, error) {
-	rows, err := s.db.Query(`SELECT namespace_id, pool_name, socket_path, mount_path, daemon_pid, daemon_state
+	rows, err := s.db.Query(`SELECT namespace_id, pool_name, mount_path
 		FROM mdadm_managed_namespaces ORDER BY pool_name`)
 	if err != nil {
 		return nil, err
@@ -151,8 +142,7 @@ func (s *Store) ListMdadmManagedNamespaces() ([]MdadmManagedNamespaceRow, error)
 	var out []MdadmManagedNamespaceRow
 	for rows.Next() {
 		var r MdadmManagedNamespaceRow
-		if err := rows.Scan(&r.NamespaceID, &r.PoolName, &r.SocketPath,
-			&r.MountPath, &r.DaemonPID, &r.DaemonState); err != nil {
+		if err := rows.Scan(&r.NamespaceID, &r.PoolName, &r.MountPath); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -163,12 +153,5 @@ func (s *Store) ListMdadmManagedNamespaces() ([]MdadmManagedNamespaceRow, error)
 // DeleteMdadmManagedNamespace removes an mdadm managed namespace.
 func (s *Store) DeleteMdadmManagedNamespace(namespaceID string) error {
 	_, err := s.db.Exec(`DELETE FROM mdadm_managed_namespaces WHERE namespace_id = ?`, namespaceID)
-	return err
-}
-
-// SetMdadmManagedNamespaceDaemonState updates daemon PID and state.
-func (s *Store) SetMdadmManagedNamespaceDaemonState(namespaceID, state string, pid int) error {
-	_, err := s.db.Exec(`UPDATE mdadm_managed_namespaces SET daemon_state = ?, daemon_pid = ? WHERE namespace_id = ?`,
-		state, pid, namespaceID)
 	return err
 }

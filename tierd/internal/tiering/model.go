@@ -26,17 +26,20 @@ type TierTarget struct {
 }
 
 // TargetCapabilities describes the operations a tier target supports.
+//
+// JSON tags are snake_case so that the serialised form used in
+// `tier_targets.capabilities_json` round-trips cleanly with the
+// snake_case constants backends emit.
 type TargetCapabilities struct {
-	MovementGranularity string // region | file | object
-	PinScope            string // volume | namespace | object | none
-	SupportsOnlineMove  bool
-	SupportsRecall      bool
-	RecallMode          string // none | synchronous | asynchronous
-	SnapshotMode        string // none | backend-native | coordinated-namespace
-	FUSEMode            string // passthrough | fallback | n/a
-	SupportsChecksums   bool
-	SupportsCompression bool
-	SupportsWriteBias   bool
+	MovementGranularity string `json:"movement_granularity"` // region | file | object
+	PinScope            string `json:"pin_scope"`            // volume | namespace | object | none
+	SupportsOnlineMove  bool   `json:"supports_online_move"`
+	SupportsRecall      bool   `json:"supports_recall"`
+	RecallMode          string `json:"recall_mode"`   // none | synchronous | asynchronous
+	SnapshotMode        string `json:"snapshot_mode"` // none | backend-native | coordinated-namespace
+	SupportsChecksums   bool   `json:"supports_checksums"`
+	SupportsCompression bool   `json:"supports_compression"`
+	SupportsWriteBias   bool   `json:"supports_write_bias"`
 }
 
 // ManagedNamespace is a namespace (volume or filespace) under control-plane management.

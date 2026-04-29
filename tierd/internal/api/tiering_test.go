@@ -406,7 +406,7 @@ func TestTieringDegradedStatesListAndContent(t *testing.T) {
 func TestTieringTargetCapabilitiesInResponse(t *testing.T) {
 	h := newTieringTestHandler(t)
 
-	capsJSON := `{"MovementGranularity":"file","PinScope":"namespace","SupportsRecall":true,"RecallMode":"asynchronous","SnapshotMode":"none","FUSEMode":"passthrough"}`
+	capsJSON := `{"movement_granularity":"file","pin_scope":"namespace","supports_recall":true,"recall_mode":"asynchronous","snapshot_mode":"none"}`
 	tgt := &db.TierTargetRow{
 		Name:             "zfs-t1",
 		PlacementDomain:  "zfsdom",
@@ -434,9 +434,6 @@ func TestTieringTargetCapabilitiesInResponse(t *testing.T) {
 	caps := list[0].Capabilities
 	if caps.MovementGranularity != "file" {
 		t.Errorf("movement_granularity = %q, want file", caps.MovementGranularity)
-	}
-	if caps.FUSEMode != "passthrough" {
-		t.Errorf("fuse_mode = %q, want passthrough", caps.FUSEMode)
 	}
 	if !caps.SupportsRecall {
 		t.Error("supports_recall must be true")

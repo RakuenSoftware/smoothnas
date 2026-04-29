@@ -1,0 +1,9 @@
+tierd (0.1.0-1) unstable; urgency=medium
+
+  * Initial Debian package for tierd + tierd-cli. Ships the Go
+    daemon at /usr/sbin/tierd, the operator CLI at
+    /usr/bin/tierd-cli, and a systemd unit at
+    /lib/systemd/system/tierd.service. State dir /var/lib/tierd/
+    is created + owned by root in postinst.
+
+ -- SmoothNAS / RakuenSoftware <support@smoothnas.com>  Sun, 19 Apr 2026 09:45:00 +0000

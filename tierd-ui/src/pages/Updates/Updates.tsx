@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useI18n } from '@rakuensoftware/smoothgui';
 import { api } from '../../api/api';
 import { extractError } from '../../utils/errors';
 import Spinner from '../../components/Spinner/Spinner';
@@ -9,6 +10,7 @@ let lastUpdateFetchMs = 0;
 const UPDATE_TTL_MS = 60_000;
 
 export default function Updates() {
+  const { t } = useI18n();
   const [loadingChannel, setLoadingChannel] = useState(true);
   const [updateInfo, setUpdateInfo] = useState<any>(null);
   const [updateChannel, setUpdateChannel] = useState('stable');
@@ -28,6 +30,7 @@ export default function Updates() {
   useEffect(() => {
     loadData();
     return () => { clearIntervalSafe(progressTimerRef); clearIntervalSafe(reconnectTimerRef); clearIntervalSafe(pkgTimerRef); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function clearIntervalSafe(ref: React.MutableRefObject<ReturnType<typeof setInterval> | null>) {
@@ -72,7 +75,7 @@ export default function Updates() {
       setUpdateInfo(info);
       setUpdateChecking(false);
     }).catch((e: any) => {
-      if (!cachedUpdateInfo) setUpdateError(extractError(e, 'Failed to check for updates'));
+      if (!cachedUpdateInfo) setUpdateError(extractError(e, t('updates.error.check')));
       setUpdateChecking(false);
     });
   }
@@ -81,45 +84,45 @@ export default function Updates() {
     api.setUpdateChannel(channel).then(() => {
       setUpdateChannel(channel);
       checkForUpdates(true);
-    }).catch(e => setUpdateError(extractError(e, 'Failed to set update channel')));
+    }).catch(e => setUpdateError(extractError(e, t('updates.error.setChannel'))));
   }
 
   function channelLabel(channel: string): string {
-    if (channel === 'stable') return 'Main';
-    if (channel === 'testing') return 'Testing';
-    if (channel === 'jbailes') return 'JBailes';
+    if (channel === 'stable') return t('updates.channel.main');
+    if (channel === 'testing') return t('updates.channel.testing');
+    if (channel === 'jbailes') return t('updates.channel.jbailes');
     return channel;
   }
 
   function applyUpdate() {
     if (!updateInfo?.latest) return;
-    if (!confirm(`Update to v${updateInfo.latest.version}? The system will restart briefly.`)) return;
+    if (!confirm(t('updates.confirm.apply', { version: updateInfo.latest.version }))) return;
     setUpdateApplying(true);
     setUpdateError('');
-    setUpdateStage('Starting update...');
+    setUpdateStage(t('updates.stage.starting'));
     sawProgressRef.current = false;
     api.applyUpdate().then(() => pollProgress())
-      .catch(e => { setUpdateError(extractError(e, 'Failed to start update')); setUpdateApplying(false); });
+      .catch(e => { setUpdateError(extractError(e, t('updates.error.startUpdate'))); setUpdateApplying(false); });
   }
 
   function uploadManualUpdate(event: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files || []);
-    if (files.length !== 3) { setUpdateError('Please select all 3 files: manifest.json, tierd, and tierd-ui.tar.gz'); return; }
+    if (files.length !== 3) { setUpdateError(t('updates.validate.selectAll')); return; }
     const manifest = files.find(f => f.name === 'manifest.json');
     const binary = files.find(f => f.name === 'tierd');
     const ui = files.find(f => f.name === 'tierd-ui.tar.gz');
-    if (!manifest || !binary || !ui) { setUpdateError('Expected files: manifest.json, tierd, and tierd-ui.tar.gz'); return; }
-    if (!confirm('Apply manual update from uploaded files? The system will restart briefly.')) { event.target.value = ''; return; }
+    if (!manifest || !binary || !ui) { setUpdateError(t('updates.validate.expectedFiles')); return; }
+    if (!confirm(t('updates.confirm.manual'))) { event.target.value = ''; return; }
     const form = new FormData();
     form.append('manifest', manifest);
     form.append('tierd', binary);
     form.append('ui', ui);
     setUpdateApplying(true);
     setUpdateError('');
-    setUpdateStage('Uploading...');
+    setUpdateStage(t('updates.stage.uploading'));
     sawProgressRef.current = false;
     api.uploadUpdate(form).then(() => pollProgress())
-      .catch(e => { setUpdateError(extractError(e, 'Failed to upload update')); setUpdateApplying(false); event.target.value = ''; });
+      .catch(e => { setUpdateError(extractError(e, t('updates.error.upload'))); setUpdateApplying(false); event.target.value = ''; });
   }
 
   function pollProgress() {
@@ -132,15 +135,15 @@ export default function Updates() {
           clearIntervalSafe(progressTimerRef);
         } else if (p.stage === 'restarting') {
           clearIntervalSafe(progressTimerRef);
-          setUpdateStage('Restarting service...');
+          setUpdateStage(t('updates.stage.restarting'));
           waitForReconnect();
         } else if (p.stage === 'idle') {
           if (sawProgressRef.current) {
             clearIntervalSafe(progressTimerRef);
-            setUpdateStage('Restarting service...');
+            setUpdateStage(t('updates.stage.restarting'));
             waitForReconnect();
           } else {
-            setUpdateError('Update process stopped unexpectedly');
+            setUpdateError(t('updates.error.stoppedUnexpectedly'));
             setUpdateApplying(false);
             clearIntervalSafe(progressTimerRef);
           }
@@ -149,7 +152,7 @@ export default function Updates() {
         }
       }).catch(() => {
         clearIntervalSafe(progressTimerRef);
-        setUpdateStage('Reconnecting...');
+        setUpdateStage(t('updates.stage.reconnecting'));
         waitForReconnect();
       });
     }, 2000);
@@ -160,19 +163,19 @@ export default function Updates() {
       api.getHealth().then(() => {
         clearIntervalSafe(reconnectTimerRef);
         setUpdateApplying(false);
-        setSuccess('Update complete!');
+        setSuccess(t('updates.toast.complete'));
         setTimeout(() => window.location.reload(), 500);
       }).catch(() => {});
     }, 3000);
   }
 
   function applyPackageUpdates() {
-    if (!confirm('Update system packages? This may take a few minutes.')) return;
+    if (!confirm(t('updates.confirm.packages'))) return;
     setPkgApplying(true);
     setPkgError('');
-    setPkgStage('Starting...');
+    setPkgStage(t('updates.pkg.starting'));
     api.applyDebianPackages().then(() => pollPackageProgress())
-      .catch(e => { setPkgError(extractError(e, 'Failed to start package update')); setPkgApplying(false); });
+      .catch(e => { setPkgError(extractError(e, t('updates.error.startPackages'))); setPkgApplying(false); });
   }
 
   function pollPackageProgress() {
@@ -185,33 +188,33 @@ export default function Updates() {
           clearIntervalSafe(pkgTimerRef);
         } else if (p.stage === 'complete') {
           setPkgApplying(false);
-          setSuccess('Package updates complete');
+          setSuccess(t('updates.toast.packagesComplete'));
           clearIntervalSafe(pkgTimerRef);
         } else if (p.stage === 'failed') {
           setPkgApplying(false);
           clearIntervalSafe(pkgTimerRef);
         }
-      }).catch(e => { setPkgError(extractError(e, 'Failed to get progress')); setPkgApplying(false); clearIntervalSafe(pkgTimerRef); });
+      }).catch(e => { setPkgError(extractError(e, t('updates.error.getProgress'))); setPkgApplying(false); clearIntervalSafe(pkgTimerRef); });
     }, 2000);
   }
 
   return (
     <div className="page">
       <div className="page-header">
-        <h1>Updates</h1>
-        <p className="subtitle">System and package updates</p>
-        <button className="refresh-btn" onClick={loadData}>Refresh</button>
+        <h1>{t('updates.title')}</h1>
+        <p className="subtitle">{t('updates.subtitle')}</p>
+        <button className="refresh-btn" onClick={loadData}>{t('common.refresh')}</button>
       </div>
 
       {success && <div className="success">{success}</div>}
 
       <div className="section">
-        <h2>SmoothNAS Updates</h2>
+        <h2>{t('updates.section.smoothnas')}</h2>
         <Spinner loading={loadingChannel} />
         {!loadingChannel && (
           <>
             <div style={{ marginBottom: 16 }}>
-              <div style={{ fontSize: 13, color: '#666', marginBottom: 8 }}>Update Channel</div>
+              <div style={{ fontSize: 13, color: '#666', marginBottom: 8 }}>{t('updates.label.channel')}</div>
               <div style={{ display: 'flex', gap: 8 }}>
                 {(['stable', 'testing', ...(updateChannel === 'jbailes' || !!updateInfo?.jbailes ? ['jbailes'] : [])] as string[]).map(channel => (
                   <button key={channel} className={`btn ${updateChannel === channel ? 'primary' : 'secondary'}`} onClick={() => setChannel(channel)}>
@@ -230,31 +233,31 @@ export default function Updates() {
                 <div style={{ background: '#f5f5f5', borderRadius: 8, padding: 16 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
                     <span style={{ fontSize: 13, color: '#666' }}>
-                      Running: <strong>v{updateInfo.current_version}</strong>
+                      {t('updates.label.running')} <strong>v{updateInfo.current_version}</strong>
                     </span>
                     {chInfo && (
                       <span style={{ fontSize: 13, color: '#666' }}>
-                        Latest ({channelLabel(updateChannel)}): <strong>v{chInfo.version}</strong>
+                        {t('updates.label.latest', { channel: channelLabel(updateChannel) })} <strong>v{chInfo.version}</strong>
                       </span>
                     )}
-                    {updateChecking && <span style={{ fontSize: 12, color: '#aaa' }}>checking…</span>}
+                    {updateChecking && <span style={{ fontSize: 12, color: '#aaa' }}>{t('updates.label.checking')}</span>}
                   </div>
                   {available ? (
                     <>
                       <p style={{ marginBottom: 8 }}>
-                        Update available: v{updateInfo.current_version} → <strong>v{updateInfo.latest?.version}</strong>
+                        {t('updates.label.availablePrefix')} v{updateInfo.current_version} → <strong>v{updateInfo.latest?.version}</strong>
                       </p>
                       {updateInfo.latest?.body && (
                         <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>{updateInfo.latest.body}</p>
                       )}
                       <button className="btn primary" onClick={applyUpdate} disabled={updateApplying}>
-                        {updateApplying ? updateStage || 'Updating…' : 'Apply Update'}
+                        {updateApplying ? updateStage || t('updates.button.updating') : t('updates.button.applyUpdate')}
                       </button>
                     </>
                   ) : responseMatchesChannel ? (
-                    <p style={{ color: '#16a34a', margin: 0 }}>Up to date.</p>
+                    <p style={{ color: '#16a34a', margin: 0 }}>{t('updates.label.upToDate')}</p>
                   ) : (
-                    <p style={{ fontSize: 13, color: '#aaa', margin: 0 }}>Checking channel…</p>
+                    <p style={{ fontSize: 13, color: '#aaa', margin: 0 }}>{t('updates.label.checkingChannel')}</p>
                   )}
                 </div>
               );
@@ -262,8 +265,8 @@ export default function Updates() {
             {!updateInfo && updateChecking && <Spinner loading />}
 
             <div style={{ marginTop: 16 }}>
-              <div style={{ fontSize: 13, color: '#666', marginBottom: 8 }}>Manual Update</div>
-              <p style={{ fontSize: 13, color: '#888', marginBottom: 8 }}>Select manifest.json, tierd, and tierd-ui.tar.gz together.</p>
+              <div style={{ fontSize: 13, color: '#666', marginBottom: 8 }}>{t('updates.label.manualUpdate')}</div>
+              <p style={{ fontSize: 13, color: '#888', marginBottom: 8 }}>{t('updates.label.manualHint')}</p>
               <input type="file" multiple accept=".json,.gz,*" onChange={uploadManualUpdate} disabled={updateApplying} />
             </div>
           </>
@@ -271,11 +274,11 @@ export default function Updates() {
       </div>
 
       <div className="section">
-        <h2>Package Updates</h2>
-        <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>Security updates apply automatically. Use this to apply other available package updates.</p>
+        <h2>{t('updates.section.packages')}</h2>
+        <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>{t('updates.label.pkgIntro')}</p>
         {pkgError && <div className="error-msg">{pkgError}</div>}
         <button className="btn primary" onClick={applyPackageUpdates} disabled={pkgApplying}>
-          {pkgApplying ? pkgStage || 'Updating...' : 'Update Packages'}
+          {pkgApplying ? pkgStage || t('updates.pkg.updating') : t('updates.button.updatePackages')}
         </button>
       </div>
     </div>

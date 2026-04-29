@@ -8,11 +8,7 @@ import (
 
 func openSharesDB(t *testing.T) *db.Store {
 	t.Helper()
-	store := openTestDB(t)
-	if err := store.MigrateShares(); err != nil {
-		t.Fatalf("migrate shares: %v", err)
-	}
-	return store
+	return openTestDB(t)
 }
 
 // --- SMB Shares ---
@@ -118,6 +114,40 @@ func TestNfsExportCRUD(t *testing.T) {
 	exports, _ = store.ListNfsExports()
 	if len(exports) != 0 {
 		t.Fatalf("expected 0 exports after delete, got %d", len(exports))
+	}
+}
+
+func TestUpdateNfsExportSync(t *testing.T) {
+	store := openSharesDB(t)
+
+	exp, err := store.CreateNfsExport(db.NfsExport{
+		Path: "/mnt/data", Networks: "192.168.1.0/24", Sync: false, RootSquash: true,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	updated, err := store.UpdateNfsExportSync(exp.ID, true)
+	if err != nil {
+		t.Fatalf("update true: %v", err)
+	}
+	if !updated.Sync {
+		t.Fatal("expected sync true after update")
+	}
+	if updated.Path != exp.Path || updated.Networks != exp.Networks || updated.RootSquash != exp.RootSquash {
+		t.Fatalf("update changed unrelated fields: %#v", updated)
+	}
+
+	updated, err = store.UpdateNfsExportSync(exp.ID, false)
+	if err != nil {
+		t.Fatalf("update false: %v", err)
+	}
+	if updated.Sync {
+		t.Fatal("expected sync false after update")
+	}
+
+	if _, err := store.UpdateNfsExportSync(exp.ID+1, true); err != db.ErrNotFound {
+		t.Fatalf("missing export update error = %v, want ErrNotFound", err)
 	}
 }
 

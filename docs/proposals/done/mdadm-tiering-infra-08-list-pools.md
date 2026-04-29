@@ -1,7 +1,6 @@
 # Proposal: mdadm Tiering Infrastructure — GET /api/tiers (List All Pools)
 
 **Status:** Pending
-**Date:** 2026-04-09
 **Part of:** mdadm-tiering-infrastructure (Step 8 of 14)
 **Depends on:** mdadm-tiering-infra-04-data-model
 

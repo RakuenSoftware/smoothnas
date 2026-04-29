@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useI18n } from '@rakuensoftware/smoothgui';
 import { usePreload } from '../../contexts/PreloadContext';
 import { api } from '../../api/api';
 import Spinner from '../../components/Spinner/Spinner';
@@ -22,6 +23,10 @@ function Sparkline({ data, max: forcedMax, color = '#2563eb' }: { data: number[]
   );
 }
 
+// formatBytes auto-scales sizes to the nearest binary unit. The
+// unit suffixes (B / KiB / MiB / …) are IEC abbreviations and stay
+// in English across locales — translating them would break the
+// data they label.
 function formatBytes(n: number): string {
   if (!n || n < 0) return '0 B';
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
@@ -31,9 +36,18 @@ function formatBytes(n: number): string {
 }
 
 export default function Dashboard() {
+  const { t } = useI18n();
   const { health, disks, arrays, pools, datasets, protocols, alarmHistory, invalidateMany } = usePreload();
   const [hardware, setHardware] = useState<any>(null);
   const [loadedHardware, setLoadedHardware] = useState(false);
+  const [tieringSummary, setTieringSummary] = useState({
+    loaded: false,
+    activeMigrations: 0,
+    migrationBacklog: 0,
+    nearSpillover: 0,
+    fullThreshold: 0,
+    busiestTier: '',
+  });
   const prevNICs = useRef(new Map<string, { rx: number; tx: number; ts: number }>());
   const nicRates = useRef(new Map<string, { rxBps: number; txBps: number }>());
   const hwTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -81,87 +95,180 @@ export default function Dashboard() {
     }).catch(() => setLoadedHardware(true));
   }
 
+  function refreshTieringSummary() {
+    Promise.all([
+      api.getTieringMovements().catch(() => []),
+      api.getTiers().catch(() => []),
+    ]).then(([movements, tiers]: [any[], any[]]) => {
+      const activeMigrations = movements.filter((j: any) => j.state === 'running').length;
+      const migrationBacklog = movements.filter((j: any) => j.state === 'pending').length;
+      const levels = tiers.flatMap((pool: any) =>
+        (pool.tiers || []).map((level: any) => {
+          const capacity = Number(level.capacity_bytes || 0);
+          const used = Number(level.used_bytes || 0);
+          const fill = capacity > 0 ? (used / capacity) * 100 : 0;
+          return {
+            pool: pool.name,
+            name: level.name,
+            fill,
+            target: Number(level.target_fill_pct || 0),
+            full: Number(level.full_threshold_pct || 0),
+          };
+        })
+      );
+      const near = levels.filter((level: any) =>
+        level.full > 0 && level.fill >= Math.max(level.target, level.full - 5)
+      );
+      const full = levels.filter((level: any) => level.full > 0 && level.fill >= level.full);
+      const busiest = levels
+        .filter((level: any) => level.fill > 0)
+        .sort((a: any, b: any) => b.fill - a.fill)[0];
+      setTieringSummary({
+        loaded: true,
+        activeMigrations,
+        migrationBacklog,
+        nearSpillover: near.length,
+        fullThreshold: full.length,
+        busiestTier: busiest
+          ? `${busiest.pool}/${busiest.name} ${busiest.fill.toFixed(1)}%`
+          : t('dashboard.tiering.noUsage'),
+      });
+    }).catch(() => {
+      setTieringSummary(prev => ({ ...prev, loaded: true }));
+    });
+  }
+
   useEffect(() => {
     refreshHardware();
+    refreshTieringSummary();
     hwTimerRef.current = setInterval(refreshHardware, 5000);
     return () => { if (hwTimerRef.current) clearInterval(hwTimerRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
 
   function refresh() {
     invalidateMany('health', 'disks', 'arrays', 'pools', 'datasets', 'protocols', 'alarmHistory');
     refreshHardware();
+    refreshTieringSummary();
   }
 
   const storageDisks = disks.filter((d: any) => d.assignment !== 'os');
   const enabledProtocols = protocols.filter((p: any) => p.enabled).map((p: any) => p.name.toUpperCase());
+  const healthIssues = (health?.checks || []).filter((c: any) => c.status && c.status !== 'ok');
 
   return (
     <div className="page">
       <div className="page-header">
-        <h1>Dashboard</h1>
-        <p className="subtitle">System overview, health status, and alerts</p>
-        <button className="refresh-btn" onClick={refresh}>Refresh</button>
+        <h1>{t('dashboard.title')}</h1>
+        <p className="subtitle">{t('dashboard.subtitle')}</p>
+        <button className="refresh-btn" onClick={refresh}>{t('common.refresh')}</button>
       </div>
 
       <div className="cards">
         <div className="card">
-          <div className="card-label">Service</div>
+          <div className="card-label">{t('dashboard.card.service')}</div>
           {health ? (
             <>
-              <div className={`card-value${health.status === 'ok' ? ' healthy' : ''}`}>{health.status || 'unknown'}</div>
-              <div className="card-detail">v{health.version} / up {health.uptime}</div>
+              <div
+                className={`card-value${health.status === 'ok' ? ' healthy' : ''}`}
+                style={health.status === 'critical' ? { color: '#b91c1c' } : health.status === 'warning' ? { color: '#a16207' } : undefined}
+              >
+                {health.status || t('common.unknown')}
+              </div>
+              <div className="card-detail">
+                {healthIssues.length > 0
+                  ? t('dashboard.service.issues', { count: healthIssues.length })
+                  : t('dashboard.service.versionUptime', { version: health.version, uptime: health.uptime })}
+              </div>
             </>
           ) : <Spinner loading />}
         </div>
         <div className="card">
-          <div className="card-label">Disks</div>
-          {disks.length > 0 || true ? (
-            <>
-              <div className="card-value">{storageDisks.length}</div>
-              <div className="card-detail">{disks.length} total ({disks.length - storageDisks.length} OS)</div>
-            </>
-          ) : <Spinner loading />}
+          <div className="card-label">{t('dashboard.card.disks')}</div>
+          <div className="card-value">{storageDisks.length}</div>
+          <div className="card-detail">
+            {t('dashboard.disks.detail', { total: disks.length, os: disks.length - storageDisks.length })}
+          </div>
         </div>
         <div className="card">
-          <div className="card-label">mdadm Arrays</div>
+          <div className="card-label">{t('dashboard.card.mdadmArrays')}</div>
           <div className="card-value">{arrays.length}</div>
-          <div className="card-detail"><Link to="/arrays">Manage</Link></div>
+          <div className="card-detail"><Link to="/arrays">{t('dashboard.link.manage')}</Link></div>
         </div>
         <div className="card">
-          <div className="card-label">ZFS Pools</div>
+          <div className="card-label">{t('dashboard.card.zfsPools')}</div>
           <div className="card-value">{pools.length}</div>
-          <div className="card-detail"><Link to="/pools">Manage</Link></div>
+          <div className="card-detail"><Link to="/pools">{t('dashboard.link.manage')}</Link></div>
         </div>
         <div className="card">
-          <div className="card-label">Datasets</div>
+          <div className="card-label">{t('dashboard.card.activeMigrations')}</div>
+          {tieringSummary.loaded ? (
+            <>
+              <div className="card-value">{tieringSummary.activeMigrations}</div>
+              <div className="card-detail"><Link to="/tiering">{t('dashboard.link.tieringInventory')}</Link></div>
+            </>
+          ) : <Spinner loading />}
+        </div>
+        <div className="card">
+          <div className="card-label">{t('dashboard.card.migrationBacklog')}</div>
+          {tieringSummary.loaded ? (
+            <>
+              <div className="card-value">{tieringSummary.migrationBacklog}</div>
+              <div className="card-detail">{t('dashboard.backlog.detail')}</div>
+            </>
+          ) : <Spinner loading />}
+        </div>
+        <div className="card">
+          <div className="card-label">{t('dashboard.card.nearSpillover')}</div>
+          {tieringSummary.loaded ? (
+            <>
+              <div
+                className="card-value"
+                style={tieringSummary.fullThreshold > 0 ? { color: '#b91c1c' } : tieringSummary.nearSpillover > 0 ? { color: '#a16207' } : undefined}
+              >
+                {tieringSummary.nearSpillover}
+              </div>
+              <div className="card-detail">{tieringSummary.busiestTier}</div>
+            </>
+          ) : <Spinner loading />}
+        </div>
+        <div className="card">
+          <div className="card-label">{t('dashboard.card.datasets')}</div>
           <div className="card-value">{datasets.length}</div>
-          <div className="card-detail">ZFS datasets</div>
+          <div className="card-detail">{t('dashboard.datasets.detail')}</div>
         </div>
         <div className="card">
-          <div className="card-label">Sharing</div>
-          <div className="card-value">{enabledProtocols.length} active</div>
-          <div className="card-detail">{enabledProtocols.join(', ') || 'None'}</div>
+          <div className="card-label">{t('dashboard.card.sharing')}</div>
+          <div className="card-value">
+            {t('dashboard.sharing.activeCount', { count: enabledProtocols.length })}
+          </div>
+          <div className="card-detail">{enabledProtocols.join(', ') || t('common.none')}</div>
         </div>
       </div>
 
       <div className="section">
-        <h2>System Hardware</h2>
+        <h2>{t('dashboard.section.systemHardware')}</h2>
         {!loadedHardware ? <Spinner loading /> : hardware && (
           <div className="cards">
             <div className="card">
-              <div className="card-label">CPU</div>
+              <div className="card-label">{t('dashboard.card.cpu')}</div>
               <div className="card-value">{hardware.cpu.usage_pct.toFixed(1)}%</div>
               <div className="card-detail">
-                {hardware.cpu.cores} cores{hardware.cpu.model ? ` · ${hardware.cpu.model}` : ''}
+                {hardware.cpu.model
+                  ? t('dashboard.cpu.detail', { cores: hardware.cpu.cores, model: hardware.cpu.model })
+                  : t('dashboard.cpu.detailNoModel', { cores: hardware.cpu.cores })}
               </div>
               <Sparkline data={cpuHistory.current} max={100} color="#2563eb" />
             </div>
             <div className="card">
-              <div className="card-label">Memory</div>
+              <div className="card-label">{t('dashboard.card.memory')}</div>
               <div className="card-value">{hardware.mem.used_pct.toFixed(1)}%</div>
               <div className="card-detail">
-                {formatBytes(hardware.mem.used_bytes)} / {formatBytes(hardware.mem.total_bytes)} used
+                {t('dashboard.memory.detail', {
+                  used: formatBytes(hardware.mem.used_bytes),
+                  total: formatBytes(hardware.mem.total_bytes),
+                })}
               </div>
               <Sparkline data={memHistory.current} max={100} color="#16a34a" />
             </div>
@@ -191,12 +298,16 @@ export default function Dashboard() {
       </div>
 
       <div className="section">
-        <h2>Recent Alerts</h2>
+        <h2>{t('dashboard.section.recentAlerts')}</h2>
         {alarmHistory.length > 0 ? (
           <table className="data-table">
             <thead>
               <tr>
-                <th>Time</th><th>Device</th><th>Attribute</th><th>Severity</th><th>Value</th>
+                <th>{t('dashboard.alerts.time')}</th>
+                <th>{t('dashboard.alerts.device')}</th>
+                <th>{t('dashboard.alerts.attribute')}</th>
+                <th>{t('dashboard.alerts.severity')}</th>
+                <th>{t('dashboard.alerts.value')}</th>
               </tr>
             </thead>
             <tbody>
@@ -211,7 +322,7 @@ export default function Dashboard() {
               ))}
             </tbody>
           </table>
-        ) : <p>No recent alerts.</p>}
+        ) : <p>{t('dashboard.alerts.empty')}</p>}
       </div>
     </div>
   );

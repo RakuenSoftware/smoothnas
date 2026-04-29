@@ -5,28 +5,39 @@ package zfs
 
 import (
 	"fmt"
+	"log"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/disk"
 )
 
 // Pool represents a ZFS storage pool.
 type Pool struct {
-	Name          string  `json:"name"`
-	Health        string  `json:"health"`         // "ONLINE", "DEGRADED", "FAULTED", "OFFLINE"
-	Size          uint64  `json:"size"`            // bytes
-	Allocated     uint64  `json:"allocated"`       // bytes
-	Free          uint64  `json:"free"`            // bytes
-	Fragmentation int     `json:"fragmentation"`   // percentage
-	SizeHuman     string  `json:"size_human"`
-	AllocHuman    string  `json:"alloc_human"`
-	FreeHuman     string  `json:"free_human"`
-	VdevLayout    string  `json:"vdev_layout"`     // raw zpool status vdev section
-	ScanStatus    string  `json:"scan_status"`     // scrub/resilver status line
-	Errors        string  `json:"errors"`
+	Name          string `json:"name"`
+	Health        string `json:"health"`        // "ONLINE", "DEGRADED", "FAULTED", "OFFLINE"
+	Size          uint64 `json:"size"`          // bytes
+	Allocated     uint64 `json:"allocated"`     // bytes
+	Free          uint64 `json:"free"`          // bytes
+	Fragmentation int    `json:"fragmentation"` // percentage
+	SizeHuman     string `json:"size_human"`
+	AllocHuman    string `json:"alloc_human"`
+	FreeHuman     string `json:"free_human"`
+	VdevLayout    string `json:"vdev_layout"` // raw zpool status vdev section
+	ScanStatus    string `json:"scan_status"` // scrub/resilver status line
+	Errors        string `json:"errors"`
+}
+
+// ImportablePool is a pool found by `zpool import` that is not currently imported.
+type ImportablePool struct {
+	Name   string `json:"name"`
+	ID     string `json:"id"`
+	State  string `json:"state"`
+	Status string `json:"status"`
 }
 
 // Vdev types we accept for pool creation.
@@ -45,6 +56,9 @@ func ValidatePoolName(name string) error {
 	if !poolNameRegex.MatchString(name) {
 		return fmt.Errorf("invalid pool name: %s (must start with letter, alphanumeric/hyphens/underscores, max 64 chars)", name)
 	}
+	if name == "import" {
+		return fmt.Errorf("pool name %q is reserved", name)
+	}
 	return nil
 }
 
@@ -60,6 +74,18 @@ func ValidateVdevType(vdevType string) error {
 func ValidateDiskPath(path string) error {
 	if !diskPathRegex.MatchString(path) {
 		return fmt.Errorf("invalid disk path: %s", path)
+	}
+	return nil
+}
+
+var importDevicePathRegex = regexp.MustCompile(`^/dev/[A-Za-z0-9._:/-]+$`)
+
+func ValidateImportDevicePath(path string) error {
+	if path == "" {
+		return nil
+	}
+	if !importDevicePathRegex.MatchString(path) || strings.Contains(path, "..") || filepath.Clean(path) != path {
+		return fmt.Errorf("invalid import device path: %s", path)
 	}
 	return nil
 }
@@ -82,11 +108,17 @@ func CreatePool(name, vdevType string, dataDisks, slogDisks, l2arcDisks []string
 	if err := ValidatePoolName(name); err != nil {
 		return err
 	}
+	if vdevType == "stripe" {
+		vdevType = ""
+	}
 	allDisks := append(append(dataDisks, slogDisks...), l2arcDisks...)
 	for _, d := range allDisks {
 		if err := ValidateDiskPath(d); err != nil {
 			return err
 		}
+	}
+	if err := disk.RequireUnassigned(allDisks); err != nil {
+		return err
 	}
 	if err := zapDisks(allDisks); err != nil {
 		return err
@@ -129,6 +161,99 @@ func CreatePool(name, vdevType string, dataDisks, slogDisks, l2arcDisks []string
 	return nil
 }
 
+// ListImportablePools returns ZFS pools discoverable on local disks but not imported.
+func ListImportablePools() ([]ImportablePool, error) {
+	out, err := exec.Command("zpool", "import").CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" || strings.Contains(msg, "no pools available") {
+			return []ImportablePool{}, nil
+		}
+		return nil, fmt.Errorf("zpool import: %s: %w", msg, err)
+	}
+	return ParseImportablePools(string(out)), nil
+}
+
+// ImportPool imports an existing ZFS pool discovered on local disks.
+func ImportPool(name string) error {
+	if err := ValidatePoolName(name); err != nil {
+		return err
+	}
+	cmd := exec.Command("zpool", "import", "-f", name)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("zpool import %s: %s: %w", name, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// WipeZFSMemberDisks intentionally wipes disks currently identified as ZFS pool members.
+func WipeZFSMemberDisks(paths []string) error {
+	if len(paths) == 0 {
+		return fmt.Errorf("disks required")
+	}
+	activeMembers := activeZPoolMemberDisks()
+	disks, err := disk.List()
+	if err != nil {
+		return fmt.Errorf("list disks: %w", err)
+	}
+	assigned := make(map[string]string, len(disks))
+	for _, d := range disks {
+		assigned[d.Path] = d.Assignment
+	}
+	for _, path := range paths {
+		if err := ValidateDiskPath(path); err != nil {
+			return err
+		}
+		if assigned[path] != "zfs-pool" {
+			return fmt.Errorf("disk %s is not a ZFS pool member", path)
+		}
+		if activeMembers[path] {
+			return fmt.Errorf("disk %s belongs to an imported ZFS pool; destroy or export the pool before wiping it", path)
+		}
+	}
+	for _, path := range paths {
+		if err := disk.WipeDevice(path); err != nil {
+			return fmt.Errorf("wipe %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func activeZPoolMemberDisks() map[string]bool {
+	members := make(map[string]bool)
+	out, err := exec.Command("zpool", "status", "-P").Output()
+	if err != nil {
+		return members
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || !strings.HasPrefix(fields[0], "/dev/") {
+			continue
+		}
+		members[wholeDiskPath(fields[0])] = true
+	}
+	return members
+}
+
+func wholeDiskPath(path string) string {
+	if strings.HasPrefix(path, "/dev/nvme") {
+		if idx := strings.LastIndex(path, "p"); idx > len("/dev/nvme") {
+			if _, err := strconv.Atoi(path[idx+1:]); err == nil {
+				return path[:idx]
+			}
+		}
+		return path
+	}
+	for len(path) > len("/dev/sd") {
+		last := path[len(path)-1]
+		if last < '0' || last > '9' {
+			break
+		}
+		path = path[:len(path)-1]
+	}
+	return path
+}
+
 // ListPools returns all ZFS pools.
 func ListPools() ([]Pool, error) {
 	out, err := exec.Command("zpool", "list", "-Hp",
@@ -167,6 +292,45 @@ func ListPools() ([]Pool, error) {
 		})
 	}
 	return pools, nil
+}
+
+// ParseImportablePools parses the human-readable `zpool import` output.
+func ParseImportablePools(output string) []ImportablePool {
+	var pools []ImportablePool
+	var current *ImportablePool
+	var status []string
+
+	flush := func() {
+		if current == nil {
+			return
+		}
+		current.Status = strings.Join(status, " ")
+		pools = append(pools, *current)
+		current = nil
+		status = nil
+	}
+
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "pool:"):
+			flush()
+			current = &ImportablePool{Name: strings.TrimSpace(strings.TrimPrefix(trimmed, "pool:"))}
+		case current != nil && strings.HasPrefix(trimmed, "id:"):
+			current.ID = strings.TrimSpace(strings.TrimPrefix(trimmed, "id:"))
+		case current != nil && strings.HasPrefix(trimmed, "state:"):
+			current.State = strings.TrimSpace(strings.TrimPrefix(trimmed, "state:"))
+		case current != nil && strings.HasPrefix(trimmed, "status:"):
+			status = append(status, strings.TrimSpace(strings.TrimPrefix(trimmed, "status:")))
+		case current != nil && strings.HasPrefix(trimmed, "action:"):
+			// The action line starts a new logical section; do not mix it into status.
+		case current != nil && len(status) > 0 && trimmed != "" && !strings.Contains(trimmed, ":"):
+			status = append(status, trimmed)
+		}
+	}
+	flush()
+
+	return pools
 }
 
 // DetailPool returns detailed status for a pool.
@@ -214,17 +378,153 @@ func DetailPool(name string) (*Pool, error) {
 	return pool, nil
 }
 
+// SetAtimeOff disables atime updates for a pool and inherited datasets.
+func SetAtimeOff(poolName string) error {
+	if err := ValidatePoolName(poolName); err != nil {
+		return err
+	}
+	cmd := exec.Command("zfs", "set", "atime=off", poolName)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("zfs set atime=off %s: %s: %w", poolName, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // DestroyPool destroys a ZFS pool.
 func DestroyPool(name string) error {
 	if err := ValidatePoolName(name); err != nil {
 		return err
 	}
 
-	cmd := exec.Command("zpool", "destroy", "-f", name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("zpool destroy: %s: %w", strings.TrimSpace(string(out)), err)
+	memberDevices := poolMemberDevices(name)
+	var lastOut []byte
+	var lastErr error
+
+	for attempt := 0; attempt < 3; attempt++ {
+		releasePoolHolders(name)
+
+		cmd := exec.Command("zpool", "destroy", "-f", name)
+		out, err := cmd.CombinedOutput()
+		if err == nil || zpoolDestroyAlreadyGone(out) {
+			wipeFormerPoolMembers(memberDevices)
+			return nil
+		}
+
+		lastOut = out
+		lastErr = err
+		time.Sleep(500 * time.Millisecond)
 	}
-	return nil
+
+	return fmt.Errorf("zpool destroy: %s: %w", strings.TrimSpace(string(lastOut)), lastErr)
+}
+
+func poolMemberDevices(pool string) []string {
+	out, err := exec.Command("zpool", "status", "-LP", pool).Output()
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var devices []string
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) == 0 || !strings.HasPrefix(fields[0], "/dev/") {
+			continue
+		}
+		dev := fields[0]
+		if seen[dev] {
+			continue
+		}
+		seen[dev] = true
+		devices = append(devices, dev)
+	}
+	return devices
+}
+
+func wipeFormerPoolMembers(devices []string) {
+	for _, dev := range devices {
+		if err := disk.WipeDevice(dev); err != nil {
+			log.Printf("zfs: wipe former pool member %s: %v", dev, err)
+		}
+	}
+}
+
+func zpoolDestroyAlreadyGone(out []byte) bool {
+	msg := strings.ToLower(string(out))
+	return strings.Contains(msg, "no such pool") || strings.Contains(msg, "no pools available")
+}
+
+// MemberDevices returns the whole-disk devices currently reported as members
+// of an imported ZFS pool.
+func MemberDevices(pool string) []string {
+	return poolMemberDevices(pool)
+}
+
+func releasePoolHolders(pool string) {
+	releasePoolFilesystemHolders(pool)
+	releasePoolVolumeHolders(pool)
+}
+
+func releasePoolFilesystemHolders(pool string) {
+	out, err := exec.Command("zfs", "list", "-H", "-r", "-t", "filesystem", "-o", "name,mountpoint", pool).Output()
+	if err != nil {
+		return
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		fields := strings.Fields(lines[i])
+		if len(fields) < 2 {
+			continue
+		}
+		dataset, mount := fields[0], fields[1]
+		if mount != "-" && mount != "legacy" && mount != "none" && mount != "/" {
+			killPathHolders(mount)
+			exec.Command("nsenter", "-t", "1", "-m", "--", "umount", "-f", mount).Run()
+			exec.Command("nsenter", "-t", "1", "-m", "--", "umount", "-l", mount).Run()
+			exec.Command("umount", "-f", mount).Run()
+			exec.Command("umount", "-l", mount).Run()
+		}
+		exec.Command("zfs", "unmount", "-f", dataset).Run()
+	}
+}
+
+func releasePoolVolumeHolders(pool string) {
+	out, err := exec.Command("zfs", "list", "-H", "-r", "-t", "volume", "-o", "name", pool).Output()
+	if err != nil {
+		return
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		volume := strings.TrimSpace(line)
+		if volume == "" {
+			continue
+		}
+		for _, dev := range zvolDevicePaths(volume) {
+			killPathHolders(dev)
+			exec.Command("swapoff", dev).Run()
+			exec.Command("blockdev", "--flushbufs", dev).Run()
+		}
+	}
+}
+
+func zvolDevicePaths(volume string) []string {
+	return []string{
+		"/dev/zvol/" + volume,
+		"/dev/zvol/dsk/" + volume,
+	}
+}
+
+func killPathHolders(path string) {
+	if _, err := exec.LookPath("fuser"); err != nil {
+		return
+	}
+	out, err := exec.Command("fuser", "-km", path).CombinedOutput()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return
+		}
+		log.Printf("zfs: fuser -km %s: %v (out=%q)", path, err, strings.TrimSpace(string(out)))
+	}
 }
 
 // AddVdev adds a data vdev to an existing pool.

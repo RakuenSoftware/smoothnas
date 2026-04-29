@@ -35,19 +35,19 @@ type Attribute struct {
 
 // TestResult represents a SMART self-test result.
 type TestResult struct {
-	Type              string `json:"type"`
-	Status            string `json:"status"`
-	RemainingPercent  int    `json:"remaining_percent"`
-	LifetimeHours     int    `json:"lifetime_hours"`
-	LBAOfFirstError   int64  `json:"lba_of_first_error"`
+	Type             string `json:"type"`
+	Status           string `json:"status"`
+	RemainingPercent int    `json:"remaining_percent"`
+	LifetimeHours    int    `json:"lifetime_hours"`
+	LBAOfFirstError  int64  `json:"lba_of_first_error"`
 }
 
 // smartctlJSON is the top-level structure of smartctl --json output.
 type smartctlJSON struct {
-	ModelName    string `json:"model_name"`
-	SerialNumber string `json:"serial_number"`
+	ModelName       string `json:"model_name"`
+	SerialNumber    string `json:"serial_number"`
 	FirmwareVersion string `json:"firmware_version"`
-	SmartStatus  struct {
+	SmartStatus     struct {
 		Passed bool `json:"passed"`
 	} `json:"smart_status"`
 	Temperature struct {
@@ -84,9 +84,9 @@ type smartctlJSON struct {
 					String string `json:"string"`
 				} `json:"type"`
 				Status struct {
-					String string `json:"string"`
-					Passed bool   `json:"passed"`
-					RemainingPercent int `json:"remaining_percent"`
+					String           string `json:"string"`
+					Passed           bool   `json:"passed"`
+					RemainingPercent int    `json:"remaining_percent"`
 				} `json:"status"`
 				LifetimeHours int   `json:"lifetime_hours"`
 				LBA           int64 `json:"lba"`
@@ -94,12 +94,12 @@ type smartctlJSON struct {
 		} `json:"standard"`
 	} `json:"ata_smart_self_test_log"`
 	NvmeSmartHealthInformationLog struct {
-		Temperature        int   `json:"temperature"`
-		PowerOnHours       int   `json:"power_on_hours"`
-		MediaErrors        int   `json:"media_errors"`
-		CriticalWarning    int   `json:"critical_warning"`
-		AvailableSpare     int   `json:"available_spare"`
-		PercentageUsed     int   `json:"percentage_used"`
+		Temperature     int `json:"temperature"`
+		PowerOnHours    int `json:"power_on_hours"`
+		MediaErrors     int `json:"media_errors"`
+		CriticalWarning int `json:"critical_warning"`
+		AvailableSpare  int `json:"available_spare"`
+		PercentageUsed  int `json:"percentage_used"`
 	} `json:"nvme_smart_health_information_log"`
 }
 
@@ -110,7 +110,7 @@ func ReadData(devicePath string) (*Data, error) {
 	}
 
 	// smartctl returns non-zero exit codes for various warnings; we still parse the output.
-	out, _ := exec.Command("smartctl", "--all", "--json", devicePath).Output()
+	out, _ := exec.Command("smartctl", smartctlAllJSONArgs(devicePath)...).Output()
 	if len(out) == 0 {
 		return nil, fmt.Errorf("smartctl returned no output for %s", devicePath)
 	}
@@ -196,7 +196,7 @@ func GetTestResults(devicePath string) ([]TestResult, error) {
 		return nil, fmt.Errorf("invalid device path: %s", devicePath)
 	}
 
-	out, _ := exec.Command("smartctl", "--all", "--json", devicePath).Output()
+	out, _ := exec.Command("smartctl", smartctlAllJSONArgs(devicePath)...).Output()
 	if len(out) == 0 {
 		return nil, fmt.Errorf("smartctl returned no output for %s", devicePath)
 	}
@@ -238,6 +238,10 @@ func StartTest(devicePath, testType string) error {
 		return fmt.Errorf("smartctl test: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+func smartctlAllJSONArgs(devicePath string) []string {
+	return []string{"-n", "standby", "--all", "--json", devicePath}
 }
 
 func isValidPath(path string) bool {

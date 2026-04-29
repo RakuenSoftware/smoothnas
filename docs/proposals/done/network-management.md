@@ -1,7 +1,6 @@
 # Proposal: Network Management
 
 **Status:** Completed
-**Date:** 2026-03-29
 **Depends on:** mdadm-storage-tiering (the base appliance must exist first)
 
 ---

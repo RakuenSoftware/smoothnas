@@ -3,24 +3,55 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/cache"
+	"github.com/JBailes/SmoothNAS/tierd/internal/db"
+	"github.com/JBailes/SmoothNAS/tierd/internal/spindown"
 	"github.com/JBailes/SmoothNAS/tierd/internal/zfs"
 )
 
-// ZFSHandler handles /api/pools*, /api/datasets*, /api/zvols*, /api/snapshots* endpoints.
-type ZFSHandler struct {
-	poolsCache     *cache.Entry[[]zfs.Pool]
-	datasetsCache  *cache.Entry[[]zfs.Dataset]
-	zvolsCache     *cache.Entry[[]zfs.Zvol]
-	snapshotsCache *cache.Entry[[]zfs.Snapshot]
+var (
+	detailZFSPool  = zfs.DetailPool
+	scrubZFSPool   = zfs.Scrub
+	setZFSAtimeOff = zfs.SetAtimeOff
+)
+
+type rawZFSSpindownPolicyResponse struct {
+	Enabled        bool                    `json:"enabled"`
+	Eligible       bool                    `json:"eligible"`
+	Reasons        []string                `json:"reasons"`
+	HasSpecialVdev bool                    `json:"has_special_vdev"`
+	ActiveWindows  []spindown.ActiveWindow `json:"active_windows"`
+	ActiveNow      bool                    `json:"active_now"`
+	NextActiveAt   string                  `json:"next_active_at,omitempty"`
 }
 
-func NewZFSHandler() *ZFSHandler {
+type updateRawZFSSpindownRequest struct {
+	Enabled       bool                     `json:"enabled"`
+	ActiveWindows *[]spindown.ActiveWindow `json:"active_windows,omitempty"`
+}
+
+// ZFSHandler handles /api/pools*, /api/datasets*, /api/zvols*, /api/snapshots* endpoints.
+type ZFSHandler struct {
+	store           *db.Store
+	afterPoolImport func(string) error
+	poolsCache      *cache.Entry[[]zfs.Pool]
+	datasetsCache   *cache.Entry[[]zfs.Dataset]
+	zvolsCache      *cache.Entry[[]zfs.Zvol]
+	snapshotsCache  *cache.Entry[[]zfs.Snapshot]
+}
+
+func (h *ZFSHandler) SetAfterPoolImport(fn func(string) error) {
+	h.afterPoolImport = fn
+}
+
+func NewZFSHandler(store *db.Store) *ZFSHandler {
 	return &ZFSHandler{
+		store:          store,
 		poolsCache:     cache.New[[]zfs.Pool](30 * time.Second),
 		datasetsCache:  cache.New[[]zfs.Dataset](30 * time.Second),
 		zvolsCache:     cache.New[[]zfs.Zvol](30 * time.Second),
@@ -41,7 +72,7 @@ func (h *ZFSHandler) Route(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/api/snapshots"):
 		h.routeSnapshots(w, r)
 	default:
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		jsonNotFound(w)
 	}
 }
 
@@ -57,7 +88,31 @@ func (h *ZFSHandler) routePools(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPost:
 			h.createPool(w, r)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
+		}
+		return
+	}
+	if path == "/api/pools/importable" {
+		if r.Method == http.MethodGet {
+			h.listImportablePools(w, r)
+		} else {
+			jsonMethodNotAllowed(w)
+		}
+		return
+	}
+	if path == "/api/pools/import" {
+		if r.Method == http.MethodPost {
+			h.importPool(w, r)
+		} else {
+			jsonMethodNotAllowed(w)
+		}
+		return
+	}
+	if path == "/api/pools/wipe-members" {
+		if r.Method == http.MethodPost {
+			h.wipeZFSMemberDisks(w, r)
+		} else {
+			jsonMethodNotAllowed(w)
 		}
 		return
 	}
@@ -79,13 +134,13 @@ func (h *ZFSHandler) routePools(w http.ResponseWriter, r *http.Request) {
 		case http.MethodDelete:
 			h.deletePool(w, r, poolName)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "vdevs":
 		if r.Method == http.MethodPost {
 			h.addVdev(w, r, poolName)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "slog":
 		switch r.Method {
@@ -94,7 +149,7 @@ func (h *ZFSHandler) routePools(w http.ResponseWriter, r *http.Request) {
 		case http.MethodDelete:
 			h.removeSLOG(w, r, poolName)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "l2arc":
 		switch r.Method {
@@ -103,13 +158,22 @@ func (h *ZFSHandler) routePools(w http.ResponseWriter, r *http.Request) {
 		case http.MethodDelete:
 			h.removeL2ARC(w, r, poolName)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "scrub":
 		if r.Method == http.MethodPost {
 			h.scrubPool(w, r, poolName)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
+		}
+	case "spindown":
+		switch r.Method {
+		case http.MethodGet:
+			h.getRawZFSSpindown(w, r, poolName)
+		case http.MethodPut:
+			h.updateRawZFSSpindown(w, r, poolName)
+		default:
+			jsonMethodNotAllowed(w)
 		}
 	default:
 		// /api/pools/{name}/disks/{disk}/replace
@@ -124,10 +188,10 @@ func (h *ZFSHandler) routePools(w http.ResponseWriter, r *http.Request) {
 			if action == "replace" && r.Method == http.MethodPost {
 				h.replaceDisk(w, r, poolName, "/dev/"+diskName)
 			} else {
-				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				jsonNotFound(w)
 			}
 		} else {
-			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			jsonNotFound(w)
 		}
 	}
 }
@@ -144,6 +208,63 @@ func (h *ZFSHandler) listPools(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(pools)
 }
 
+func (h *ZFSHandler) listImportablePools(w http.ResponseWriter, r *http.Request) {
+	pools, err := zfs.ListImportablePools()
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	json.NewEncoder(w).Encode(pools)
+}
+
+func (h *ZFSHandler) importPool(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		jsonErrorCoded(w, "name required", http.StatusBadRequest, "zfs.name_required")
+		return
+	}
+	if err := zfs.ImportPool(req.Name); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	h.poolsCache.Invalidate()
+	h.datasetsCache.Invalidate()
+	h.zvolsCache.Invalidate()
+	h.snapshotsCache.Invalidate()
+	if h.afterPoolImport != nil {
+		if err := h.afterPoolImport(req.Name); err != nil {
+			log.Printf("zfs import %s: post-import reconcile: %v", req.Name, err)
+		}
+	}
+	fmt.Fprintf(w, `{"status":"imported","pool":%q}`, req.Name)
+}
+
+func (h *ZFSHandler) wipeZFSMemberDisks(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Disks []string `json:"disks"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Disks) == 0 {
+		jsonErrorCoded(w, "disks required", http.StatusBadRequest, "zfs.disks_required")
+		return
+	}
+
+	jobID := jobs.Start()
+	go func() {
+		jobs.UpdateProgress(jobID, "Wiping ZFS member disks...")
+		if err := zfs.WipeZFSMemberDisks(req.Disks); err != nil {
+			jobs.Fail(jobID, err)
+			return
+		}
+		h.poolsCache.Invalidate()
+		jobs.Complete(jobID, map[string]string{"status": "wiped"})
+	}()
+
+	w.WriteHeader(http.StatusAccepted)
+	fmt.Fprintf(w, `{"job_id":"%s"}`, jobID)
+}
+
 type createPoolRequest struct {
 	Name       string   `json:"name"`
 	VdevType   string   `json:"vdev_type"`
@@ -155,11 +276,11 @@ type createPoolRequest struct {
 func (h *ZFSHandler) createPool(w http.ResponseWriter, r *http.Request) {
 	var req createPoolRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	if req.Name == "" || len(req.DataDisks) == 0 {
-		http.Error(w, `{"error":"name and data_disks required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "name and data_disks required", http.StatusBadRequest, "zfs.name_and_data_disks_required")
 		return
 	}
 
@@ -199,11 +320,46 @@ func (h *ZFSHandler) deletePool(w http.ResponseWriter, r *http.Request, name str
 		h.datasetsCache.Invalidate()
 		h.zvolsCache.Invalidate()
 		h.snapshotsCache.Invalidate()
+		h.clearDestroyedPoolTierAssignments(name)
 		jobs.Complete(jobID, map[string]string{"status": "destroyed"})
 	}()
 
 	w.WriteHeader(http.StatusAccepted)
 	fmt.Fprintf(w, `{"job_id":"%s"}`, jobID)
+}
+
+func (h *ZFSHandler) clearDestroyedPoolTierAssignments(poolName string) {
+	if h.store == nil {
+		return
+	}
+	pools, err := h.store.ListTierInstances()
+	if err != nil {
+		log.Printf("zfs destroy %s: list tier pools: %v", poolName, err)
+		return
+	}
+	for _, tierPool := range pools {
+		slots, err := h.store.ListTierSlots(tierPool.Name)
+		if err != nil {
+			log.Printf("zfs destroy %s: list slots for %s: %v", poolName, tierPool.Name, err)
+			continue
+		}
+		for _, slot := range slots {
+			if slot.BackingKind != "zfs" || slot.BackingRef != poolName {
+				continue
+			}
+			if err := h.store.ClearTierAssignment(tierPool.Name, slot.Name); err != nil {
+				log.Printf("zfs destroy %s: clear tier assignment %s/%s: %v", poolName, tierPool.Name, slot.Name, err)
+				continue
+			}
+			err := h.store.SetTierInstanceError(
+				tierPool.Name,
+				fmt.Sprintf("ZFS backing pool %s was destroyed; tier %s was unassigned", poolName, slot.Name),
+			)
+			if err != nil {
+				log.Printf("zfs destroy %s: mark tier pool %s error: %v", poolName, tierPool.Name, err)
+			}
+		}
+	}
 }
 
 func (h *ZFSHandler) addVdev(w http.ResponseWriter, r *http.Request, poolName string) {
@@ -212,7 +368,7 @@ func (h *ZFSHandler) addVdev(w http.ResponseWriter, r *http.Request, poolName st
 		Disks    []string `json:"disks"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Disks) == 0 {
-		http.Error(w, `{"error":"disks required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "disks required", http.StatusBadRequest, "zfs.disks_required")
 		return
 	}
 	if err := zfs.AddVdev(poolName, req.VdevType, req.Disks); err != nil {
@@ -228,7 +384,7 @@ func (h *ZFSHandler) addSLOG(w http.ResponseWriter, r *http.Request, poolName st
 		Disks []string `json:"disks"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Disks) == 0 {
-		http.Error(w, `{"error":"disks required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "disks required", http.StatusBadRequest, "zfs.disks_required")
 		return
 	}
 	if err := zfs.AddSLOG(poolName, req.Disks); err != nil {
@@ -244,7 +400,7 @@ func (h *ZFSHandler) removeSLOG(w http.ResponseWriter, r *http.Request, poolName
 		Disks []string `json:"disks"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Disks) == 0 {
-		http.Error(w, `{"error":"disks required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "disks required", http.StatusBadRequest, "zfs.disks_required")
 		return
 	}
 	if err := zfs.RemoveSLOG(poolName, req.Disks); err != nil {
@@ -260,7 +416,7 @@ func (h *ZFSHandler) addL2ARC(w http.ResponseWriter, r *http.Request, poolName s
 		Disks []string `json:"disks"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Disks) == 0 {
-		http.Error(w, `{"error":"disks required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "disks required", http.StatusBadRequest, "zfs.disks_required")
 		return
 	}
 	if err := zfs.AddL2ARC(poolName, req.Disks); err != nil {
@@ -276,7 +432,7 @@ func (h *ZFSHandler) removeL2ARC(w http.ResponseWriter, r *http.Request, poolNam
 		Disks []string `json:"disks"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Disks) == 0 {
-		http.Error(w, `{"error":"disks required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "disks required", http.StatusBadRequest, "zfs.disks_required")
 		return
 	}
 	if err := zfs.RemoveL2ARC(poolName, req.Disks); err != nil {
@@ -292,7 +448,7 @@ func (h *ZFSHandler) replaceDisk(w http.ResponseWriter, r *http.Request, poolNam
 		NewDisk string `json:"new_disk"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.NewDisk == "" {
-		http.Error(w, `{"error":"new_disk required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "new_disk required", http.StatusBadRequest, "zfs.new_disk_required")
 		return
 	}
 	if err := zfs.ReplaceDisk(poolName, oldDisk, req.NewDisk); err != nil {
@@ -304,12 +460,114 @@ func (h *ZFSHandler) replaceDisk(w http.ResponseWriter, r *http.Request, poolNam
 }
 
 func (h *ZFSHandler) scrubPool(w http.ResponseWriter, r *http.Request, name string) {
-	if err := zfs.Scrub(name); err != nil {
+	if h.store != nil {
+		decision, err := zfsMaintenanceDecision(h.store, name, spindownNow())
+		if err != nil {
+			serverError(w, err)
+			return
+		}
+		if rejectBlockedMaintenance(w, name, "ZFS scrub", decision) {
+			return
+		}
+		owners, err := zfsTierOwners(h.store, name)
+		if err != nil {
+			serverError(w, err)
+			return
+		}
+		for _, owner := range owners {
+			decision, err := poolMaintenanceDecision(h.store, owner, spindownNow())
+			if err != nil {
+				serverError(w, err)
+				return
+			}
+			if rejectBlockedMaintenance(w, owner, "ZFS backing scrub", decision) {
+				return
+			}
+		}
+	}
+	if err := scrubZFSPool(name); err != nil {
 		serverError(w, err)
 		return
 	}
 	h.poolsCache.Invalidate()
 	fmt.Fprintf(w, `{"status":"scrub started"}`)
+}
+
+func (h *ZFSHandler) getRawZFSSpindown(w http.ResponseWriter, r *http.Request, name string) {
+	resp, err := h.rawZFSSpindownPolicy(name)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (h *ZFSHandler) updateRawZFSSpindown(w http.ResponseWriter, r *http.Request, name string) {
+	var req updateRawZFSSpindownRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonInvalidRequestBody(w)
+		return
+	}
+	resp, err := h.rawZFSSpindownPolicy(name)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if req.Enabled && !resp.Eligible {
+		jsonError(w, "ZFS pool is not spindown eligible: "+strings.Join(resp.Reasons, "; "), http.StatusBadRequest)
+		return
+	}
+	if req.ActiveWindows != nil {
+		if _, err := spindown.StoreWindows(h.store, spindown.ZFSWindowsKey(name), *req.ActiveWindows); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if req.Enabled {
+		if err := setZFSAtimeOff(name); err != nil {
+			serverError(w, err)
+			return
+		}
+	}
+	if err := h.store.SetBoolConfig(spindown.ZFSEnabledKey(name), req.Enabled); err != nil {
+		serverError(w, err)
+		return
+	}
+	resp, err = h.rawZFSSpindownPolicy(name)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (h *ZFSHandler) rawZFSSpindownPolicy(name string) (*rawZFSSpindownPolicyResponse, error) {
+	pool, err := detailZFSPool(name)
+	if err != nil {
+		return nil, err
+	}
+	enabled, err := spindown.Enabled(h.store, spindown.ZFSEnabledKey(name))
+	if err != nil {
+		return nil, err
+	}
+	decision, windows, err := spindown.DecisionFor(h.store, spindown.ZFSEnabledKey(name), spindown.ZFSWindowsKey(name), spindownNow())
+	if err != nil {
+		return nil, err
+	}
+	hasSpecial := zfs.HasSpecialVdevInLayout(pool.VdevLayout)
+	reasons := []string{}
+	if !hasSpecial {
+		reasons = append(reasons, "raw ZFS pools require a real special metadata vdev")
+	}
+	return &rawZFSSpindownPolicyResponse{
+		Enabled:        enabled,
+		Eligible:       len(reasons) == 0,
+		Reasons:        reasons,
+		HasSpecialVdev: hasSpecial,
+		ActiveWindows:  windows,
+		ActiveNow:      decision.ActiveNow,
+		NextActiveAt:   decision.NextActiveAt,
+	}, nil
 }
 
 // --- Datasets ---
@@ -324,7 +582,7 @@ func (h *ZFSHandler) routeDatasets(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPost:
 			h.createDataset(w, r)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 		return
 	}
@@ -351,22 +609,22 @@ func (h *ZFSHandler) routeDatasets(w http.ResponseWriter, r *http.Request) {
 		case http.MethodDelete:
 			h.deleteDataset(w, r, dsName)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "mount":
 		if r.Method == http.MethodPost {
 			h.mountDataset(w, r, dsName)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "unmount":
 		if r.Method == http.MethodPost {
 			h.unmountDataset(w, r, dsName)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	default:
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		jsonNotFound(w)
 	}
 }
 
@@ -402,11 +660,11 @@ type createDatasetRequest struct {
 func (h *ZFSHandler) createDataset(w http.ResponseWriter, r *http.Request) {
 	var req createDatasetRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	if req.Name == "" {
-		http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "name required", http.StatusBadRequest, "zfs.name_required")
 		return
 	}
 
@@ -437,13 +695,13 @@ func (h *ZFSHandler) getDataset(w http.ResponseWriter, r *http.Request, name str
 			return
 		}
 	}
-	http.Error(w, `{"error":"dataset not found"}`, http.StatusNotFound)
+	jsonErrorCoded(w, "dataset not found", http.StatusNotFound, "zfs.dataset_not_found")
 }
 
 func (h *ZFSHandler) updateDataset(w http.ResponseWriter, r *http.Request, name string) {
 	var props map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&props); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	if err := zfs.UpdateDataset(name, props); err != nil {
@@ -500,7 +758,7 @@ func (h *ZFSHandler) routeZvols(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPost:
 			h.createZvol(w, r)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 		return
 	}
@@ -520,16 +778,16 @@ func (h *ZFSHandler) routeZvols(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			h.deleteZvol(w, r, zvolName)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "resize":
 		if r.Method == http.MethodPut {
 			h.resizeZvol(w, r, zvolName)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	default:
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		jsonNotFound(w)
 	}
 }
 
@@ -563,11 +821,11 @@ type createZvolRequest struct {
 func (h *ZFSHandler) createZvol(w http.ResponseWriter, r *http.Request) {
 	var req createZvolRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	if req.Name == "" || req.Size == "" {
-		http.Error(w, `{"error":"name and size required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "name and size required", http.StatusBadRequest, "zfs.name_and_size_required")
 		return
 	}
 
@@ -607,7 +865,7 @@ func (h *ZFSHandler) resizeZvol(w http.ResponseWriter, r *http.Request, name str
 		Size string `json:"size"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Size == "" {
-		http.Error(w, `{"error":"size required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "size required", http.StatusBadRequest, "zfs.size_required")
 		return
 	}
 	if err := zfs.ResizeZvol(name, req.Size); err != nil {
@@ -630,7 +888,7 @@ func (h *ZFSHandler) routeSnapshots(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPost:
 			h.createSnapshot(w, r)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 		return
 	}
@@ -660,28 +918,28 @@ func (h *ZFSHandler) routeSnapshots(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			h.deleteSnapshot(w, r, snapName)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "rollback":
 		if r.Method == http.MethodPost {
 			h.rollbackSnapshot(w, r, snapName)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "clone":
 		if r.Method == http.MethodPost {
 			h.cloneSnapshot(w, r, snapName)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "send":
 		if r.Method == http.MethodPost {
 			h.sendSnapshot(w, r, snapName)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	default:
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		jsonNotFound(w)
 	}
 }
 
@@ -714,11 +972,11 @@ type createSnapshotRequest struct {
 func (h *ZFSHandler) createSnapshot(w http.ResponseWriter, r *http.Request) {
 	var req createSnapshotRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	if req.Dataset == "" || req.Name == "" {
-		http.Error(w, `{"error":"dataset and name required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "dataset and name required", http.StatusBadRequest, "zfs.dataset_and_name_required")
 		return
 	}
 
@@ -775,7 +1033,7 @@ func (h *ZFSHandler) cloneSnapshot(w http.ResponseWriter, r *http.Request, snapN
 		NewDataset string `json:"new_dataset"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.NewDataset == "" {
-		http.Error(w, `{"error":"new_dataset required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "new_dataset required", http.StatusBadRequest, "zfs.new_dataset_required")
 		return
 	}
 	if err := zfs.CloneSnapshot(snapName, req.NewDataset); err != nil {
@@ -792,7 +1050,7 @@ func (h *ZFSHandler) sendSnapshot(w http.ResponseWriter, r *http.Request, snapNa
 		BaseSnap   string `json:"base_snap"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	if req.OutputPath == "" {

@@ -17,7 +17,7 @@ import (
 var objectsBucket = []byte("o")
 
 // shardWriteQueueCap is the per-shard channel buffer. Sized so bursts of
-// thousands of rsync creates don't block the FUSE handler; exceeding it is
+// thousands of rsync creates don't block the handler; exceeding it is
 // treated as backpressure.
 const shardWriteQueueCap = 4096
 
@@ -35,10 +35,13 @@ const shardBatchMaxAge = 10 * time.Millisecond
 // fsyncs on commit; we call Sync periodically to limit crash-loss window.
 const shardSyncInterval = 5 * time.Second
 
-// pendingWrite is an item in a shard's writer queue.
+// pendingWrite is an item in a shard's writer queue. A non-nil barrier
+// marks a synthetic drain marker (no key/val); the writer signals it once
+// every preceding queued write has been committed.
 type pendingWrite struct {
-	key []byte
-	val []byte
+	key     []byte
+	val     []byte
+	barrier chan struct{}
 }
 
 // shard is one bbolt database plus its batched writer goroutine.
@@ -47,6 +50,14 @@ type shard struct {
 	db  *bolt.DB
 
 	queue chan pendingWrite
+
+	// closed is set non-zero by Close before the queue is closed. New
+	// enqueue calls observing closed != 0 return immediately instead
+	// of writing to the (about to be) closed channel. Without this,
+	// enqueueBlocking races with Close and panics with "send on
+	// closed channel" — observed when Reconcile's walker is still
+	// running while the supervisor tears down the namespace.
+	closed atomic.Bool
 
 	// wg tracks the writer and sync goroutines so Close can drain them.
 	wg sync.WaitGroup
@@ -107,8 +118,11 @@ func openShard(dir string, idx int) (*shard, error) {
 }
 
 // enqueue submits a write without blocking. Returns false if the queue is
-// full; callers can retry, drop, or fall back to a synchronous put.
+// full or the shard has been closed.
 func (s *shard) enqueue(key, val []byte) bool {
+	if s.closed.Load() {
+		return false
+	}
 	select {
 	case s.queue <- pendingWrite{key: key, val: val}:
 		return true
@@ -119,8 +133,24 @@ func (s *shard) enqueue(key, val []byte) bool {
 }
 
 // enqueueBlocking submits a write, blocking briefly if the queue is full.
-// Use for code paths that must not drop writes (e.g., pin state changes).
+// Returns immediately (dropping the write) once the shard has been
+// closed — callers that need durability across shutdown should issue
+// writes through `del`/bbolt directly.
 func (s *shard) enqueueBlocking(key, val []byte) {
+	if s.closed.Load() {
+		return
+	}
+	// The closed check above is racy with Close; recover from the
+	// "send on closed channel" panic that races can produce.
+	defer func() {
+		if r := recover(); r != nil {
+			// Only suppress the specific channel-closed panic — anything
+			// else is a real bug and should propagate.
+			if _, ok := r.(error); !ok && fmt.Sprint(r) != "send on closed channel" {
+				panic(r)
+			}
+		}
+	}()
 	s.queue <- pendingWrite{key: key, val: val}
 }
 
@@ -136,6 +166,42 @@ func (s *shard) del(key []byte) error {
 		}
 		return b.Delete(key)
 	})
+}
+
+// putSync commits a record synchronously via bbolt's batch path, bypassing
+// the async writer queue. Used by Move where the next Get must observe the
+// write without depending on the batched writer's flush window.
+func (s *shard) putSync(key, val []byte) error {
+	return s.db.Batch(func(tx *bolt.Tx) error {
+		b := tx.Bucket(objectsBucket)
+		if b == nil {
+			return fmt.Errorf("objects bucket missing")
+		}
+		return b.Put(key, val)
+	})
+}
+
+// drainQueue blocks until every write that was already in the queue at
+// call time has been committed to bbolt. Implemented by enqueueing a
+// barrier marker that the writer signals after flushing the in-flight
+// batch. Returns immediately if the shard is closed or if the send races
+// with shutdown.
+func (s *shard) drainQueue() {
+	if s.closed.Load() {
+		return
+	}
+	done := make(chan struct{})
+	sent := false
+	func() {
+		defer func() {
+			_ = recover() // shard closed mid-send
+		}()
+		s.queue <- pendingWrite{barrier: done}
+		sent = true
+	}()
+	if sent {
+		<-done
+	}
 }
 
 // iterate invokes fn for each record in the shard. Iteration order is
@@ -181,7 +247,10 @@ func (s *shard) get(key []byte) (val []byte, ok bool, err error) {
 
 // writerLoop drains the queue in batches. Each iteration either fills a
 // batch up to shardBatchMax, or flushes whatever's buffered once
-// shardBatchMaxAge elapses since the first item arrived.
+// shardBatchMaxAge elapses since the first item arrived. Barrier markers
+// (pendingWrite.barrier != nil) flush any in-progress batch and then signal
+// the caller, preserving the invariant that everything queued before the
+// barrier is durable when the barrier returns.
 func (s *shard) writerLoop() {
 	defer s.wg.Done()
 	batch := make([]pendingWrite, 0, shardBatchMax)
@@ -189,6 +258,10 @@ func (s *shard) writerLoop() {
 		first, ok := <-s.queue
 		if !ok {
 			return
+		}
+		if first.barrier != nil {
+			close(first.barrier)
+			continue
 		}
 		batch = append(batch[:0], first)
 		deadline := time.After(shardBatchMaxAge)
@@ -200,12 +273,20 @@ func (s *shard) writerLoop() {
 					s.flush(batch)
 					return
 				}
+				if w.barrier != nil {
+					s.flush(batch)
+					batch = batch[:0]
+					close(w.barrier)
+					break fill
+				}
 				batch = append(batch, w)
 			case <-deadline:
 				break fill
 			}
 		}
-		s.flush(batch)
+		if len(batch) > 0 {
+			s.flush(batch)
+		}
 	}
 }
 
@@ -264,6 +345,11 @@ func (s *shard) syncLoop(ctx context.Context) {
 // Close drains pending writes, stops the sync goroutine, forces a final
 // sync, and closes the bbolt DB.
 func (s *shard) Close() error {
+	// Set closed before closing the channel so any enqueueBlocking
+	// observation that overlaps with us either takes the early-return
+	// or trips the recover. Close is called once (PoolMetaStore.Close
+	// uses sync.Once), so the close+ack ordering is well-defined.
+	s.closed.Store(true)
 	s.cancel()
 	close(s.queue)
 	s.wg.Wait()

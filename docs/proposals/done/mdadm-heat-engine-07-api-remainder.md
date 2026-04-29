@@ -1,7 +1,6 @@
 # Proposal: mdadm Heat Engine — API Surface (Remainder)
 
 **Status:** Pending
-**Date:** 2026-04-11
 **Part of:** mdadm-complete-heat-engine (follow-up to Step 7 of 9)
 **Depends on:** mdadm-heat-engine-05-migration-engine, mdadm-heat-engine-06-policy-engine, mdadm-heat-engine-02-managed-volumes-remainder
 

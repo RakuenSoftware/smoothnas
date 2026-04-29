@@ -22,27 +22,6 @@ type BackupRun struct {
 	CompletedAt string `json:"completed_at,omitempty"`
 }
 
-// MigrateBackupRuns creates the backup_runs table if it does not exist.
-func (s *Store) MigrateBackupRuns() error {
-	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS backup_runs (
-		id           INTEGER PRIMARY KEY AUTOINCREMENT,
-		config_id    INTEGER NOT NULL REFERENCES backup_configs(id) ON DELETE CASCADE,
-		status       TEXT    NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','failed')),
-		progress     TEXT    NOT NULL DEFAULT '',
-		files_done   INTEGER NOT NULL DEFAULT 0,
-		files_total  INTEGER NOT NULL DEFAULT -1,
-		progress_pct INTEGER NOT NULL DEFAULT -1,
-		error        TEXT    NOT NULL DEFAULT '',
-		summary      TEXT    NOT NULL DEFAULT '',
-		started_at   TEXT    NOT NULL DEFAULT (datetime('now')),
-		completed_at TEXT    NOT NULL DEFAULT ''
-	)`)
-	if err != nil {
-		return fmt.Errorf("migrate backup_runs: %w", err)
-	}
-	return nil
-}
-
 // CreateBackupRun inserts a new "running" backup run row and returns its ID.
 func (s *Store) CreateBackupRun(configID int64) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)

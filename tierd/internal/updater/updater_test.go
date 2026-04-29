@@ -230,6 +230,11 @@ func TestEnsureAutomaticSecurityUpdatesWritesConfig(t *testing.T) {
 	if string(securityCfg) != securityOriginsConfig {
 		t.Fatalf("security config = %q, want %q", string(securityCfg), securityOriginsConfig)
 	}
+	for _, want := range []string{`"samba";`, `"samba-*";`, `"smoothfs-samba-vfs";`} {
+		if !strings.Contains(string(securityCfg), want) {
+			t.Fatalf("security config missing %s:\n%s", want, securityCfg)
+		}
+	}
 
 	got := strings.Join(flattenCalls(calls), "\n")
 	for _, want := range []string{

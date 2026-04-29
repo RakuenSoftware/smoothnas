@@ -14,14 +14,14 @@ func TestValidateShareName(t *testing.T) {
 	}
 
 	invalid := []string{
-		"",          // empty
-		"0bad",      // starts with digit
+		"",     // empty
+		"0bad", // starts with digit
 		"has space",
 		"semi;colon",
-		"global",    // reserved
-		"homes",     // reserved
-		"printers",  // reserved
-		"Global",    // reserved (case insensitive)
+		"global",   // reserved
+		"homes",    // reserved
+		"printers", // reserved
+		"Global",   // reserved (case insensitive)
 	}
 	for _, name := range invalid {
 		if err := ValidateShareName(name); err == nil {
@@ -51,13 +51,58 @@ func TestValidateSharePath(t *testing.T) {
 	}
 }
 
+func TestGenerateConfigEmitsMultichannelByDefault(t *testing.T) {
+	config := GenerateConfigWithOptions(nil, "smoothnas", Options{})
+	if !strings.Contains(config, "server multi channel support = yes") {
+		t.Fatalf("Phase 6: smb.conf must default-on multichannel support\n%s", config)
+	}
+	// Without operator-supplied Interfaces, no `interfaces=` line; the
+	// kernel's default-bind-everywhere is fine in the default-bond shape.
+	if strings.Contains(config, "\n   interfaces = ") {
+		t.Fatalf("Phase 6: with empty Interfaces, smb.conf should NOT pin interfaces=\n%s", config)
+	}
+	if strings.Contains(config, "bind interfaces only = yes") {
+		t.Fatalf("Phase 6: with empty Interfaces, smb.conf should NOT bind to a subset\n%s", config)
+	}
+}
+
+func TestGenerateConfigEmitsInterfacesWhenSupplied(t *testing.T) {
+	config := GenerateConfigWithOptions(nil, "smoothnas", Options{
+		Interfaces: []string{"192.168.1.10", "192.168.1.11", "10.0.0.5"},
+	})
+	if !strings.Contains(config, "server multi channel support = yes") {
+		t.Fatalf("multichannel directive missing")
+	}
+	if !strings.Contains(config, "   interfaces = 192.168.1.10 192.168.1.11 10.0.0.5\n") {
+		t.Fatalf("interfaces= line missing or malformed\n%s", config)
+	}
+	if !strings.Contains(config, "bind interfaces only = yes") {
+		t.Fatalf("bind-interfaces-only missing alongside interfaces= line\n%s", config)
+	}
+}
+
 func TestGenerateConfigEmpty(t *testing.T) {
-	config := GenerateConfig(nil, "smoothnas")
+	config := GenerateConfigWithOptions(nil, "smoothnas", Options{SmoothFSVFS: true})
 	if !strings.Contains(config, "[global]") {
 		t.Error("config should contain [global] section")
 	}
 	if !strings.Contains(config, "server string = smoothnas") {
 		t.Error("config should contain hostname")
+	}
+	if !strings.Contains(config, "kernel oplocks = no") {
+		t.Error("config should disable kernel oplocks when smoothfs VFS is active")
+	}
+	if !strings.Contains(config, "strict sync = no") || !strings.Contains(config, "sync always = no") {
+		t.Error("SMB should default to async write acknowledgement")
+	}
+	if !strings.Contains(config, "disable spoolss = yes") || !strings.Contains(config, "load printers = no") {
+		t.Error("SMB should disable unused print services")
+	}
+	if strings.Contains(config, "pam password change") || strings.Contains(config, "unix password sync") {
+		t.Error("SMB should not enable PAM password sync paths")
+	}
+	if !strings.Contains(config, "case sensitive = yes") || !strings.Contains(config, "mangled names = no") {
+		t.Error("SMB should avoid case-insensitive directory scans by default")
 	}
 }
 
@@ -80,7 +125,7 @@ func TestGenerateConfigWithShares(t *testing.T) {
 		},
 	}
 
-	config := GenerateConfig(shares, "mynas")
+	config := GenerateConfigWithOptions(shares, "mynas", Options{SmoothFSVFS: true})
 
 	// Check global section.
 	if !strings.Contains(config, "[global]") {
@@ -106,6 +151,19 @@ func TestGenerateConfigWithShares(t *testing.T) {
 	if !strings.Contains(config, "comment = Main data share") {
 		t.Error("missing data comment")
 	}
+	if !strings.Contains(config, "vfs objects = smoothfs") {
+		t.Error("shares should load the smoothfs Samba VFS module")
+	}
+	if !strings.Contains(config, "smoothfs:lease watcher = no") ||
+		!strings.Contains(config, "smoothfs:stable fileid = no") {
+		t.Error("smoothfs VFS expensive metadata features should be opt-in")
+	}
+	if !strings.Contains(config, "ea support = yes") {
+		t.Error("shares should enable extended attributes for smoothfs metadata")
+	}
+	if !strings.Contains(config, "kernel oplocks = no") {
+		t.Error("smoothfs shares should not use Samba kernel oplocks")
+	}
 
 	// Check public share.
 	if !strings.Contains(config, "[public]") {
@@ -123,12 +181,28 @@ func TestGenerateConfigWithShares(t *testing.T) {
 }
 
 func TestGenerateConfigSecurity(t *testing.T) {
-	config := GenerateConfig(nil, "nas")
+	config := GenerateConfigWithOptions(nil, "nas", Options{})
 	// Should have security settings.
 	if !strings.Contains(config, "security = user") {
 		t.Error("missing security = user")
 	}
 	if !strings.Contains(config, "map to guest = never") {
 		t.Error("missing map to guest = never")
+	}
+	if strings.Contains(config, "vfs objects = smoothfs") {
+		t.Error("config should not reference smoothfs VFS when the module is unavailable")
+	}
+}
+
+func TestGenerateConfigCompatibilityMode(t *testing.T) {
+	config := GenerateConfigWithOptions(nil, "nas", Options{CompatibilityMode: true})
+	if !strings.Contains(config, "case sensitive = auto") {
+		t.Error("compatibility mode should use Samba case-insensitive lookup behavior")
+	}
+	if !strings.Contains(config, "mangled names = illegal") {
+		t.Error("compatibility mode should keep Windows short-name behavior")
+	}
+	if strings.Contains(config, "case sensitive = yes") || strings.Contains(config, "mangled names = no") {
+		t.Error("compatibility mode should not emit performance-only case settings")
 	}
 }

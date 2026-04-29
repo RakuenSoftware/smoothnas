@@ -45,53 +45,17 @@ type AlarmStore struct {
 	db *sql.DB
 }
 
-// NewAlarmStore creates an AlarmStore and ensures the tables exist.
+// NewAlarmStore returns an AlarmStore against db. The schema is owned
+// by the goose migrations under tierd/internal/db/migrations/; callers
+// are responsible for having run db.Migrate() / db.MigrateDB() first.
+// seedDefaults() inserts the appliance's default alarm rules on first
+// use; it is idempotent (no-op when rules already exist).
 func NewAlarmStore(db *sql.DB) (*AlarmStore, error) {
 	store := &AlarmStore{db: db}
-	if err := store.migrate(); err != nil {
-		return nil, err
-	}
 	if err := store.seedDefaults(); err != nil {
 		return nil, err
 	}
 	return store, nil
-}
-
-func (s *AlarmStore) migrate() error {
-	_, err := s.db.Exec(`
-		CREATE TABLE IF NOT EXISTS smart_alarm_rules (
-			id              INTEGER PRIMARY KEY AUTOINCREMENT,
-			attr_id         INTEGER NOT NULL,
-			attr_name       TEXT    NOT NULL,
-			warning_above   INTEGER,
-			critical_above  INTEGER,
-			warning_below   INTEGER,
-			critical_below  INTEGER,
-			device_path     TEXT    NOT NULL DEFAULT ''
-		)
-	`)
-	if err != nil {
-		return fmt.Errorf("create smart_alarm_rules: %w", err)
-	}
-
-	_, err = s.db.Exec(`
-		CREATE TABLE IF NOT EXISTS smart_alarm_events (
-			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			rule_id     INTEGER NOT NULL,
-			device_path TEXT    NOT NULL,
-			attr_id     INTEGER NOT NULL,
-			attr_name   TEXT    NOT NULL,
-			severity    TEXT    NOT NULL,
-			value       INTEGER NOT NULL,
-			threshold   INTEGER NOT NULL,
-			timestamp   TEXT    NOT NULL
-		)
-	`)
-	if err != nil {
-		return fmt.Errorf("create smart_alarm_events: %w", err)
-	}
-
-	return nil
 }
 
 // seedDefaults inserts the default alarm rules if no rules exist.

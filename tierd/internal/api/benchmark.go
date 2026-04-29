@@ -19,23 +19,23 @@ func (h *BenchmarkHandler) Route(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			h.run(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/benchmark/system":
 		if r.Method == http.MethodPost {
 			h.runSystem(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	default:
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		jsonNotFound(w)
 	}
 }
 
 func (h *BenchmarkHandler) run(w http.ResponseWriter, r *http.Request) {
 	var req benchmark.Request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 
@@ -65,7 +65,7 @@ func (h *BenchmarkHandler) run(w http.ResponseWriter, r *http.Request) {
 func (h *BenchmarkHandler) runSystem(w http.ResponseWriter, r *http.Request) {
 	var req benchmark.SystemRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 

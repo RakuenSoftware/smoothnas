@@ -1,3 +1,4 @@
+import { useI18n } from '@rakuensoftware/smoothgui';
 import './charts.scss';
 
 interface Props {
@@ -37,6 +38,7 @@ function buildPath(points: any[], field: string, yMax: number, duration: number)
 }
 
 export default function NetworkTestChart({ points, duration }: Props) {
+  const { t } = useI18n();
   const dur = Math.max(duration, 1);
   const showDownload = points.some(p => (p.download_mbps ?? 0) > 0);
   const showUpload = points.some(p => (p.upload_mbps ?? 0) > 0);
@@ -59,16 +61,16 @@ export default function NetworkTestChart({ points, duration }: Props) {
         {showLatency && latencyTicks.map(t => <text key={t.label} x={W - PR + 6} y={t.y + 4} className="chart-tick chart-tick-right" textAnchor="start">{t.label}</text>)}
         {xTicks.map(t => <text key={t.label} x={t.x} y={H - 6} className="chart-tick" textAnchor="middle">{t.label}</text>)}
         <text x={12} y={PT + plotH / 2} className="chart-axis-title chart-axis-left" transform={`rotate(-90,12,${PT + plotH / 2})`}>Mbps</text>
-        {showLatency && <text x={W - 12} y={PT + plotH / 2} className="chart-axis-title chart-axis-right" transform={`rotate(90,${W - 12},${PT + plotH / 2})`}>Latency (ms)</text>}
+        {showLatency && <text x={W - 12} y={PT + plotH / 2} className="chart-axis-title chart-axis-right" transform={`rotate(90,${W - 12},${PT + plotH / 2})`}>{t('benchmarks.chart.latencyAxis')}</text>}
         <rect x={PL} y={PT} width={plotW} height={plotH} fill="none" stroke="#e0e0e0" strokeWidth={1} />
         {showDownload && <path d={buildPath(points, 'download_mbps', throughputMax, dur)} fill="none" stroke="#1976d2" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />}
         {showUpload && <path d={buildPath(points, 'upload_mbps', throughputMax, dur)} fill="none" stroke="#ef6c00" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />}
         {showLatency && <path d={buildPath(points, 'latency_ms', latencyMax, dur)} fill="none" stroke="#546e7a" strokeWidth={1.5} strokeDasharray="4,3" strokeLinejoin="round" strokeLinecap="round" />}
       </svg>
       <div className="chart-legend">
-        {showDownload && <span className="legend-item"><svg width="24" height="12" className="legend-icon"><line x1="0" y1="6" x2="24" y2="6" stroke="#1976d2" strokeWidth="2" /></svg>Download Mbps</span>}
-        {showUpload && <span className="legend-item"><svg width="24" height="12" className="legend-icon"><line x1="0" y1="6" x2="24" y2="6" stroke="#ef6c00" strokeWidth="2" /></svg>Upload Mbps</span>}
-        {showLatency && <span className="legend-item"><svg width="24" height="12" className="legend-icon"><line x1="0" y1="6" x2="24" y2="6" stroke="#546e7a" strokeWidth="1.5" strokeDasharray="4,3" /></svg>Latency</span>}
+        {showDownload && <span className="legend-item"><svg width="24" height="12" className="legend-icon"><line x1="0" y1="6" x2="24" y2="6" stroke="#1976d2" strokeWidth="2" /></svg>{t('benchmarks.chart.downloadMbps')}</span>}
+        {showUpload && <span className="legend-item"><svg width="24" height="12" className="legend-icon"><line x1="0" y1="6" x2="24" y2="6" stroke="#ef6c00" strokeWidth="2" /></svg>{t('benchmarks.chart.uploadMbps')}</span>}
+        {showLatency && <span className="legend-item"><svg width="24" height="12" className="legend-icon"><line x1="0" y1="6" x2="24" y2="6" stroke="#546e7a" strokeWidth="1.5" strokeDasharray="4,3" /></svg>{t('benchmarks.net.latency')}</span>}
       </div>
     </div>
   );

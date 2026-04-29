@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useI18n } from '@rakuensoftware/smoothgui';
 import { api } from '../../api/api';
 import { useToast } from '../../contexts/ToastContext';
 
@@ -23,6 +24,7 @@ function formatBytes(n: number): string {
 // the pool's tier backings; it caps at `limit` entries, so this is a
 // quick-peek UI rather than a full file manager.
 export default function NamespaceFiles({ nsID }: { nsID: string }) {
+  const { t } = useI18n();
   const toast = useToast();
   const [prefix, setPrefix] = useState('');
   const [limit, setLimit] = useState(200);
@@ -40,7 +42,8 @@ export default function NamespaceFiles({ nsID }: { nsID: string }) {
       .finally(() => setLoading(false));
   }
 
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [nsID]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [nsID]);
 
   function togglePin(f: FileEntry) {
     const current = f.pin_state;
@@ -58,11 +61,12 @@ export default function NamespaceFiles({ nsID }: { nsID: string }) {
     <div style={{ marginTop: 24, padding: '12px 16px', background: 'var(--bg-alt, #f7f7f7)', borderRadius: 6 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
         <h3 style={{ margin: 0, fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.5px', color: '#555' }}>
-          Files in namespace
+          {t('namespaceFiles.title')}
         </h3>
         <input
           value={prefix}
           onChange={e => setPrefix(e.target.value)}
+          // i18n-allow: example value, not user copy
           placeholder="prefix (e.g. storage/backup)"
           style={{ flex: 1, fontSize: 13 }}
         />

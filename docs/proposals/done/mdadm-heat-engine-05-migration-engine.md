@@ -1,7 +1,6 @@
 # Proposal: mdadm Heat Engine — Migration Engine
 
 **Status:** Done
-**Date:** 2026-04-10
 **Part of:** mdadm-complete-heat-engine (Step 5 of 9)
 **Depends on:** mdadm-heat-engine-03-region-inventory
 

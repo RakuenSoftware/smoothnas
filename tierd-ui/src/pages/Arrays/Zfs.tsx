@@ -25,12 +25,19 @@ export default function Zfs() {
   const [confirmVisible, setConfirmVisible] = useState(false);
   const [confirmTitle, setConfirmTitle] = useState('');
   const [confirmMessage, setConfirmMessage] = useState('');
+  const [spindownByPool, setSpindownByPool] = useState<Record<string, any>>({});
+  const [spindownBusy, setSpindownBusy] = useState<Record<string, boolean>>({});
   const confirmAction = useRef<(() => void) | null>(null);
   const stopPollRef = useRef<(() => void) | null>(null);
 
   const unassignedDisks = disks.filter((d: any) => d.assignment === 'unassigned');
 
-  useEffect(() => { if (pools !== undefined) setLoading(false); }, [pools]);
+  useEffect(() => {
+    if (pools !== undefined) {
+      setLoading(false);
+      refreshSpindown(pools);
+    }
+  }, [pools]);
   useEffect(() => () => { stopPollRef.current?.(); }, []);
 
   function refresh() { invalidate('pools'); invalidate('disks'); }
@@ -52,7 +59,7 @@ export default function Zfs() {
 
   function createPool() {
     const data = {
-      name: newPool.name, vdev_type: newPool.vdev_type,
+      name: newPool.name, vdev_type: newPool.vdev_type === 'stripe' ? '' : newPool.vdev_type,
       data_disks: selectedData,
       slog_disks: selectedSlog,
       l2arc_disks: selectedL2arc,
@@ -93,6 +100,35 @@ export default function Zfs() {
   function scrub(name: string) {
     api.scrubPool(name).then(() => toast.info('Scrub started on ' + name))
       .catch(e => toast.error(extractError(e, 'Failed to start scrub')));
+  }
+
+  function refreshSpindown(poolList = pools) {
+    Promise.all(
+      (poolList || []).map((p: any) =>
+        api.getPoolSpindown(p.name)
+          .then((policy: any) => ({ name: p.name, policy }))
+          .catch(() => ({ name: p.name, policy: null }))
+      )
+    ).then(rows => {
+      setSpindownByPool(prev => {
+        const next = { ...prev };
+        for (const row of rows) {
+          if (row.policy) next[row.name] = row.policy;
+        }
+        return next;
+      });
+    });
+  }
+
+  function setRawPoolSpindown(poolName: string, enabled: boolean, activeWindows?: any[]) {
+    setSpindownBusy(prev => ({ ...prev, [poolName]: true }));
+    api.setPoolSpindown(poolName, enabled, activeWindows)
+      .then((policy: any) => {
+        setSpindownByPool(prev => ({ ...prev, [poolName]: policy }));
+        toast.success(enabled ? 'Pool spindown enabled' : 'Pool spindown disabled');
+      })
+      .catch(e => toast.error(extractError(e, 'Failed to update pool spindown')))
+      .finally(() => setSpindownBusy(prev => ({ ...prev, [poolName]: false })));
   }
 
   return (
@@ -183,20 +219,61 @@ export default function Zfs() {
                   <tr><th>Pool</th><th>State</th><th>Size</th><th>Used</th><th>Free</th><th>Actions</th></tr>
                 </thead>
                 <tbody>
-                  {pools.map((pool: any) => (
+                  {pools.map((pool: any) => {
+                    const policy = spindownByPool[pool.name];
+                    const busy = !!spindownBusy[pool.name];
+                    return (
                     <tr key={pool.name}>
-                      <td><strong>{pool.name}</strong></td>
-                      <td><span className={`badge ${pool.state?.toLowerCase()}`}>{pool.state}</span></td>
+                      <td>
+                        <strong>{pool.name}</strong>
+                        {policy && (
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
+                            <span className={`badge ${policy.enabled ? 'online' : policy.eligible ? '' : 'degraded'}`}>
+                              spindown {policy.enabled ? 'on' : policy.eligible ? 'eligible' : 'blocked'}
+                            </span>
+                            {policy.enabled && policy.active_windows?.length > 0 && (
+                              <span className={`badge ${policy.active_now ? 'online' : 'degraded'}`}>
+                                {policy.active_now ? 'window open' : 'deferred'}
+                              </span>
+                            )}
+                            {!policy.eligible && policy.reasons?.length > 0 && (
+                              <span style={{ fontSize: 12, color: '#777' }}>{policy.reasons.join('; ')}</span>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                      <td><span className={`badge ${(pool.health || pool.state || '').toLowerCase()}`}>{pool.health || pool.state || 'unknown'}</span></td>
                       <td>{pool.size_human}</td>
                       <td>{pool.alloc_human} ({pool.used_pct}%)</td>
                       <td>{pool.free_human}</td>
                       <td className="action-cell">
                         <button className="btn secondary" onClick={() => scrub(pool.name)}>Scrub</button>
                         {' '}
+                        {policy && (
+                          <>
+                            <button
+                              className="btn secondary"
+                              disabled={busy || (!policy.enabled && !policy.eligible)}
+                              onClick={() => setRawPoolSpindown(pool.name, !policy.enabled)}
+                            >
+                              {busy ? 'Working...' : policy.enabled ? 'Disable Spindown' : 'Enable Spindown'}
+                            </button>
+                            {' '}
+                            <button
+                              className="btn secondary"
+                              disabled={busy}
+                              onClick={() => setRawPoolSpindown(pool.name, !!policy.enabled, [{ days: ['daily'], start: '01:00', end: '06:00' }])}
+                            >
+                              Nightly
+                            </button>
+                            {' '}
+                          </>
+                        )}
                         <button className="btn danger" onClick={() => deletePool(pool.name)}>Destroy</button>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             )

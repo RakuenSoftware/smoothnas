@@ -1,8 +1,6 @@
 # Proposal: Unified Tiering — 02: mdadm/LVM Adapter
 
 **Status:** Pending
-**Date:** 2026-04-09
-**Updated:** 2026-04-12
 **Depends on:** unified-tiering-01-common-model, mdadm-complete-heat-engine
 **Part of:** unified-tiering-control-plane
 **Preceded by:** unified-tiering-01-common-model

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -20,6 +21,20 @@ type Share struct {
 	GuestOK    bool     `json:"guest_ok"`
 	AllowUsers []string `json:"allow_users,omitempty"` // empty = all users
 	Comment    string   `json:"comment"`
+}
+
+type Options struct {
+	SmoothFSVFS       bool
+	CompatibilityMode bool
+	// Interfaces is the active server-side IP set. When non-empty,
+	// smb.conf gets `server multi channel support = yes`,
+	// `interfaces = <list>`, and `bind interfaces only = yes` so
+	// SMB Multichannel-aware clients can open additional channels
+	// to each advertised IP. Phase 6 of the multi-NIC proposal.
+	// Empty IPv4/IPv6 plain-address strings; CIDR is accepted but
+	// only the address-side is meaningful to Samba's `interfaces`
+	// directive.
+	Interfaces []string
 }
 
 var shareNameRegex = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,63}$`)
@@ -51,6 +66,17 @@ func ValidateSharePath(path string) error {
 
 // GenerateConfig produces the full smb.conf content from a list of shares.
 func GenerateConfig(shares []Share, hostname string) string {
+	return GenerateConfigWithOptions(shares, hostname, DefaultOptions())
+}
+
+func DefaultOptions() Options {
+	return Options{
+		SmoothFSVFS:       SmoothFSVFSEnabled(),
+		CompatibilityMode: os.Getenv("SMOOTHNAS_SMB_COMPATIBILITY_MODE") == "1",
+	}
+}
+
+func GenerateConfigWithOptions(shares []Share, hostname string, opts Options) string {
 	var b strings.Builder
 
 	// Global section.
@@ -63,17 +89,47 @@ func GenerateConfig(shares []Share, hostname string) string {
 	b.WriteString("   log file = /var/log/samba/log.%m\n")
 	b.WriteString("   max log size = 1000\n")
 	b.WriteString("   server role = standalone server\n")
-	b.WriteString("   obey pam restrictions = yes\n")
-	b.WriteString("   unix password sync = yes\n")
-	b.WriteString("   pam password change = yes\n")
+	b.WriteString("   disable spoolss = yes\n")
+	b.WriteString("   load printers = no\n")
+	b.WriteString("   printing = bsd\n")
+	b.WriteString("   printcap name = /dev/null\n")
+	if opts.CompatibilityMode {
+		b.WriteString("   case sensitive = auto\n")
+		b.WriteString("   mangled names = illegal\n")
+	} else {
+		b.WriteString("   case sensitive = yes\n")
+		b.WriteString("   mangled names = no\n")
+	}
+	b.WriteString("   preserve case = yes\n")
+	b.WriteString("   short preserve case = yes\n")
 	// Throughput tuning: 8 MB socket buffers, zero-copy sendfile, async I/O.
 	b.WriteString("   socket options = TCP_NODELAY IPTOS_THROUGHPUT SO_RCVBUF=8388608 SO_SNDBUF=8388608\n")
 	b.WriteString("   use sendfile = yes\n")
 	b.WriteString("   aio read size = 1\n")
 	b.WriteString("   aio write size = 1\n")
+	b.WriteString("   strict sync = no\n")
+	b.WriteString("   sync always = no\n")
 	b.WriteString("   read raw = yes\n")
 	b.WriteString("   write raw = yes\n")
 	b.WriteString("   large readwrite = yes\n")
+	if opts.SmoothFSVFS {
+		b.WriteString("   ea support = yes\n")
+		b.WriteString("   store dos attributes = yes\n")
+		b.WriteString("   unix extensions = no\n")
+		b.WriteString("   kernel oplocks = no\n")
+	}
+	// Phase 6 multi-NIC proposal: SMB Multichannel default-on. When
+	// the active IP set is exposed by the network layer, advertise
+	// it so multichannel-aware clients can open additional TCP
+	// channels (one per server NIC) for higher per-client throughput
+	// in the broken-bond / per-NIC-IP topology. With the default
+	// bond there's a single IP and multichannel adds no extra
+	// channels — the directive is harmless in that case.
+	b.WriteString("   server multi channel support = yes\n")
+	if len(opts.Interfaces) > 0 {
+		fmt.Fprintf(&b, "   interfaces = %s\n", strings.Join(opts.Interfaces, " "))
+		b.WriteString("   bind interfaces only = yes\n")
+	}
 	b.WriteString("\n")
 
 	// Share sections.
@@ -96,6 +152,12 @@ func GenerateConfig(shares []Share, hostname string) string {
 		if len(share.AllowUsers) > 0 {
 			fmt.Fprintf(&b, "   valid users = %s\n", strings.Join(share.AllowUsers, " "))
 		}
+		if opts.SmoothFSVFS {
+			b.WriteString("   ea support = yes\n")
+			b.WriteString("   vfs objects = smoothfs\n")
+			b.WriteString("   smoothfs:lease watcher = no\n")
+			b.WriteString("   smoothfs:stable fileid = no\n")
+		}
 		b.WriteString("   create mask = 0664\n")
 		b.WriteString("   directory mask = 0775\n")
 		b.WriteString("\n")
@@ -104,9 +166,31 @@ func GenerateConfig(shares []Share, hostname string) string {
 	return b.String()
 }
 
+func SmoothFSVFSInstalled() bool {
+	matches, err := filepath.Glob("/usr/lib/*/samba/vfs/smoothfs.so")
+	return err == nil && len(matches) > 0
+}
+
+func SmoothFSVFSEnabled() bool {
+	return os.Getenv("SMOOTHNAS_SMB_SMOOTHFS_VFS") == "1" && SmoothFSVFSInstalled()
+}
+
+func SmoothFSVFSPaths() []string {
+	matches, err := filepath.Glob("/usr/lib/*/samba/vfs/smoothfs.so")
+	if err != nil {
+		return nil
+	}
+	return matches
+}
+
 // WriteConfig writes the generated smb.conf and reloads Samba.
 func WriteConfig(shares []Share, hostname string) error {
-	config := GenerateConfig(shares, hostname)
+	return WriteConfigWithOptions(shares, hostname, DefaultOptions())
+}
+
+// WriteConfigWithOptions writes the generated smb.conf and reloads Samba.
+func WriteConfigWithOptions(shares []Share, hostname string, opts Options) error {
+	config := GenerateConfigWithOptions(shares, hostname, opts)
 
 	if err := os.MkdirAll("/etc/samba", 0755); err != nil {
 		return fmt.Errorf("create samba dir: %w", err)
@@ -116,6 +200,9 @@ func WriteConfig(shares []Share, hostname string) error {
 		return fmt.Errorf("write smb.conf: %w", err)
 	}
 
+	if !IsEnabled() {
+		return nil
+	}
 	return Reload()
 }
 

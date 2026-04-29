@@ -87,7 +87,7 @@ type MovementLogEntry struct {
 	UpdatedAt      string `json:"updated_at"`
 }
 
-// NamespaceMeta captures the FUSE namespace daemon state for a pool.
+// NamespaceMeta captures the namespace daemon state for a pool.
 type NamespaceMeta struct {
 	ID          string `json:"id"`
 	SocketPath  string `json:"socket_path"`

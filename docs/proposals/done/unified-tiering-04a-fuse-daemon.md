@@ -1,8 +1,6 @@
 # Proposal: Unified Tiering — 04A: FUSE Daemon Infrastructure
 
 **Status:** Done
-**Date:** 2026-04-09
-**Updated:** 2026-04-12
 **Depends on:** unified-tiering-03-zfs-raw-backend
 **Part of:** unified-tiering-control-plane
 **Preceded by:** unified-tiering-03-zfs-raw-backend

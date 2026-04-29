@@ -7,7 +7,7 @@ import (
 
 // cacheShards is the number of independent shards in inodeCache. 64 shards
 // means 64 independent RWMutexes, spreading lock contention across concurrent
-// FUSE opens from multiple clients.
+// opens from multiple clients.
 const cacheShards = 64
 
 // defaultMaxCacheEntries caps the in-memory cache. Each entry is ~32 bytes
@@ -17,7 +17,7 @@ const cacheShards = 64
 const defaultMaxCacheEntries int64 = 4_700_000
 
 // inodeCache is a sharded read cache that sits in front of the per-tier bbolt
-// stores. The FUSE hot path calls Get once per open; the cache avoids the
+// stores. The hot path calls Get once per open; the cache avoids the
 // bbolt View() transaction overhead on repeat accesses to the same inode.
 //
 // Correctness guarantees:
@@ -25,9 +25,9 @@ const defaultMaxCacheEntries int64 = 4_700_000
 //   - Put/PutBlocking update the cache synchronously. The bbolt write is
 //     batched-async, but the cache reflects the latest intent immediately.
 //   - Delete removes the entry so the next Get re-reads from bbolt.
-//   - EvictColdest only moves metadata records between tier stores; the
-//     TierIdx field (which names the tier holding the data file) is unchanged,
-//     so cached entries remain valid after metadata eviction.
+//   - Move (placement-driven tier change) issues a Delete on the src tier
+//     and a PutBlocking on the dst tier; the cache ends up with the new
+//     record carrying the destination TierIdx.
 //   - When the cache is full, new inodes are not admitted. Existing entries
 //     continue to be served and updated — hot files stay cached, cold files
 //     that have never been accessed remain uncached.
@@ -87,7 +87,7 @@ func (c *inodeCache) put(inode uint64, rec Record) {
 // they are advisory and the placement planner reads them via Iterate() directly
 // from bbolt, so stale values in the cache have no correctness impact.
 //
-// This is the right call for the Put() hot path (fired on every FUSE open)
+// This is the right call for the Put() hot path (fired on every open)
 // because it avoids taking a write lock for the common case where only the
 // heat counter changed. The write lock is only taken when placement actually
 // changed or the entry is new.

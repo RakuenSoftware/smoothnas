@@ -69,7 +69,7 @@ func TestStoreOpenPutGet(t *testing.T) {
 		TierIdx:     1,
 		NamespaceID: NamespaceID("media"),
 	}
-	if !store.Put(42, rec) {
+	if !store.Put(42, 1, rec) {
 		t.Fatal("put returned false (queue full on empty store)")
 	}
 
@@ -83,7 +83,7 @@ func TestStoreOpenPutGet(t *testing.T) {
 	}
 	defer store.Close()
 
-	got, ok, err := store.Get(42)
+	got, ok, err := store.Get(42, 1)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestStoreConcurrentEnqueueFlushes(t *testing.T) {
 					NamespaceID: ns,
 				}
 				// PutBlocking in case the queue is momentarily full under load.
-				store.PutBlocking(inode, rec)
+				store.PutBlocking(inode, 1, rec)
 			}
 		}(uint64(w))
 	}
@@ -139,7 +139,7 @@ func TestStoreConcurrentEnqueueFlushes(t *testing.T) {
 	for w := uint64(0); w < writers; w++ {
 		for i := uint64(0); i < perWriter; i++ {
 			inode := w*perWriter + i + 1
-			got, ok, err := store.Get(inode)
+			got, ok, err := store.Get(inode, 1)
 			if err != nil {
 				t.Fatalf("get %d: %v", inode, err)
 			}
@@ -196,7 +196,7 @@ func TestStoreQueueBackpressure(t *testing.T) {
 	// enough on any hardware.
 	dropped := 0
 	for i := uint64(0); i < shardWriteQueueCap*20; i++ {
-		if !store.Put(i+1, rec) {
+		if !store.Put(i+1, 1, rec) {
 			dropped++
 		}
 	}
@@ -223,7 +223,7 @@ func TestStoreDelete(t *testing.T) {
 	defer store.Close()
 
 	rec := Record{Version: RecordVersion, TierIdx: 1, NamespaceID: NamespaceID("ns")}
-	store.PutBlocking(42, rec)
+	store.PutBlocking(42, 1, rec)
 	// Flush by closing+reopening.
 	if err := store.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -233,14 +233,110 @@ func TestStoreDelete(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 
-	if _, ok, _ := store.Get(42); !ok {
+	if _, ok, _ := store.Get(42, 1); !ok {
 		t.Fatal("expected record present before delete")
 	}
-	if err := store.Delete(42); err != nil {
+	if err := store.Delete(42, 1); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if _, ok, _ := store.Get(42); ok {
+	if _, ok, _ := store.Get(42, 1); ok {
 		t.Fatal("expected record absent after delete")
+	}
+}
+
+// TestPerTierIsolation makes sure two tiers can hold records keyed by the
+// same inode value (legitimate, since inodes are per-filesystem) without
+// either overwriting the other. Iterate(rank) sees only its tier;
+// IterateAll sees both.
+func TestPerTierIsolation(t *testing.T) {
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	store, err := Open([]TierBacking{
+		{Rank: 1, Name: "fast", BackingMount: dirA},
+		{Rank: 2, Name: "slow", BackingMount: dirB},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	const ino uint64 = 99
+	store.PutBlocking(ino, 1, Record{Version: RecordVersion, TierIdx: 1, HeatCounter: 10})
+	store.PutBlocking(ino, 2, Record{Version: RecordVersion, TierIdx: 2, HeatCounter: 99})
+	// Wait past shardBatchMaxAge (10ms) so both writes are durable on
+	// their respective tier shards before we read them back.
+	time.Sleep(50 * time.Millisecond)
+
+	gotFast, ok, err := store.Get(ino, 1)
+	if err != nil || !ok {
+		t.Fatalf("get fast: ok=%v err=%v", ok, err)
+	}
+	if gotFast.HeatCounter != 10 || gotFast.TierIdx != 1 {
+		t.Fatalf("fast tier got %+v, want HeatCounter=10 TierIdx=1", gotFast)
+	}
+	gotSlow, ok, err := store.Get(ino, 2)
+	if err != nil || !ok {
+		t.Fatalf("get slow: ok=%v err=%v", ok, err)
+	}
+	if gotSlow.HeatCounter != 99 || gotSlow.TierIdx != 2 {
+		t.Fatalf("slow tier got %+v, want HeatCounter=99 TierIdx=2", gotSlow)
+	}
+
+	perTier := map[int]int{}
+	_ = store.IterateAll(func(rank int, _ uint64, _ Record) error {
+		perTier[rank]++
+		return nil
+	})
+	if perTier[1] != 1 || perTier[2] != 1 {
+		t.Fatalf("IterateAll counts %v, want {1:1, 2:1}", perTier)
+	}
+
+	count := 0
+	_ = store.Iterate(1, func(_ uint64, _ Record) error { count++; return nil })
+	if count != 1 {
+		t.Fatalf("Iterate(1) count = %d, want 1", count)
+	}
+}
+
+// TestMoveBetweenTiers verifies Move shifts a record from one tier to
+// another, preserves payload, updates TierIdx, and leaves nothing
+// behind on the source.
+func TestMoveBetweenTiers(t *testing.T) {
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	store, err := Open([]TierBacking{
+		{Rank: 1, Name: "fast", BackingMount: dirA},
+		{Rank: 2, Name: "slow", BackingMount: dirB},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	const ino uint64 = 7
+	store.PutBlocking(ino, 1, Record{
+		Version:     RecordVersion,
+		PinState:    PinHot,
+		TierIdx:     1,
+		HeatCounter: 42,
+		NamespaceID: NamespaceID("ns"),
+	})
+	if err := store.Move(ino, 1, 2); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+
+	if _, ok, _ := store.Get(ino, 1); ok {
+		t.Fatal("source tier still holds record after move")
+	}
+	got, ok, err := store.Get(ino, 2)
+	if err != nil || !ok {
+		t.Fatalf("get dest: ok=%v err=%v", ok, err)
+	}
+	if got.TierIdx != 2 {
+		t.Fatalf("TierIdx = %d, want 2", got.TierIdx)
+	}
+	if got.PinState != PinHot || got.HeatCounter != 42 {
+		t.Fatalf("payload not preserved: %+v", got)
 	}
 }
 
@@ -274,13 +370,13 @@ func TestReconcileSweepsDead(t *testing.T) {
 		}
 		ino := sysStatIno(t, fi)
 		realInodes[i] = ino
-		store.PutBlocking(ino, Record{Version: RecordVersion, TierIdx: 1, NamespaceID: nsID})
+		store.PutBlocking(ino, 1, Record{Version: RecordVersion, TierIdx: 1, NamespaceID: nsID})
 	}
 	// Ghost inodes not on disk (pick values that won't collide with XFS-assigned ones).
 	ghostA := uint64(1<<50 | 1)
 	ghostB := uint64(1<<50 | 2)
-	store.PutBlocking(ghostA, Record{Version: RecordVersion, TierIdx: 1, NamespaceID: nsID})
-	store.PutBlocking(ghostB, Record{Version: RecordVersion, TierIdx: 1, NamespaceID: nsID})
+	store.PutBlocking(ghostA, 1, Record{Version: RecordVersion, TierIdx: 1, NamespaceID: nsID})
+	store.PutBlocking(ghostB, 1, Record{Version: RecordVersion, TierIdx: 1, NamespaceID: nsID})
 
 	// Force the async writer to flush by closing and reopening the store.
 	// This guarantees the sweep's Iterate sees every seeded record.
@@ -304,14 +400,14 @@ func TestReconcileSweepsDead(t *testing.T) {
 		t.Fatalf("FilesWalked = %d, want 3", stats.FilesWalked)
 	}
 	for _, ino := range realInodes {
-		if _, ok, _ := store.Get(ino); !ok {
+		if _, ok, _ := store.Get(ino, 1); !ok {
 			t.Fatalf("real inode %d was swept (false positive)", ino)
 		}
 	}
-	if _, ok, _ := store.Get(ghostA); ok {
+	if _, ok, _ := store.Get(ghostA, 1); ok {
 		t.Fatal("ghost A record survived sweep")
 	}
-	if _, ok, _ := store.Get(ghostB); ok {
+	if _, ok, _ := store.Get(ghostB, 1); ok {
 		t.Fatal("ghost B record survived sweep")
 	}
 }
@@ -341,12 +437,13 @@ func TestReconcilePreservesPinState(t *testing.T) {
 	}
 	ino := sysStatIno(t, fi)
 
-	// Seed the store with a pinned record on tier 5 (different from the
-	// tier rank we'll pass to the reconciler).
-	store.PutBlocking(ino, Record{
+	// Seed the store with a pinned record on tier 1 (the only tier in
+	// this single-tier test). Reconcile will rewrite the record but
+	// must preserve PinState.
+	store.PutBlocking(ino, 1, Record{
 		Version:     RecordVersion,
 		PinState:    PinHot,
-		TierIdx:     5,
+		TierIdx:     1,
 		NamespaceID: nsID,
 	})
 	time.Sleep(20 * time.Millisecond)
@@ -368,7 +465,7 @@ func TestReconcilePreservesPinState(t *testing.T) {
 	}
 	defer store.Close()
 
-	got, ok, err := store.Get(ino)
+	got, ok, err := store.Get(ino, 1)
 	if err != nil || !ok {
 		t.Fatalf("record missing after reconcile: ok=%v err=%v", ok, err)
 	}

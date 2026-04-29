@@ -1,7 +1,6 @@
 # Proposal: mdadm Heat Engine — 02 Schema
 
 **Status:** Done
-**Date:** 2026-04-10
 **Implements:** mdadm-complete-heat-engine (Work Package 1 — storage-model convergence, DB layer)
 **Depends on:** mdadm-tiering-infrastructure
 

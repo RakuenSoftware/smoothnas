@@ -1,7 +1,7 @@
 [Unit]
 Description=SimpleNAS Storage Management Daemon
-After=multi-user.target network-online.target smoothnas-firstboot.service mdadm-monitor.service
-Wants=network-online.target
+After=multi-user.target network-online.target smoothnas-firstboot.service mdadm-monitor.service tierd-host-init.service
+Wants=network-online.target tierd-host-init.service
 
 [Service]
 Type=simple

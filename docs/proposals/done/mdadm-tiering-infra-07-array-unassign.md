@@ -1,7 +1,6 @@
 # Proposal: mdadm Tiering Infrastructure — DELETE /api/tiers/{name}/tiers/{tier_name} (Array Unassignment)
 
 **Status:** Done
-**Date:** 2026-04-09
 **Part of:** mdadm-tiering-infrastructure (Step 7 of 14)
 **Depends on:** mdadm-tiering-infra-06-array-assign
 

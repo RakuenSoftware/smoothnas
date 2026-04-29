@@ -1,0 +1,51 @@
+#!/usr/bin/make -f
+# Debian rules for tierd.
+#
+# We deliberately don't use dh-golang here: tierd vendors its deps
+# via `go mod`, and dh-golang wants to rewrite the import path under
+# /build/go/src/... which fights the module cache. A plain `go build`
+# against the source tree produces a standalone binary; we copy it
+# into debian/tierd/usr/sbin/ via dh_install.
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	@true
+
+override_dh_auto_build:
+	mkdir -p debian/bin
+	CGO_ENABLED=1 GOPRIVATE=github.com/RakuenSoftware/* GONOSUMDB=github.com/RakuenSoftware/* GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf GIT_CONFIG_VALUE_0=https://github.com/ GOFLAGS="-buildvcs=false -trimpath" \
+	    go build -o debian/bin/tierd ./cmd/tierd
+	CGO_ENABLED=1 GOPRIVATE=github.com/RakuenSoftware/* GONOSUMDB=github.com/RakuenSoftware/* GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf GIT_CONFIG_VALUE_0=https://github.com/ GOFLAGS="-buildvcs=false -trimpath" \
+	    go build -o debian/bin/tierd-cli ./cmd/tierd-cli
+
+override_dh_auto_test:
+	# Unit tests run from the dev tree via `go test ./...`, not at
+	# package-build time. Running them here would require the test
+	# environment's fixtures (e.g. smoothfs.ko loaded for some
+	# e2e paths) which the build host doesn't have.
+	@true
+
+override_dh_auto_install:
+	dh_auto_install
+
+override_dh_auto_clean:
+	rm -rf debian/bin
+
+override_dh_installsystemd:
+	dh_installsystemd --name=tierd
+
+override_dh_dwz:
+	# Go binaries ship pre-compressed DWARF that dwz can't
+	# recompress. Skip it — dh_strip still runs and produces a
+	# -dbgsym deb with the full debug symbols separately.
+	@true
+
+override_dh_strip:
+	# Retain the full binary in the main package; Go's compressed
+	# .debug_* sections are already small, and dh_strip tries to
+	# split them into a -dbgsym package that ends up unusable for
+	# the Go toolchain's stack traces. Shipping the stripped-but-
+	# retained version is fine.
+	dh_strip --no-automatic-dbgsym

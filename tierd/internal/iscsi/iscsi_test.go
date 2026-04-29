@@ -20,9 +20,9 @@ func TestValidateIQN(t *testing.T) {
 	invalid := []string{
 		"",
 		"not-an-iqn",
-		"iqn.2026.com.bad",      // missing month
-		"iqn.26-01.com.bad",     // 2-digit year
-		"naa.5000c5000c5000c5",  // NAA format, not IQN
+		"iqn.2026.com.bad",     // missing month
+		"iqn.26-01.com.bad",    // 2-digit year
+		"naa.5000c5000c5000c5", // NAA format, not IQN
 		"iqn.2026-01.com.bad:has space",
 	}
 	for _, iqn := range invalid {
@@ -45,11 +45,11 @@ func TestValidateBlockDevice(t *testing.T) {
 	}
 
 	invalid := []string{
-		"/dev/sda",          // raw disk, not LV/zvol
+		"/dev/sda", // raw disk, not LV/zvol
 		"/etc/passwd",
 		"",
 		"/dev/zvol/",
-		"/dev/zvol/0bad",    // starts with digit
+		"/dev/zvol/0bad", // starts with digit
 	}
 	for _, path := range invalid {
 		if err := ValidateBlockDevice(path); err == nil {
@@ -144,6 +144,32 @@ func TestBuildCreateTargetArgsInvalidDevice(t *testing.T) {
 	)
 	if err == nil {
 		t.Error("expected error for invalid block device")
+	}
+}
+
+func TestBuildSetTargetPortalGroupStateArgs(t *testing.T) {
+	iqn := "iqn.2026-01.com.smoothnas:host:vol0"
+
+	disableArgs, err := BuildSetTargetPortalGroupStateArgs(iqn, false)
+	if err != nil {
+		t.Fatalf("disable args: %v", err)
+	}
+	if got, want := strings.Join(disableArgs, " "), "/iscsi/"+iqn+"/tpg1 disable"; got != want {
+		t.Fatalf("disable args = %q, want %q", got, want)
+	}
+
+	enableArgs, err := BuildSetTargetPortalGroupStateArgs(iqn, true)
+	if err != nil {
+		t.Fatalf("enable args: %v", err)
+	}
+	if got, want := strings.Join(enableArgs, " "), "/iscsi/"+iqn+"/tpg1 enable"; got != want {
+		t.Fatalf("enable args = %q, want %q", got, want)
+	}
+}
+
+func TestBuildSetTargetPortalGroupStateArgsInvalidIQN(t *testing.T) {
+	if _, err := BuildSetTargetPortalGroupStateArgs("bad-iqn", false); err == nil {
+		t.Fatal("expected error for invalid IQN")
 	}
 }
 

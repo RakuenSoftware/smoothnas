@@ -2,15 +2,17 @@
   "name": "smoothnas-ui",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "vite",
     "check": "tsc -b",
+    "lint": "eslint .",
     "build": "npm run check && vite build",
     "test": "npm run check",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@rakuensoftware/smoothgui": "^0.2.3",
+    "@rakuensoftware/smoothgui": "^0.4.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",
     "@xterm/xterm": "^6.0.0",
@@ -19,11 +21,16 @@
     "react-router-dom": "^7.5.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.4",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.4.1",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
     "sass": "^1.86.0",
     "typescript": "~5.8.3",
+    "typescript-eslint": "^8.59.0",
     "vite": "^6.3.1"
   }
 }
