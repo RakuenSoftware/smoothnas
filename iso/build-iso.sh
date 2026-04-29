@@ -34,16 +34,13 @@ SMOOTHGUI_FRONTEND_DIR="${SMOOTHGUI_FRONTEND_DIR:-${SMOOTHGUI_DIR}/dist/installe
 SMOOTHGUI_FRONTEND_REQUIRED="${SMOOTHGUI_FRONTEND_REQUIRED:-1}"
 SMOOTHGUI_FRONTEND_PORT="${SMOOTHGUI_FRONTEND_PORT:-8080}"
 SMOOTHGUI_FRONTEND_BIND="${SMOOTHGUI_FRONTEND_BIND:-127.0.0.1}"
-DEFAULT_SMOOTHKERNEL_DIR="${PROJECT_DIR}/../smoothkernel/out-smoothnas"
-if [ ! -d "$DEFAULT_SMOOTHKERNEL_DIR" ]; then
-    DEFAULT_SMOOTHKERNEL_DIR="/home/virant/kbuild"
-fi
+# Where to find prebuilt SmoothKernel + OpenZFS .debs. The CI release
+# workflow downloads them from a pinned RakuenSoftware/smoothkernel
+# GitHub release; operators can point this at a local out/ directory
+# from `make kernel && make zfs` in a sibling smoothkernel checkout.
+DEFAULT_SMOOTHKERNEL_DIR="${PROJECT_DIR}/../smoothkernel/out"
 SMOOTHKERNEL_DIR="${SMOOTHKERNEL_DIR:-$DEFAULT_SMOOTHKERNEL_DIR}"
-DEFAULT_ZFS_ARTIFACT_DIR="$SMOOTHKERNEL_DIR"
-if ! compgen -G "${DEFAULT_ZFS_ARTIFACT_DIR}/zfs_*.deb" >/dev/null; then
-    DEFAULT_ZFS_ARTIFACT_DIR="${SMOOTHKERNEL_DIR}/zfs-2.4.1"
-fi
-ZFS_ARTIFACT_DIR="${ZFS_ARTIFACT_DIR:-$DEFAULT_ZFS_ARTIFACT_DIR}"
+ZFS_ARTIFACT_DIR="${ZFS_ARTIFACT_DIR:-$SMOOTHKERNEL_DIR}"
 SMOOTHFS_REPO_URL="${SMOOTHFS_REPO_URL:-git@github.com:RakuenSoftware/smoothfs.git}"
 SMOOTHFS_REPO_REF="${SMOOTHFS_REPO_REF:-6382817fd1a561b6d4c39421d954a65f27a18087}"
 SMOOTHFS_SRC_DIR="${SMOOTHFS_SRC_DIR:-}"
@@ -108,11 +105,11 @@ prepare_smoothfs_source() {
 }
 
 resolve_appliance_artifacts() {
-    KERNEL_IMAGE_DEB=$(pick_artifact "${SMOOTHKERNEL_DIR}/linux-image-*smoothnas_*.deb" "-dbg_") || {
+    KERNEL_IMAGE_DEB=$(pick_artifact "${SMOOTHKERNEL_DIR}/linux-image-*-smoothkernel_*.deb" "-dbg_") || {
         echo "ERROR: SmoothKernel image package not found under ${SMOOTHKERNEL_DIR}."
         exit 1
     }
-    KERNEL_HEADERS_DEB=$(pick_artifact "${SMOOTHKERNEL_DIR}/linux-headers-*smoothnas_*.deb") || {
+    KERNEL_HEADERS_DEB=$(pick_artifact "${SMOOTHKERNEL_DIR}/linux-headers-*-smoothkernel_*.deb") || {
         echo "ERROR: SmoothKernel headers package not found under ${SMOOTHKERNEL_DIR}."
         exit 1
     }
@@ -120,13 +117,6 @@ resolve_appliance_artifacts() {
         echo "ERROR: SmoothKernel linux-libc-dev package not found under ${SMOOTHKERNEL_DIR}."
         exit 1
     }
-
-    case "$(basename "$KERNEL_IMAGE_DEB") $(basename "$KERNEL_HEADERS_DEB")" in
-        *smoothnas-lts*)
-            echo "ERROR: Refusing to use smoothnas-lts kernel artifacts."
-            exit 1
-            ;;
-    esac
 
     ZFS_PACKAGE_FILES=()
     local pkg

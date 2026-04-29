@@ -116,7 +116,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             xorriso isolinux syslinux-utils cpio gzip file curl \
-            libpam0g-dev gcc dpkg-dev
+            libpam0g-dev gcc dpkg-dev xz-utils
 
       - uses: actions/setup-go@v5
         with:
@@ -155,50 +155,28 @@ jobs:
 
       # --- Sibling repos for the ISO build ---
 
-      - name: Resolve smoothkernel ref
-        id: smoothkernel_ref
+      - name: Read pinned SmoothKernel release tag
+        id: smoothkernel
         run: |
           set -euo pipefail
-          SHA="$(git ls-remote https://github.com/RakuenSoftware/smoothkernel HEAD | awk '{print $1}')"
-          [ -n "$SHA" ] || { echo "Failed to resolve smoothkernel HEAD" >&2; exit 1; }
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "Pinning smoothkernel to $SHA"
+          TAG="$(head -n 1 iso/smoothkernel-version | tr -d '[:space:]')"
+          [ -n "$TAG" ] || { echo "iso/smoothkernel-version is empty" >&2; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Pinned to SmoothKernel release: $TAG"
 
-      - name: Restore SmoothKernel artifact cache
-        id: smoothkernel_cache
-        uses: actions/cache@v4
-        with:
-          path: deps/smoothkernel-out
-          key: smoothkernel-${{ steps.smoothkernel_ref.outputs.sha }}-amd64
-
-      - name: Build SmoothKernel + ZFS (cache miss)
-        if: steps.smoothkernel_cache.outputs.cache-hit != 'true'
+      - name: Download SmoothKernel + ZFS .debs
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          sudo apt-get install -y \
-            build-essential bc bison flex libelf-dev libssl-dev libncurses-dev \
-            libdw-dev pahole rsync debhelper kmod fakeroot
-          git clone --filter=blob:none https://github.com/RakuenSoftware/smoothkernel deps/smoothkernel-src
-          cd deps/smoothkernel-src
-          git checkout "${{ steps.smoothkernel_ref.outputs.sha }}"
-          cat > build.env <<'ENVEOF'
-          KERNEL_VERSION=6.19.12
-          LOCALVERSION=-smoothnas
-          ZFS_VERSION=2.4.1
-          CONFIG_SOURCE=$(CURDIR)/configs/smooth-amd64.config
-          CACHYOS_PATCHSET=cachyos-6.19.12
-          NOBARA_PATCHSET=nobara-picks
-          POST_NOBARA_PATCHSET=post-nobara-6.19.12
-          OUT_DIR=$(CURDIR)/out-smoothnas
-          STRIP_DEBUG_INFO=1
-          NET_TUNING=1
-          SERVER_TUNING=1
-          APPLIANCE_TRIM=1
-          ENVEOF
-          make kernel
-          make zfs
-          mkdir -p "$GITHUB_WORKSPACE/deps/smoothkernel-out"
-          cp out-smoothnas/*.deb "$GITHUB_WORKSPACE/deps/smoothkernel-out/"
+          mkdir -p deps/smoothkernel-out
+          gh release download "${{ steps.smoothkernel.outputs.tag }}" \
+            --repo RakuenSoftware/smoothkernel \
+            --pattern '*.deb' \
+            --pattern 'SHA256SUMS' \
+            --dir deps/smoothkernel-out
+          (cd deps/smoothkernel-out && sha256sum -c SHA256SUMS)
+          ls -lh deps/smoothkernel-out/
 
       - name: Checkout smoothiso
         uses: actions/checkout@v4
