@@ -39,17 +39,17 @@ type ReconcileStats struct {
 //
 // Hot files open via openCreateObject populate the store directly; this
 // walk is for files that pre-exist the meta store (legacy rows from the
-// SQLite era, or files placed outside of FUSE).
+// SQLite era, or files placed outside of smoothfs).
 func (p *PoolMetaStore) Reconcile(ctx context.Context, namespaceID string, sources []ReconcileSource) ReconcileStats {
 	start := time.Now()
 	nsID := NamespaceID(namespaceID)
 	var stats ReconcileStats
 
-	// Track every inode the walker sees across all tiers for this
-	// namespace, so we can detect meta records that no longer correspond
-	// to a real file (ghost records from UNLINKed files whose delete
-	// enqueue was dropped, or files removed directly on the backing FS).
-	live := make(map[uint64]struct{}, 1<<15)
+	// Track every (tier, inode) pair the walker observes. Inodes are
+	// unique per backing filesystem, not across tiers, so a single set
+	// would conflate identical inode values from different XFS volumes
+	// and falsely keep ghost records alive (or sweep live ones).
+	live := make(map[int]map[uint64]struct{}, len(sources))
 
 	for _, src := range sources {
 		if src.BackingMount == "" {
@@ -59,7 +59,10 @@ func (p *PoolMetaStore) Reconcile(ctx context.Context, namespaceID string, sourc
 			stats.Aborted = true
 			break
 		}
-		p.walkTier(ctx, nsID, src, &stats, live)
+		if live[src.TierRank] == nil {
+			live[src.TierRank] = make(map[uint64]struct{}, 1<<15)
+		}
+		p.walkTier(ctx, nsID, src, &stats, live[src.TierRank])
 	}
 
 	if !stats.Aborted {
@@ -73,21 +76,32 @@ func (p *PoolMetaStore) Reconcile(ctx context.Context, namespaceID string, sourc
 	return stats
 }
 
-// sweepDead removes any record whose inode was not observed during the
-// walk. Scoped to records whose NamespaceID matches the pool's namespace
-// so a shared-pool multi-namespace future doesn't accidentally delete
-// each other's records.
-func (p *PoolMetaStore) sweepDead(ctx context.Context, nsID uint64, live map[uint64]struct{}, stats *ReconcileStats) {
-	var victims []uint64
-	err := p.Iterate(func(ino uint64, rec Record) error {
+// sweepDead removes any record whose (tier, inode) was not observed
+// during the walk. Scoped to records whose NamespaceID matches the
+// pool's namespace so a shared-pool multi-namespace future doesn't
+// accidentally delete each other's records.
+type victim struct {
+	tier  int
+	inode uint64
+}
+
+func (p *PoolMetaStore) sweepDead(ctx context.Context, nsID uint64, live map[int]map[uint64]struct{}, stats *ReconcileStats) {
+	var victims []victim
+	err := p.IterateAll(func(tierRank int, ino uint64, rec Record) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if rec.NamespaceID != nsID {
 			return nil
 		}
-		if _, ok := live[ino]; !ok {
-			victims = append(victims, ino)
+		liveSet, hasTier := live[tierRank]
+		if !hasTier {
+			// No source listed for this tier; treat as "not walked",
+			// don't sweep.
+			return nil
+		}
+		if _, ok := liveSet[ino]; !ok {
+			victims = append(victims, victim{tier: tierRank, inode: ino})
 		}
 		return nil
 	})
@@ -95,9 +109,9 @@ func (p *PoolMetaStore) sweepDead(ctx context.Context, nsID uint64, live map[uin
 		stats.Aborted = true
 		return
 	}
-	for _, ino := range victims {
-		if err := p.Delete(ino); err != nil {
-			log.Printf("meta: sweepDead delete inode %d: %v", ino, err)
+	for _, v := range victims {
+		if err := p.Delete(v.inode, v.tier); err != nil {
+			log.Printf("meta: sweepDead delete tier=%d inode=%d: %v", v.tier, v.inode, err)
 			continue
 		}
 		stats.DeadRecords++
@@ -138,8 +152,8 @@ func (p *PoolMetaStore) walkTier(ctx context.Context, nsID uint64, src Reconcile
 		}
 		live[st.Ino] = struct{}{}
 
-		// Preserve pin state if the record already exists.
-		existing, have, _ := p.Get(st.Ino)
+		// Preserve pin state if the record already exists on this tier.
+		existing, have, _ := p.Get(st.Ino, src.TierRank)
 		rec := Record{
 			Version:     RecordVersion,
 			TierIdx:     uint8(src.TierRank),
@@ -152,7 +166,7 @@ func (p *PoolMetaStore) walkTier(ctx context.Context, nsID uint64, src Reconcile
 		}
 		// Use blocking put so a large backlog never silently drops records on
 		// the cold startup path.
-		p.PutBlocking(st.Ino, rec)
+		p.PutBlocking(st.Ino, src.TierRank, rec)
 		atomic.AddInt64(&stats.RecordsEnqueued, 1)
 		return nil
 	})

@@ -40,22 +40,26 @@ type TierBacking struct {
 }
 
 // PoolMetaStore is the per-pool metadata store. It owns one tier-store
-// per tier in the pool (NVMe, SSD, HDD…) and routes operations across
-// them so metadata records mirror the tiering of user data: hot records
-// live on the fastest tier, cold records spill to slower tiers.
+// per tier in the pool (NVMe, SSD, HDD…). Each record lives on exactly
+// one tier — the same tier that holds the file it describes. Callers
+// that touch a file already know which tier it's on (the open returns
+// the chosen tier, placement scans walk one tier at a time, etc.) and
+// pass the rank to every meta operation.
+//
+// Rationale: probing every tier on the read path makes the slowest tier
+// dominate latency, so a degraded HDD (e.g. mid-rebuild) can hang the smoothfs kernel path
+// creates that target NVMe. Per-tier records confine that contention to
+// operations that actually touch the slow tier.
 //
 // Behaviour:
 //
-//   - Put always writes to the fastest tier and removes any stale copy
-//     on slower tiers, so a record only ever lives in one place.
-//   - Get probes tiers fastest-first; on hit-from-slower, the next Put
-//     (which the FUSE OPEN path issues for heat tracking) naturally
-//     promotes the record back to fastest.
-//   - Delete removes from every tier (cheap; absent keys are no-ops).
-//   - Iterate visits every tier with a dedup set so callers see each
-//     inode once (fastest-tier copy wins).
-//   - EvictColdest moves records from a hot tier to the next slower tier
-//     when the placement planner detects capacity pressure.
+//   - Get(inode, tier) reads exactly one tier; absent records return ok=false.
+//   - Put(inode, tier, rec) enqueues to that tier's writer.
+//   - Delete(inode, tier) deletes from that tier only.
+//   - Move(inode, src, dst) atomically (from the caller's view) shifts a
+//     record between tiers when its file is migrated. Used by placement.
+//   - Iterate(tier, fn) walks one tier; IterateAll(fn) walks every tier
+//     and reports the rank for each record so callers can mutate in place.
 type PoolMetaStore struct {
 	tiers []*tierStore // sorted by rank ascending (fastest first)
 	cache *inodeCache
@@ -228,157 +232,170 @@ func (p *PoolMetaStore) FastestRoot() string {
 	return p.tiers[0].root
 }
 
-// Put enqueues a record onto the fastest tier. Returns false only if the
-// fastest tier's write queue is full.
-//
-// Maintains the "exactly one tier per record" invariant: if a stale copy
-// exists on a slower tier (from prior eviction), Put deletes it. The
-// cleanup uses a cheap mmap'd `get` to probe before issuing the
-// expensive `del` transaction, so the hot path (record already on
-// fastest, nothing on slower) pays only a handful of pointer-dereferences
-// and never a write transaction.
-func (p *PoolMetaStore) Put(inode uint64, rec Record) bool {
-	cleanupSlowerTiers(p.tiers, inode)
-	ok := p.tiers[0].shardFor(inode).enqueue(InodeKey(inode), rec.Encode())
-	p.cache.putIfPlacementChanged(inode, rec)
-	return ok
-}
-
-// PutBlocking is the can't-drop variant of Put (e.g., user-driven pin
-// state changes). Same one-tier-at-a-time invariant as Put.
-func (p *PoolMetaStore) PutBlocking(inode uint64, rec Record) {
-	cleanupSlowerTiers(p.tiers, inode)
-	p.tiers[0].shardFor(inode).enqueueBlocking(InodeKey(inode), rec.Encode())
-	p.cache.put(inode, rec)
-}
-
-// cleanupSlowerTiers issues a `del` on any slower tier that *currently*
-// holds a record for inode. The `get` probe is a lock-free mmap deref —
-// negligible cost on a miss. The `del` runs only on a hit, which is rare
-// (only after promotion-from-cold). Walks every slower tier, not just
-// tier 1, in case eviction races left copies on multiple tiers.
-func cleanupSlowerTiers(tiers []*tierStore, inode uint64) {
-	key := InodeKey(inode)
-	for i := 1; i < len(tiers); i++ {
-		sh := tiers[i].shardFor(inode)
-		if _, ok, _ := sh.get(key); ok {
-			_ = sh.del(key)
-		}
-	}
-}
-
-// Delete removes the record from every tier. No-op for absent keys.
-func (p *PoolMetaStore) Delete(inode uint64) error {
-	p.cache.del(inode)
-	var firstErr error
+// tierByRank returns the tier-store with the given rank, or nil if none.
+func (p *PoolMetaStore) tierByRank(rank int) *tierStore {
 	for _, t := range p.tiers {
-		if err := t.shardFor(inode).del(InodeKey(inode)); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
-}
-
-// Get returns the record for inode. It checks the in-memory cache first;
-// on a miss it probes tiers fastest-first and populates the cache on hit.
-func (p *PoolMetaStore) Get(inode uint64) (Record, bool, error) {
-	if rec, ok := p.cache.get(inode); ok {
-		return rec, true, nil
-	}
-	for _, t := range p.tiers {
-		val, ok, err := t.shardFor(inode).get(InodeKey(inode))
-		if err != nil {
-			return Record{}, false, err
-		}
-		if ok {
-			rec, err := DecodeRecord(val)
-			if err != nil {
-				return Record{}, false, err
-			}
-			p.cache.put(inode, rec)
-			return rec, true, nil
-		}
-	}
-	return Record{}, false, nil
-}
-
-// Iterate visits every record across every tier exactly once. Faster-tier
-// copies win when the same inode appears in multiple tiers (which can
-// happen briefly during eviction races; under steady state Put + Delete
-// keep records exclusive).
-func (p *PoolMetaStore) Iterate(fn func(inode uint64, rec Record) error) error {
-	seen := make(map[uint64]struct{})
-	for _, t := range p.tiers {
-		for _, sh := range t.shards {
-			if sh == nil {
-				continue
-			}
-			err := sh.iterate(func(ino uint64, val []byte) error {
-				if _, dup := seen[ino]; dup {
-					return nil
-				}
-				seen[ino] = struct{}{}
-				rec, derr := DecodeRecord(val)
-				if derr != nil {
-					return nil
-				}
-				return fn(ino, rec)
-			})
-			if err != nil {
-				return err
-			}
+		if t.rank == rank {
+			return t
 		}
 	}
 	return nil
 }
 
-// EvictColdest moves up to maxRecords records with the oldest
-// LastAccessNS from tier index srcTierIdx to srcTierIdx+1. Skips records
-// pinned-hot — the user explicitly wants those on fast storage. Returns
-// the number actually moved. No-op if srcTierIdx is the slowest tier.
-func (p *PoolMetaStore) EvictColdest(srcTierIdx, maxRecords int) (int, error) {
-	if srcTierIdx < 0 || srcTierIdx >= len(p.tiers)-1 || maxRecords <= 0 {
-		return 0, nil
+// Put enqueues a record onto the named tier. Returns false only if that
+// tier's write queue is full or the rank is unknown.
+func (p *PoolMetaStore) Put(inode uint64, tierRank int, rec Record) bool {
+	t := p.tierByRank(tierRank)
+	if t == nil {
+		return false
 	}
-	src := p.tiers[srcTierIdx]
-	dst := p.tiers[srcTierIdx+1]
+	ok := t.shardFor(inode).enqueue(InodeKey(inode), rec.Encode())
+	p.cache.putIfPlacementChanged(inode, rec)
+	return ok
+}
 
-	type cand struct {
-		ino uint64
-		rec Record
+// PutBlocking is the can't-drop variant of Put (e.g., reconcile, pin
+// state changes). Returns silently if the rank is unknown — callers
+// should not be passing tiers that don't exist.
+func (p *PoolMetaStore) PutBlocking(inode uint64, tierRank int, rec Record) {
+	t := p.tierByRank(tierRank)
+	if t == nil {
+		return
 	}
-	var cands []cand
-	for _, sh := range src.shards {
+	t.shardFor(inode).enqueueBlocking(InodeKey(inode), rec.Encode())
+	p.cache.put(inode, rec)
+}
+
+// Delete removes the record from the named tier. No-op if absent or if
+// the rank is unknown. Drops the cache entry unconditionally so a stale
+// cached copy can't outlive the on-disk record.
+func (p *PoolMetaStore) Delete(inode uint64, tierRank int) error {
+	t := p.tierByRank(tierRank)
+	if t == nil {
+		return nil
+	}
+	p.cache.del(inode)
+	return t.shardFor(inode).del(InodeKey(inode))
+}
+
+// Get returns the record for inode on the named tier. The in-memory
+// cache is consulted first; a hit short-circuits the bbolt View. On a
+// miss the on-disk shard is read and the cache populated.
+//
+// The cache is keyed by inode alone, not (tier, inode). That's safe in
+// practice because XFS allocates from a 64-bit inode space and the
+// chance of two tiers reusing the same inode value for unrelated files
+// is vanishingly small, but it means a paranoid caller of Get on a
+// non-authoritative tier could see a cached record from a different
+// tier. The hot paths (placement, on-disk lookup) only ever Get on
+// the tier where they just observed the file, so this is not exercised.
+func (p *PoolMetaStore) Get(inode uint64, tierRank int) (Record, bool, error) {
+	if rec, ok := p.cache.get(inode); ok && int(rec.TierIdx) == tierRank {
+		return rec, true, nil
+	}
+	t := p.tierByRank(tierRank)
+	if t == nil {
+		return Record{}, false, nil
+	}
+	val, ok, err := t.shardFor(inode).get(InodeKey(inode))
+	if err != nil {
+		return Record{}, false, err
+	}
+	if !ok {
+		return Record{}, false, nil
+	}
+	rec, err := DecodeRecord(val)
+	if err != nil {
+		return Record{}, false, err
+	}
+	p.cache.put(inode, rec)
+	return rec, true, nil
+}
+
+// Move shifts a record from src to dst. Used when placement migrates a
+// file between tiers — the data move must be paired with this call so
+// the meta record follows. Returns nil (no-op) if the source has no
+// record. Updates rec.TierIdx to dst before writing.
+//
+// Move bypasses PutBlocking + Delete for two reasons:
+//
+//   - The source shard may still have a queued Put for this inode that
+//     hasn't been flushed; if our delete reached bbolt before that flush
+//     ran, the queued Put would resurrect the record. drainQueue forces
+//     the source shard to commit anything queued at call time before we
+//     delete.
+//   - PoolMetaStore.Delete unconditionally evicts the cache entry for
+//     the inode. The cache is keyed by inode alone, so a Delete on the
+//     source tier would clobber the cache entry we just wrote for the
+//     destination tier. We manage the cache directly here instead.
+func (p *PoolMetaStore) Move(inode uint64, fromRank, toRank int) error {
+	if fromRank == toRank {
+		return nil
+	}
+	rec, ok, err := p.Get(inode, fromRank)
+	if err != nil || !ok {
+		return err
+	}
+	rec.TierIdx = uint8(toRank)
+
+	src := p.tierByRank(fromRank)
+	dst := p.tierByRank(toRank)
+	if dst == nil {
+		return fmt.Errorf("meta: unknown destination tier rank %d", toRank)
+	}
+
+	if src != nil {
+		src.shardFor(inode).drainQueue()
+	}
+	if err := dst.shardFor(inode).putSync(InodeKey(inode), rec.Encode()); err != nil {
+		return err
+	}
+	p.cache.put(inode, rec)
+	if src != nil {
+		return src.shardFor(inode).del(InodeKey(inode))
+	}
+	return nil
+}
+
+// Iterate walks every record on the named tier. Returns immediately if
+// the rank is unknown.
+func (p *PoolMetaStore) Iterate(tierRank int, fn func(inode uint64, rec Record) error) error {
+	t := p.tierByRank(tierRank)
+	if t == nil {
+		return nil
+	}
+	for _, sh := range t.shards {
 		if sh == nil {
 			continue
 		}
-		_ = sh.iterate(func(ino uint64, val []byte) error {
+		err := sh.iterate(func(ino uint64, val []byte) error {
 			rec, derr := DecodeRecord(val)
 			if derr != nil {
 				return nil
 			}
-			if rec.PinState == PinHot {
-				return nil
-			}
-			cands = append(cands, cand{ino, rec})
-			return nil
+			return fn(ino, rec)
 		})
-	}
-	sort.Slice(cands, func(i, j int) bool {
-		return cands[i].rec.LastAccessNS < cands[j].rec.LastAccessNS
-	})
-	if len(cands) > maxRecords {
-		cands = cands[:maxRecords]
-	}
-	moved := 0
-	for _, c := range cands {
-		dst.shardFor(c.ino).enqueueBlocking(InodeKey(c.ino), c.rec.Encode())
-		if err := src.shardFor(c.ino).del(InodeKey(c.ino)); err != nil {
-			continue
+		if err != nil {
+			return err
 		}
-		moved++
 	}
-	return moved, nil
+	return nil
+}
+
+// IterateAll walks every record on every tier. The callback receives the
+// tier rank so callers can mutate the right tier when needed (e.g.,
+// reconcile sweeping ghost records).
+func (p *PoolMetaStore) IterateAll(fn func(tierRank int, inode uint64, rec Record) error) error {
+	for _, t := range p.tiers {
+		rank := t.rank
+		err := p.Iterate(rank, func(ino uint64, rec Record) error {
+			return fn(rank, ino, rec)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // NamespaceID returns the stable 64-bit id used inside records for a

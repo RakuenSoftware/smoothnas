@@ -6,17 +6,22 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/network"
 )
 
 // NetworkHandler handles /api/network/* endpoints.
 type NetworkHandler struct {
+	store      *db.Store
 	safeApply  *network.SafeApply
 	networkDir string
 }
 
-func NewNetworkHandler() *NetworkHandler {
+const defaultSysClassNet = "/sys/class/net"
+
+func NewNetworkHandler(store *db.Store) *NetworkHandler {
 	return &NetworkHandler{
+		store:      store,
 		safeApply:  network.NewSafeApply(),
 		networkDir: "/etc/systemd/network",
 	}
@@ -31,12 +36,24 @@ func (h *NetworkHandler) Route(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			h.listInterfaces(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case strings.HasPrefix(path, "/api/network/interfaces/"):
 		h.routeInterface(w, r)
 	case path == "/api/network/bonds" || path == "/api/network/bonds/":
 		h.routeBondsList(w, r)
+	case path == "/api/network/default-bond/recreate":
+		if r.Method == http.MethodPost {
+			h.recreateDefaultBond(w, r)
+		} else {
+			jsonMethodNotAllowed(w)
+		}
+	case path == "/api/network/multi-flow":
+		if r.Method == http.MethodGet {
+			h.getMultiFlowStatus(w, r)
+		} else {
+			jsonMethodNotAllowed(w)
+		}
 	case strings.HasPrefix(path, "/api/network/bonds/"):
 		h.routeBond(w, r)
 	case path == "/api/network/vlans" || path == "/api/network/vlans/":
@@ -58,7 +75,7 @@ func (h *NetworkHandler) Route(w http.ResponseWriter, r *http.Request) {
 	case path == "/api/network/pending/revert":
 		h.revertPending(w, r)
 	default:
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		jsonNotFound(w)
 	}
 }
 
@@ -90,7 +107,7 @@ func (h *NetworkHandler) routeInterface(w http.ResponseWriter, r *http.Request) 
 		if r.Method == http.MethodPut {
 			h.configureInterface(w, r, ifName)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "identify":
 		if r.Method == http.MethodPost {
@@ -100,22 +117,49 @@ func (h *NetworkHandler) routeInterface(w http.ResponseWriter, r *http.Request) 
 				fmt.Fprintf(w, `{"status":"identifying"}`)
 			}
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
+		}
+	case "stats":
+		if r.Method == http.MethodGet {
+			h.getInterfaceStats(w, r, ifName)
+		} else {
+			jsonMethodNotAllowed(w)
 		}
 	default:
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		jsonNotFound(w)
 	}
+}
+
+// getInterfaceStats returns the live counters for one interface.
+// The frontend polls this every 2 s and computes rates by
+// subtracting consecutive samples, so the server is stateless on
+// the rate-computation path.
+func (h *NetworkHandler) getInterfaceStats(w http.ResponseWriter, _ *http.Request, name string) {
+	if err := network.ValidateInterfaceName(name); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	stats, err := network.GetInterfaceStats(name)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	json.NewEncoder(w).Encode(stats)
 }
 
 func (h *NetworkHandler) configureInterface(w http.ResponseWriter, r *http.Request, name string) {
 	var cfg network.InterfaceConfig
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	cfg.Name = name
 
 	if err := network.ValidateInterfaceName(name); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateIPConfig(cfg.IPv4Addrs, cfg.IPv6Addrs, cfg.Gateway4, cfg.Gateway6, cfg.MTU); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -129,6 +173,42 @@ func (h *NetworkHandler) configureInterface(w http.ResponseWriter, r *http.Reque
 	}
 
 	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+}
+
+// validateIPConfig is the shared CIDR / gateway / MTU validator used
+// by both per-interface and bond updates. The Phase 3 Edit-IP form
+// drives both endpoints with the same field set; validation belongs
+// in one place so the rejected-on-bad-input behaviour matches.
+func validateIPConfig(ipv4, ipv6 []string, gw4, gw6 string, mtu int) error {
+	for _, addr := range ipv4 {
+		if err := network.ValidateIPv4CIDR(addr); err != nil {
+			return err
+		}
+	}
+	for _, addr := range ipv6 {
+		if err := network.ValidateIPv6CIDR(addr); err != nil {
+			return err
+		}
+	}
+	if gw4 != "" {
+		if err := network.ValidateIPv4(gw4); err != nil {
+			return err
+		}
+	}
+	if gw6 != "" {
+		// The IPv6 validator requires CIDR; gateway is a plain IP.
+		// Accept anything containing ":" as a sanity check; full
+		// IPv6 parsing happens at apply time via systemd-networkd.
+		if !strings.Contains(gw6, ":") {
+			return fmt.Errorf("invalid IPv6 gateway: %s", gw6)
+		}
+	}
+	if mtu != 0 {
+		if err := network.ValidateMTU(mtu); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // --- Bonds ---
@@ -148,14 +228,14 @@ func (h *NetworkHandler) routeBondsList(w http.ResponseWriter, r *http.Request) 
 	case http.MethodPost:
 		h.createBond(w, r)
 	default:
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		jsonMethodNotAllowed(w)
 	}
 }
 
 func (h *NetworkHandler) createBond(w http.ResponseWriter, r *http.Request) {
 	var bond network.BondConfig
 	if err := json.NewDecoder(r.Body).Decode(&bond); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 
@@ -198,22 +278,138 @@ func (h *NetworkHandler) createBond(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *NetworkHandler) routeBond(w http.ResponseWriter, r *http.Request) {
-	bondName := strings.TrimPrefix(r.URL.Path, "/api/network/bonds/")
-
-	switch r.Method {
-	case http.MethodPut:
-		h.updateBond(w, r, bondName)
-	case http.MethodDelete:
-		h.deleteBond(w, r, bondName)
-	default:
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+	rest := strings.TrimPrefix(r.URL.Path, "/api/network/bonds/")
+	parts := strings.SplitN(rest, "/", 2)
+	bondName := parts[0]
+	sub := ""
+	if len(parts) > 1 {
+		sub = parts[1]
 	}
+
+	switch sub {
+	case "":
+		switch r.Method {
+		case http.MethodPut:
+			h.updateBond(w, r, bondName)
+		case http.MethodDelete:
+			h.deleteBond(w, r, bondName)
+		default:
+			jsonMethodNotAllowed(w)
+		}
+	case "break":
+		if r.Method == http.MethodPost {
+			h.breakBond(w, r, bondName)
+		} else {
+			jsonMethodNotAllowed(w)
+		}
+	default:
+		jsonNotFound(w)
+	}
+}
+
+// breakBond drops a bond and gives every member back its own per-NIC
+// `.network` file (DHCP). Wraps network.BreakBond in the safe-apply
+// flow so the change rolls back if the operator's session can't
+// reach tierd after the apply.
+func (h *NetworkHandler) breakBond(w http.ResponseWriter, _ *http.Request, name string) {
+	if err := network.ValidateBondName(name); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	bonds, err := network.ListBonds()
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	var members []string
+	found := false
+	for _, b := range bonds {
+		if b.Name == name {
+			members = b.Members
+			found = true
+			break
+		}
+	}
+	if !found {
+		jsonErrorCoded(w, "bond not found", http.StatusNotFound, "network.bond_not_found")
+		return
+	}
+
+	err = h.safeApply.Apply("Break bond "+name, func() error {
+		return network.BreakBond(h.networkDir, name, members)
+	})
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusConflict)
+		return
+	}
+	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+}
+
+// multiFlowStatus is the response shape for GET /api/network/multi-flow.
+// Phase 6 of the multi-NIC default-bond proposal: report what each
+// protocol layer's MPIO surface looks like to a connecting client,
+// based on the active IP set tierd would advertise.
+type multiFlowStatus struct {
+	ActiveIPs              []string `json:"active_ips"`
+	SMBMultichannelEnabled bool     `json:"smb_multichannel_enabled"`
+	SMBAdvertisedIPs       []string `json:"smb_advertised_ips"`
+	NFSListeningIPs        []string `json:"nfs_listening_ips"`
+	ISCSITargets           int      `json:"iscsi_targets"`
+	ISCSIPortalsPerTarget  int      `json:"iscsi_portals_per_target"`
+}
+
+// getMultiFlowStatus computes the multi-flow status snapshot. The
+// active IP set is the set of IPv4 addresses bound to bond / NIC /
+// VLAN interfaces today. SMB Multichannel is on by default once
+// Phase 6 lands; the advertised list mirrors the active IP set.
+// NFSv4.1 trunkdiscovery sees whatever IPs nfsd binds to, which on
+// Linux is every active IP unless the operator narrowed it via
+// /etc/nfs.conf. For Phase 6 minimum we report the active IP set
+// verbatim. iSCSI is "N targets, M portals per target": we count
+// the file-backed targets in tierd's store and report the active
+// IP set's size as the per-target portal count the recreate-portal
+// path would expose. The fan-out itself is operator-driven via
+// targetcli today and may land as a follow-on slice.
+func (h *NetworkHandler) getMultiFlowStatus(w http.ResponseWriter, _ *http.Request) {
+	ips := network.ListActiveIPv4()
+	resp := multiFlowStatus{
+		ActiveIPs:              ips,
+		SMBMultichannelEnabled: true,
+		SMBAdvertisedIPs:       ips,
+		NFSListeningIPs:        ips,
+		ISCSIPortalsPerTarget:  len(ips),
+	}
+	if h.store != nil {
+		targets, err := h.store.ListIscsiTargets()
+		if err == nil {
+			resp.ISCSITargets = len(targets)
+		}
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// recreateDefaultBond rebuilds the appliance default bond across
+// every physical Ethernet NIC. Destructive: drops every per-NIC
+// `.network` config the operator might have set after Break Bond.
+func (h *NetworkHandler) recreateDefaultBond(w http.ResponseWriter, _ *http.Request) {
+	if h.store == nil {
+		jsonErrorCoded(w, "config store unavailable", http.StatusServiceUnavailable, "network.config_store_unavailable")
+		return
+	}
+	err := h.safeApply.Apply("Re-create default bond", func() error {
+		return network.RecreateDefaultBond(h.store, h.networkDir, defaultSysClassNet)
+	})
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusConflict)
+		return
+	}
+	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
 }
 
 func (h *NetworkHandler) updateBond(w http.ResponseWriter, r *http.Request, name string) {
 	var bond network.BondConfig
 	if err := json.NewDecoder(r.Body).Decode(&bond); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	bond.Name = name
@@ -231,6 +427,10 @@ func (h *NetworkHandler) updateBond(w http.ResponseWriter, r *http.Request, name
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+	}
+	if err := validateIPConfig(bond.IPv4Addrs, bond.IPv6Addrs, bond.Gateway4, bond.Gateway6, bond.MTU); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	err := h.safeApply.Apply("Update bond "+name, func() error {
@@ -292,14 +492,14 @@ func (h *NetworkHandler) routeVLANsList(w http.ResponseWriter, r *http.Request) 
 	case http.MethodPost:
 		h.createVLAN(w, r)
 	default:
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		jsonMethodNotAllowed(w)
 	}
 }
 
 func (h *NetworkHandler) createVLAN(w http.ResponseWriter, r *http.Request) {
 	var vlan network.VLANConfig
 	if err := json.NewDecoder(r.Body).Decode(&vlan); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 
@@ -341,14 +541,14 @@ func (h *NetworkHandler) routeVLAN(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		h.deleteVLAN(w, r, vlanName)
 	default:
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		jsonMethodNotAllowed(w)
 	}
 }
 
 func (h *NetworkHandler) updateVLAN(w http.ResponseWriter, r *http.Request, name string) {
 	var vlan network.VLANConfig
 	if err := json.NewDecoder(r.Body).Decode(&vlan); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	vlan.Name = name
@@ -403,7 +603,7 @@ func (h *NetworkHandler) routeDNS(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut:
 		var dns network.DNSConfig
 		if err := json.NewDecoder(r.Body).Decode(&dns); err != nil {
-			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			jsonInvalidRequestBody(w)
 			return
 		}
 		for _, s := range dns.Servers {
@@ -420,7 +620,7 @@ func (h *NetworkHandler) routeDNS(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(w, `{"status":"updated"}`)
 	default:
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		jsonMethodNotAllowed(w)
 	}
 }
 
@@ -440,7 +640,7 @@ func (h *NetworkHandler) routeHostname(w http.ResponseWriter, r *http.Request) {
 			Hostname string `json:"hostname"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Hostname == "" {
-			http.Error(w, `{"error":"hostname required"}`, http.StatusBadRequest)
+			jsonErrorCoded(w, "hostname required", http.StatusBadRequest, "network.hostname_required")
 			return
 		}
 		if err := network.SetHostname(req.Hostname); err != nil {
@@ -449,7 +649,7 @@ func (h *NetworkHandler) routeHostname(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(w, `{"status":"updated","hostname":"%s"}`, req.Hostname)
 	default:
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		jsonMethodNotAllowed(w)
 	}
 }
 
@@ -470,7 +670,7 @@ func (h *NetworkHandler) routeRoutes(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var route network.RouteConfig
 		if err := json.NewDecoder(r.Body).Decode(&route); err != nil {
-			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			jsonInvalidRequestBody(w)
 			return
 		}
 		if err := network.ValidateRouteCIDR(route.Destination); err != nil {
@@ -505,7 +705,7 @@ func (h *NetworkHandler) routeRoutes(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
 	default:
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		jsonMethodNotAllowed(w)
 	}
 }
 
@@ -522,7 +722,7 @@ func (h *NetworkHandler) routeRoute(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
 	} else {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		jsonMethodNotAllowed(w)
 	}
 }
 
@@ -548,7 +748,7 @@ func sanitizeFilename(s string) string {
 
 func (h *NetworkHandler) getPending(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		jsonMethodNotAllowed(w)
 		return
 	}
 
@@ -562,7 +762,7 @@ func (h *NetworkHandler) getPending(w http.ResponseWriter, r *http.Request) {
 
 func (h *NetworkHandler) confirmPending(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		jsonMethodNotAllowed(w)
 		return
 	}
 
@@ -575,7 +775,7 @@ func (h *NetworkHandler) confirmPending(w http.ResponseWriter, r *http.Request) 
 
 func (h *NetworkHandler) revertPending(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		jsonMethodNotAllowed(w)
 		return
 	}
 

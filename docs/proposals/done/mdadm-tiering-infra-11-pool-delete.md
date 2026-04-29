@@ -1,7 +1,6 @@
 # Proposal: mdadm Tiering Infrastructure — DELETE /api/tiers/{name} (Pool Deletion)
 
 **Status:** Done
-**Date:** 2026-04-09
 **Part of:** mdadm-tiering-infrastructure (Step 11 of 14)
 **Depends on:** mdadm-tiering-infra-05-pool-create
 

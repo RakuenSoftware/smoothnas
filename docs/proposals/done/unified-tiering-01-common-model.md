@@ -1,8 +1,6 @@
 # Proposal: Unified Tiering — 01: Common Control-Plane Model
 
 **Status:** Pending
-**Date:** 2026-04-09
-**Updated:** 2026-04-12
 **Depends on:** mdadm-complete-heat-engine
 **Part of:** unified-tiering-control-plane
 **Followed by:** unified-tiering-02-mdadm-adapter

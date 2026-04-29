@@ -42,13 +42,13 @@ func (h *SystemHandler) Route(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			h.getStatus(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/hardware":
 		if r.Method == http.MethodGet {
 			h.getHardware(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/tuning":
 		switch r.Method {
@@ -57,7 +57,7 @@ func (h *SystemHandler) Route(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPut:
 			h.setTuning(w, r)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/alerts":
 		switch r.Method {
@@ -66,13 +66,13 @@ func (h *SystemHandler) Route(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPost:
 			h.logAlert(w, r)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/alerts/count":
 		if r.Method == http.MethodGet {
 			h.getAlertCount(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/update/channel":
 		switch r.Method {
@@ -81,74 +81,74 @@ func (h *SystemHandler) Route(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPut:
 			h.setChannel(w, r)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/update/check":
 		if r.Method == http.MethodGet {
 			h.checkUpdate(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/update/apply":
 		if r.Method == http.MethodPost {
 			h.applyUpdate(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/update/upload":
 		if r.Method == http.MethodPost {
 			h.uploadUpdate(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/update/progress":
 		if r.Method == http.MethodGet {
 			h.updateProgress(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/debian/status":
 		if r.Method == http.MethodGet {
 			h.debianStatus(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/debian/check":
 		if r.Method == http.MethodPost {
 			h.checkDebianPackages(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/debian/apply":
 		if r.Method == http.MethodPost {
 			h.applyDebianPackages(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/debian/progress":
 		if r.Method == http.MethodGet {
 			h.debianProgress(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/reboot":
 		if r.Method == http.MethodPost {
 			h.reboot(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/shutdown":
 		if r.Method == http.MethodPost {
 			h.shutdown(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	default:
 		if strings.HasPrefix(path, "/api/system/alerts/") && r.Method == http.MethodDelete {
 			alertID := strings.TrimPrefix(path, "/api/system/alerts/")
 			h.clearAlert(w, r, alertID)
 		} else {
-			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			jsonNotFound(w)
 		}
 	}
 }
@@ -194,7 +194,7 @@ func (h *SystemHandler) getTuning(w http.ResponseWriter, r *http.Request) {
 func (h *SystemHandler) setTuning(w http.ResponseWriter, r *http.Request) {
 	var req tuningParams
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 
@@ -267,18 +267,18 @@ func (h *SystemHandler) getAlertCount(w http.ResponseWriter, r *http.Request) {
 
 func (h *SystemHandler) logAlert(w http.ResponseWriter, r *http.Request) {
 	if h.mon == nil {
-		http.Error(w, `{"error":"monitor not running"}`, http.StatusInternalServerError)
+		jsonErrorCoded(w, "monitor not running", http.StatusInternalServerError, "system.monitor_not_running")
 		return
 	}
 
 	var req logAlertRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 
 	if req.Message == "" {
-		http.Error(w, `{"error":"message required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "message required", http.StatusBadRequest, "system.alert_message_required")
 		return
 	}
 
@@ -305,7 +305,7 @@ func (h *SystemHandler) logAlert(w http.ResponseWriter, r *http.Request) {
 
 func (h *SystemHandler) clearAlert(w http.ResponseWriter, r *http.Request, id string) {
 	if h.mon == nil {
-		http.Error(w, `{"error":"monitor not running"}`, http.StatusInternalServerError)
+		jsonErrorCoded(w, "monitor not running", http.StatusInternalServerError, "system.monitor_not_running")
 		return
 	}
 	h.mon.ClearAlert(id)
@@ -360,7 +360,7 @@ func (h *SystemHandler) setChannel(w http.ResponseWriter, r *http.Request) {
 		Channel string `json:"channel"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 

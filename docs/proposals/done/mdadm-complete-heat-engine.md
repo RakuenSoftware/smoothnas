@@ -1,7 +1,6 @@
 # Proposal: mdadm Complete Heat Engine
 
 **Status:** Pending
-**Date:** 2026-04-08
 **Depends on:** mdadm-tiering-infrastructure
 **Clarifies:** mdadm-tiering-migration, mdadm-tiering-policy
 

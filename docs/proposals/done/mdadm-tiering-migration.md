@@ -1,7 +1,6 @@
 # Proposal: mdadm Tiering — Phase 2: Migration and Spillover
 
 **Status:** Implemented
-**Date:** 2026-04-07
 **Implements:** mdadm-tiering
 **Depends on:** mdadm-tiering-infrastructure
 

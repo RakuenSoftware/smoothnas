@@ -30,7 +30,7 @@ func NewTerminalHandler() *TerminalHandler {
 func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	username := sgauth.GetUsername(r)
 	if username == "" {
-		http.Error(w, `{"error":"authentication required"}`, http.StatusUnauthorized)
+		jsonAuthRequired(w)
 		return
 	}
 

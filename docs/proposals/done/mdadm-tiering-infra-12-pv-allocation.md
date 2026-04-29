@@ -1,7 +1,6 @@
 # Proposal: mdadm Tiering Infrastructure — Ordered PV Allocation and Segment Verification
 
 **Status:** Pending
-**Date:** 2026-04-09
 **Part of:** mdadm-tiering-infrastructure (Step 12 of 14)
 **Depends on:** mdadm-tiering-infra-04-data-model
 

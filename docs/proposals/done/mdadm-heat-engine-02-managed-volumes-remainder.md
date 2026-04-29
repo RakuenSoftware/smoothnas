@@ -1,7 +1,6 @@
 # Proposal: mdadm Heat Engine — Managed Volume CRUD (Remainder)
 
 **Status:** Pending
-**Date:** 2026-04-11
 **Part of:** mdadm-complete-heat-engine (follow-up to Step 2 of 9)
 **Depends on:** mdadm-heat-engine-02-managed-volumes (in done/), mdadm-heat-engine-03-region-inventory
 

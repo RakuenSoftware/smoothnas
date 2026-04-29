@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SmoothNAS <ops@smoothnas.invalid>
+Date: Thu, 24 Apr 2026 16:00:00 +0000
+Subject: [PATCH] sunrpc: raise default TCP slot table entries to 128
+
+The upstream default of 2 initial slots collapses single-connection
+NFSv4 throughput on small-file workloads, because per-file
+LOOKUP / OPEN / READ / CLOSE RPCs serialise on a 2-deep in-flight
+window. On a 2.5 Gbps LAN with a real NFS source we measured the
+single-connection backup path going from 2.05 Gbps (82 % of line)
+to 2.30 Gbps (92 % of line) just by writing "128" to
+/sys/module/sunrpc/parameters/tcp_slot_table_entries. Every
+workload we tested either benefited or was unchanged; none regressed.
+
+The max-slot ceiling (`RPC_MAX_SLOT_TABLE`) stays at its existing
+value, so the runtime dynamic-grow path is unaffected. This patch
+only moves the *initial* window so that the first few RPCs on a new
+mount already have pipeline depth, rather than relying on the
+transport's auto-expand heuristics to grow it later.
+
+userspace can still override via
+`/sys/module/sunrpc/parameters/tcp_slot_table_entries` or the
+boot-time `sunrpc.tcp_slot_table_entries=` kernel parameter.
+
+Signed-off-by: SmoothNAS <ops@smoothnas.invalid>
+---
+ include/linux/sunrpc/xprt.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/include/linux/sunrpc/xprt.h b/include/linux/sunrpc/xprt.h
+--- a/include/linux/sunrpc/xprt.h
++++ b/include/linux/sunrpc/xprt.h
+@@ -XX,7 +XX,7 @@
+-#define RPC_DEF_SLOT_TABLE	(16U)
++#define RPC_DEF_SLOT_TABLE	(128U)
+ #define RPC_MIN_SLOT_TABLE	(2U)
+ #define RPC_MAX_SLOT_TABLE_LIMIT	(65536U)
+ #define RPC_MAX_SLOT_TABLE	RPC_MAX_SLOT_TABLE_LIMIT
+--
+2.40.0
+
+# Notes for the smoothkernel maintainer applying this patch:
+#
+# 1. The line numbers are left as XX because upstream kernels rebase
+#    this header often. Locate `RPC_DEF_SLOT_TABLE` in
+#    include/linux/sunrpc/xprt.h on the target tree and change the
+#    integer literal from the upstream default to 128U.
+#
+# 2. If your smoothkernel base already carries a downstream tweak
+#    here, rebase accordingly — the intent is a single integer bump
+#    on one #define, not a structural change.
+#
+# 3. tierd already sets the runtime value via
+#    `ApplyNetworkTuning()` (tierd/internal/tuning/tuning.go). This
+#    patch makes the setting match for mounts that happen before
+#    tierd has applied the sysctl, primarily:
+#      - NFS mounts in initramfs rescue paths
+#      - systemd `mnt-*.mount` units ordered before tierd.service
+#      - any direct kernel-space NFS client invocation
+#    Appliances shipped with the patched kernel don't need the
+#    userspace tuning at all, but leaving both in place is harmless
+#    and gives us the right default on un-patched stock kernels.
+#
+# 4. No ABI change. `RPC_MAX_SLOT_TABLE` stays at 65536. The
+#    auto-grow path in xprt_alloc_slot keeps working; we're only
+#    seeding the initial slot count.

@@ -117,8 +117,13 @@ Storage behavior is split across focused packages:
 ### Background control loops
 
 - `monitor`: SMART polling and alert generation
-- updater package background package-install healing and release checks
+- per-adapter schedulers and planner loops for placement/movement work
 - async job runner model in the API layer for destructive or slow operations
+
+One-shot host remediation and tuning now sit outside the long-lived daemon:
+
+- `tierd-host-init` systemd unit: orphaned backup mount cleanup, package healing, mdadm stripe-cache repair, and host tuning before `tierd` starts
+- `tierd`: long-lived API, monitoring, reconciliation, schedulers, and smoothfs control-plane work
 
 ## Current Storage Model
 
@@ -169,6 +174,18 @@ Current examples include:
 - build, release, and update docs should stay honest about which repo is canonical and which path is temporary
 
 This should be treated as planned cleanup work, not as invisible technical debt.
+
+## smoothfs Extraction Follow-Up
+
+`smoothfs` now lives in `RakuenSoftware/smoothfs` as its own project.
+SmoothNAS consumes it as the appliance integrator:
+
+- Go/runtime integration imports `github.com/RakuenSoftware/smoothfs/...`
+- ISO bootstrap fetches a pinned SmoothFS repo ref for DKMS/VFS installation
+- appliance API/UI and operator flows remain in this repo
+
+The staged extraction plan is preserved as historical context in
+[../docs/proposals/done/smoothfs-repo-split.md](../docs/proposals/done/smoothfs-repo-split.md).
 
 ## Storage Subsystems
 
@@ -242,7 +259,7 @@ The appliance install story is not an afterthought. The `/iso` directory contain
 
 Read:
 
-- [`iso/smoothnas-install`](../iso/smoothnas-install)
+- [`iso/build-iso.sh`](../iso/build-iso.sh) and [`iso/hooks/`](../iso/hooks)
 - [docs/OPERATIONS.md](../docs/OPERATIONS.md)
 
 ## Recommended Reading Order

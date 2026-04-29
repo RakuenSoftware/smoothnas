@@ -1,0 +1,33 @@
+[Unit]
+Description=SmoothNAS storage management daemon
+Documentation=https://github.com/JBailes/SmoothNAS
+After=multi-user.target network-online.target tierd-host-init.service
+Wants=network-online.target tierd-host-init.service
+
+[Service]
+Type=simple
+# Minimal PAM service file for password-auth callers (REST login). The
+# appliance-integration path (Phase 7.5+) replaces this with a proper
+# /etc/pam.d/tierd dropped by the Phase 7 metapackage; leaving the
+# generate-on-boot fallback in place here so a bare `apt install tierd`
+# gives a working daemon without a second config step.
+ExecStartPre=+/bin/sh -c '[ -f /etc/pam.d/tierd ] || printf "auth [success=1 default=ignore] pam_unix.so nullok\nauth requisite pam_deny.so\nauth required pam_permit.so\naccount [success=1 new_authtok_reqd=done default=ignore] pam_unix.so\naccount requisite pam_deny.so\naccount required pam_permit.so\n" > /etc/pam.d/tierd'
+ExecStart=/usr/sbin/tierd
+Environment=TIERD_ADDR=127.0.0.1:8420
+Environment=TIERD_DB=/var/lib/tierd/tierd.db
+Environment=HOME=/root
+Environment=USER=root
+Environment=LOGNAME=root
+Restart=on-failure
+RestartSec=5
+StateDirectory=tierd
+RuntimeDirectory=tierd tierd/mdadm
+
+# tierd needs CAP_SYS_ADMIN for smoothfs netlink + trusted xattr,
+# CAP_NET_ADMIN for NFS/SMB export plumbing, and root for
+# targetcli subprocess orchestration. Hardening stays permissive.
+PrivateTmp=false
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

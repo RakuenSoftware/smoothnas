@@ -1,8 +1,6 @@
 # Proposal: Unified Tiering — 05: Mixed-Backend UI and Coordinated Snapshots
 
 **Status:** Pending
-**Date:** 2026-04-09
-**Updated:** 2026-04-12
 **Depends on:** unified-tiering-02-mdadm-adapter, unified-tiering-04-zfs-managed-adapter
 **Part of:** unified-tiering-control-plane
 **Preceded by:** unified-tiering-04b-zfs-managed-adapter

@@ -9,21 +9,21 @@ import (
 
 // SmbShare represents a persisted SMB share definition.
 type SmbShare struct {
-	ID         int64    `json:"id"`
-	Name       string   `json:"name"`
-	Path       string   `json:"path"`
-	ReadOnly   bool     `json:"read_only"`
-	GuestOK    bool     `json:"guest_ok"`
-	AllowUsers string   `json:"allow_users"` // comma-separated
-	Comment    string   `json:"comment"`
-	CreatedAt  string   `json:"created_at"`
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	ReadOnly   bool   `json:"read_only"`
+	GuestOK    bool   `json:"guest_ok"`
+	AllowUsers string `json:"allow_users"` // comma-separated
+	Comment    string `json:"comment"`
+	CreatedAt  string `json:"created_at"`
 }
 
 // NfsExport represents a persisted NFS export definition.
 type NfsExport struct {
 	ID         int64  `json:"id"`
 	Path       string `json:"path"`
-	Networks   string `json:"networks"`    // comma-separated
+	Networks   string `json:"networks"` // comma-separated
 	Sync       bool   `json:"sync"`
 	RootSquash bool   `json:"root_squash"`
 	ReadOnly   bool   `json:"read_only"`
@@ -32,56 +32,37 @@ type NfsExport struct {
 }
 
 // IscsiTarget represents a persisted iSCSI target definition.
+//
+// BackingType selects the LIO backstore class:
+//
+//   - "block" (default): BlockDevice is a /dev/... path of a whole
+//     block device (ZFS zvol, LVM LV, etc.), set up through
+//     iscsi.CreateTarget.
+//   - "file"  (Phase 7.5): BlockDevice holds the absolute path of
+//     a regular file on a mounted filesystem, set up through
+//     iscsi.CreateFileBackedTarget. On a smoothfs mount the file
+//     is auto-pinned with PIN_LUN (§6.2 / §6.5).
+//
+// The column is named block_device for backwards-compatibility with
+// pre-7.5 rows; semantically it's "backing path".
 type IscsiTarget struct {
 	ID          int64  `json:"id"`
 	IQN         string `json:"iqn"`
 	BlockDevice string `json:"block_device"`
+	BackingType string `json:"backing_type"`
 	CHAPUser    string `json:"chap_user"`
 	CHAPPass    string `json:"-"`
 	HasCHAP     bool   `json:"has_chap"`
 	CreatedAt   string `json:"created_at"`
 }
 
-// MigrateShares creates the sharing tables if they don't exist.
-func (s *Store) MigrateShares() error {
-	migrations := []string{
-		`CREATE TABLE IF NOT EXISTS smb_shares (
-			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			name        TEXT NOT NULL UNIQUE,
-			path        TEXT NOT NULL,
-			read_only   INTEGER NOT NULL DEFAULT 0,
-			guest_ok    INTEGER NOT NULL DEFAULT 0,
-			allow_users TEXT NOT NULL DEFAULT '',
-			comment     TEXT NOT NULL DEFAULT '',
-			created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-		)`,
-		`CREATE TABLE IF NOT EXISTS nfs_exports (
-			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			path        TEXT NOT NULL,
-			networks    TEXT NOT NULL DEFAULT '',
-			sync_mode   INTEGER NOT NULL DEFAULT 1,
-			root_squash INTEGER NOT NULL DEFAULT 1,
-			read_only   INTEGER NOT NULL DEFAULT 0,
-			nfsv3       INTEGER NOT NULL DEFAULT 1,
-			created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-		)`,
-		`CREATE TABLE IF NOT EXISTS iscsi_targets (
-			id           INTEGER PRIMARY KEY AUTOINCREMENT,
-			iqn          TEXT NOT NULL UNIQUE,
-			block_device TEXT NOT NULL,
-			chap_user    TEXT NOT NULL DEFAULT '',
-			chap_pass    TEXT NOT NULL DEFAULT '',
-			created_at   TEXT NOT NULL DEFAULT (datetime('now'))
-		)`,
-	}
-
-	for _, m := range migrations {
-		if _, err := s.db.Exec(m); err != nil {
-			return fmt.Errorf("migrate shares: %w", err)
-		}
-	}
-	return nil
-}
+// IscsiBackingBlock and IscsiBackingFile are the two valid values
+// for IscsiTarget.BackingType.  Keep in sync with the DEFAULT in
+// migration 00005.
+const (
+	IscsiBackingBlock = "block"
+	IscsiBackingFile  = "file"
+)
 
 // --- SMB Shares ---
 
@@ -184,13 +165,43 @@ func (s *Store) DeleteNfsExport(id int64) error {
 	return nil
 }
 
+func (s *Store) UpdateNfsExportSync(id int64, syncMode bool) (*NfsExport, error) {
+	res, err := s.db.Exec("UPDATE nfs_exports SET sync_mode = ? WHERE id = ?", boolToInt(syncMode), id)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return nil, ErrNotFound
+	}
+
+	var exp NfsExport
+	var syncInt, rootSquash, readOnly, nfsv3 int
+	err = s.db.QueryRow(
+		"SELECT id, path, networks, sync_mode, root_squash, read_only, nfsv3, created_at FROM nfs_exports WHERE id = ?",
+		id,
+	).Scan(&exp.ID, &exp.Path, &exp.Networks, &syncInt, &rootSquash, &readOnly, &nfsv3, &exp.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	exp.Sync = syncInt != 0
+	exp.RootSquash = rootSquash != 0
+	exp.ReadOnly = readOnly != 0
+	exp.NFSv3 = nfsv3 != 0
+	return &exp, nil
+}
+
 // --- iSCSI Targets ---
 
 func (s *Store) CreateIscsiTarget(target IscsiTarget) (*IscsiTarget, error) {
+	if target.BackingType == "" {
+		target.BackingType = IscsiBackingBlock
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := s.db.Exec(
-		"INSERT INTO iscsi_targets (iqn, block_device, chap_user, chap_pass, created_at) VALUES (?,?,?,?,?)",
-		target.IQN, target.BlockDevice, target.CHAPUser, target.CHAPPass, now,
+		"INSERT INTO iscsi_targets (iqn, block_device, backing_type, chap_user, chap_pass, created_at) VALUES (?,?,?,?,?,?)",
+		target.IQN, target.BlockDevice, target.BackingType,
+		target.CHAPUser, target.CHAPPass, now,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -205,7 +216,7 @@ func (s *Store) CreateIscsiTarget(target IscsiTarget) (*IscsiTarget, error) {
 }
 
 func (s *Store) ListIscsiTargets() ([]IscsiTarget, error) {
-	rows, err := s.db.Query("SELECT id, iqn, block_device, chap_user, created_at FROM iscsi_targets ORDER BY id")
+	rows, err := s.db.Query("SELECT id, iqn, block_device, backing_type, chap_user, created_at FROM iscsi_targets ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -213,13 +224,33 @@ func (s *Store) ListIscsiTargets() ([]IscsiTarget, error) {
 	var targets []IscsiTarget
 	for rows.Next() {
 		var t IscsiTarget
-		if err := rows.Scan(&t.ID, &t.IQN, &t.BlockDevice, &t.CHAPUser, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.IQN, &t.BlockDevice, &t.BackingType, &t.CHAPUser, &t.CreatedAt); err != nil {
 			return nil, err
 		}
 		t.HasCHAP = t.CHAPUser != ""
 		targets = append(targets, t)
 	}
 	return targets, rows.Err()
+}
+
+// GetIscsiTarget returns the target row with the given IQN, or
+// ErrNotFound if none matches. Used by the REST delete handler to
+// pick the right iscsi.DestroyTarget / DestroyFileBackedTarget
+// variant via the backing_type column.
+func (s *Store) GetIscsiTarget(iqn string) (*IscsiTarget, error) {
+	var t IscsiTarget
+	err := s.db.QueryRow(
+		"SELECT id, iqn, block_device, backing_type, chap_user, created_at FROM iscsi_targets WHERE iqn = ?",
+		iqn,
+	).Scan(&t.ID, &t.IQN, &t.BlockDevice, &t.BackingType, &t.CHAPUser, &t.CreatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	t.HasCHAP = t.CHAPUser != ""
+	return &t, nil
 }
 
 func (s *Store) DeleteIscsiTarget(iqn string) error {

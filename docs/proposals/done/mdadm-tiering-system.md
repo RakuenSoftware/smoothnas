@@ -1,7 +1,6 @@
 # Proposal: mdadm Multi-Tier Storage System
 
 **Status:** Pending
-**Date:** 2026-04-07
 **Depends on:** storage-tiering (mdadm backend must be implemented first)
 
 ---

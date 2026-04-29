@@ -20,40 +20,12 @@ type HistoryStore struct {
 	db *sql.DB
 }
 
-// NewHistoryStore creates a HistoryStore and ensures the tables exist.
+// NewHistoryStore returns a HistoryStore against db. The schema is
+// owned by the goose migrations under tierd/internal/db/migrations/;
+// callers are responsible for having run db.Migrate() / db.MigrateDB()
+// before constructing the store.
 func NewHistoryStore(db *sql.DB) (*HistoryStore, error) {
-	store := &HistoryStore{db: db}
-	if err := store.migrate(); err != nil {
-		return nil, err
-	}
-	return store, nil
-}
-
-func (s *HistoryStore) migrate() error {
-	_, err := s.db.Exec(`
-		CREATE TABLE IF NOT EXISTS smart_history (
-			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			device_path TEXT    NOT NULL,
-			timestamp   TEXT    NOT NULL,
-			attr_id     INTEGER NOT NULL,
-			attr_name   TEXT    NOT NULL,
-			current_val INTEGER NOT NULL,
-			raw_value   INTEGER NOT NULL
-		)
-	`)
-	if err != nil {
-		return fmt.Errorf("create smart_history: %w", err)
-	}
-
-	_, err = s.db.Exec(`
-		CREATE INDEX IF NOT EXISTS idx_smart_history_device_time
-		ON smart_history(device_path, timestamp)
-	`)
-	if err != nil {
-		return fmt.Errorf("create smart_history index: %w", err)
-	}
-
-	return nil
+	return &HistoryStore{db: db}, nil
 }
 
 // RecordSnapshot saves all SMART attributes for a device at the current time.

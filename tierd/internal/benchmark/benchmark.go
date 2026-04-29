@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/JBailes/SmoothNAS/tierd/internal/nfs"
 )
 
 // Request holds benchmark parameters supplied by the caller.
@@ -146,15 +148,15 @@ func Run(req Request, progressFn func(string), resultFn func(*Result)) (*Result,
 		remoteTarget = remoteAddr
 	}
 
-	// FUSE tier mounts (/mnt/<pool>) do not support arbitrary file creation
-	// needed by fio.  Redirect to the first backing-store filesystem at
-	// /mnt/.tierd-backing/<pool>/<tier>/ which sits on real XFS and behaves
-	// normally.  The FUSE passthrough layer adds negligible overhead, so the
-	// numbers are representative of actual tier performance.
-	if req.Protocol == "local" && !req.Remote && isFUSEMount(benchPath) {
-		backing, err := fuseBacking(benchPath)
+	// smoothfs tier mounts (/mnt/<pool>) stack over per-tier backing stores
+	// at /mnt/.tierd-backing/<pool>/<tier>/. Redirect the benchmark to the
+	// first backing so fio talks to the real underlying XFS directly; the
+	// smoothfs passthrough adds negligible overhead, so the numbers still
+	// reflect real tier performance.
+	if req.Protocol == "local" && !req.Remote && isSmoothfsMount(benchPath) {
+		backing, err := smoothfsBacking(benchPath)
 		if err != nil {
-			return nil, fmt.Errorf("FUSE tier mount %s: %w", benchPath, err)
+			return nil, fmt.Errorf("smoothfs tier mount %s: %w", benchPath, err)
 		}
 		if progressFn != nil {
 			progressFn(fmt.Sprintf("Redirecting to backing store %s...", backing))
@@ -186,10 +188,10 @@ func Run(req Request, progressFn func(string), resultFn func(*Result)) (*Result,
 	// both support O_DIRECT and need a higher queue depth to saturate NVMe/Optane
 	// devices.  ZFS manages its own cache via ARC and does not support O_DIRECT
 	// reliably across all OpenZFS versions, so keep buffered sync I/O for ZFS.
-	// FUSE mounts fail with libaio+O_DIRECT unless the daemon has passthrough
-	// active, which we can't detect from userspace — use sync engine instead.
+	// smoothfs forwards I/O to its lower filesystem; libaio+O_DIRECT support
+	// depends on the lower, so stick with sync engine on smoothfs paths too.
 	// Network filesystems (SMB/NFS) never use O_DIRECT.
-	useDirectIO := req.Protocol == "iscsi" || (req.Protocol == "local" && !isZFSMount(benchPath) && !isFUSEMount(benchPath))
+	useDirectIO := req.Protocol == "iscsi" || (req.Protocol == "local" && !isZFSMount(benchPath) && !isSmoothfsMount(benchPath))
 
 	args := []string{
 		"--name=tierd-bench",
@@ -428,17 +430,16 @@ func mountFSType(path string) string {
 // isZFSMount reports whether path resides on a ZFS filesystem.
 func isZFSMount(path string) bool { return mountFSType(path) == "zfs" }
 
-// isFUSEMount reports whether path resides on a FUSE filesystem.
-func isFUSEMount(path string) bool {
-	fs := mountFSType(path)
-	return fs == "fuse" || strings.HasPrefix(fs, "fuse.")
+// isSmoothfsMount reports whether path resides on a smoothfs filesystem.
+func isSmoothfsMount(path string) bool {
+	return mountFSType(path) == "smoothfs"
 }
 
-// fuseBacking returns the first backing-store mount point for a FUSE tier mount.
-// FUSE tier mounts follow the pattern /mnt/<pool> with backing stores at
-// /mnt/.tierd-backing/<pool>/<tier>/.
-func fuseBacking(fusePath string) (string, error) {
-	pool := filepath.Base(fusePath)
+// smoothfsBacking returns the first backing-store mount point for a smoothfs
+// tier mount. smoothfs tier mounts follow the pattern /mnt/<pool> with backing
+// stores at /mnt/.tierd-backing/<pool>/<tier>/.
+func smoothfsBacking(smoothfsPath string) (string, error) {
+	pool := filepath.Base(smoothfsPath)
 	prefix := filepath.Join("/mnt/.tierd-backing", pool) + "/"
 	data, err := os.ReadFile("/proc/mounts")
 	if err != nil {
@@ -501,11 +502,9 @@ func mountRemote(req Request) (string, func(), error) {
 
 	case "nfs":
 		target := fmt.Sprintf("%s:%s", req.RemoteHost, req.RemoteShare)
-		// Default to NFSv3 + nolock; NFSv4 pseudo-root rules cause "access denied"
-		// on many servers when mounting a sub-path. Users can override via MountOptions.
 		opts := req.MountOptions
 		if opts == "" {
-			opts = "nfsvers=3,nolock"
+			opts = nfs.DefaultClientMountOptions
 		}
 		mountArgs = []string{"-t", "nfs", target, mountPoint, "-o", opts}
 

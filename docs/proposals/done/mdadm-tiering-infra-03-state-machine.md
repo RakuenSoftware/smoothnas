@@ -1,7 +1,6 @@
 # Proposal: mdadm Tiering Infrastructure — Pool and Tier State Machine
 
 **Status:** Pending
-**Date:** 2026-04-09
 **Part of:** mdadm-tiering-infrastructure (Step 3 of 14)
 **Depends on:** base appliance (tierd service)
 

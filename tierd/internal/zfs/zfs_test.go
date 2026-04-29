@@ -1,6 +1,9 @@
 package zfs
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // --- Pool validation tests ---
 
@@ -13,11 +16,12 @@ func TestValidatePoolName(t *testing.T) {
 	}
 
 	invalid := []string{
-		"",              // empty
-		"0pool",         // starts with digit
-		"-pool",         // starts with hyphen
-		"pool name",     // space
-		"pool;rm",       // semicolon
+		"",                             // empty
+		"0pool",                        // starts with digit
+		"-pool",                        // starts with hyphen
+		"pool name",                    // space
+		"pool;rm",                      // semicolon
+		"import",                       // reserved route name
 		"a" + string(make([]byte, 65)), // too long (>64)
 	}
 	for _, name := range invalid {
@@ -55,6 +59,21 @@ func TestValidateDiskPath(t *testing.T) {
 	for _, p := range invalid {
 		if err := ValidateDiskPath(p); err == nil {
 			t.Errorf("expected invalid disk path %q to fail", p)
+		}
+	}
+}
+
+func TestValidateImportDevicePath(t *testing.T) {
+	valid := []string{"", "/dev/sda", "/dev/sda1", "/dev/disk/by-id/ata-test_123"}
+	for _, path := range valid {
+		if err := ValidateImportDevicePath(path); err != nil {
+			t.Errorf("expected valid import path %q, got %v", path, err)
+		}
+	}
+	invalid := []string{"/tmp/disk", "/dev/../sda", "/dev/sda;rm", "sda"}
+	for _, path := range invalid {
+		if err := ValidateImportDevicePath(path); err == nil {
+			t.Errorf("expected invalid import path %q to fail", path)
 		}
 	}
 }
@@ -245,6 +264,62 @@ errors: No known data errors
 	}
 }
 
+func TestHasSpecialVdevInLayout(t *testing.T) {
+	layout := `
+	NAME        STATE     READ WRITE CKSUM
+	tank        ONLINE       0     0     0
+	  raidz1-0  ONLINE       0     0     0
+	    sda     ONLINE       0     0     0
+	special
+	  mirror-1  ONLINE       0     0     0
+	    nvme0n1 ONLINE       0     0     0
+	    nvme1n1 ONLINE       0     0     0
+`
+	if !HasSpecialVdevInLayout(layout) {
+		t.Fatal("expected special vdev to be detected")
+	}
+	if HasSpecialVdevInLayout("cache\n  nvme0n1 ONLINE 0 0 0") {
+		t.Fatal("cache vdev must not count as special")
+	}
+}
+
+func TestParseImportablePools(t *testing.T) {
+	output := `   pool: tank
+     id: 123456789
+  state: ONLINE
+ action: The pool can be imported using its name or numeric identifier.
+ config:
+
+	tank        ONLINE
+	  sdb       ONLINE
+
+   pool: archive
+     id: 987654321
+  state: DEGRADED
+ status: One or more devices contains corrupted data.
+        The pool can still be imported.
+ action: The pool can be imported despite missing devices.
+ config:
+
+	archive    DEGRADED
+	  sdc      ONLINE
+`
+
+	pools := ParseImportablePools(output)
+	if len(pools) != 2 {
+		t.Fatalf("got %d importable pools, want 2: %#v", len(pools), pools)
+	}
+	if pools[0].Name != "tank" || pools[0].ID != "123456789" || pools[0].State != "ONLINE" {
+		t.Fatalf("unexpected first pool: %#v", pools[0])
+	}
+	if pools[1].Name != "archive" || pools[1].ID != "987654321" || pools[1].State != "DEGRADED" {
+		t.Fatalf("unexpected second pool: %#v", pools[1])
+	}
+	if !strings.Contains(pools[1].Status, "corrupted data") || !strings.Contains(pools[1].Status, "still be imported") {
+		t.Fatalf("status was not collected: %q", pools[1].Status)
+	}
+}
+
 // --- Dataset validation tests ---
 
 func TestValidateDatasetName(t *testing.T) {
@@ -356,10 +431,10 @@ func TestValidateSnapshotName(t *testing.T) {
 	}
 
 	invalid := []string{
-		"tank/data",       // no @
-		"@snap",           // no dataset
-		"",                // empty
-		"0bad@snap",       // bad dataset
+		"tank/data", // no @
+		"@snap",     // no dataset
+		"",          // empty
+		"0bad@snap", // bad dataset
 	}
 	for _, name := range invalid {
 		if err := ValidateSnapshotName(name); err == nil {

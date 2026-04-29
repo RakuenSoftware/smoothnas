@@ -1,7 +1,6 @@
 # Proposal: mdadm Tiering Infrastructure — POST /api/tiers (Pool Creation)
 
 **Status:** Done
-**Date:** 2026-04-09
 **Part of:** mdadm-tiering-infrastructure (Step 5 of 14)
 **Depends on:** mdadm-tiering-infra-04-data-model
 

@@ -1,7 +1,6 @@
 # Proposal: mdadm Heat Engine — Region Inventory
 
 **Status:** Pending
-**Date:** 2026-04-10
 **Part of:** mdadm-complete-heat-engine (Step 3 of 9)
 **Depends on:** mdadm-heat-engine-02-managed-volumes
 

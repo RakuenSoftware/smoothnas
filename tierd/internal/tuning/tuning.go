@@ -37,6 +37,16 @@ var networkParams = []kernelParam{
 	// multi-client load.
 	{"/proc/sys/net/core/netdev_max_backlog", "5000", false, false},
 
+	// sunrpc TCP slot table: how many in-flight RPCs a single NFS TCP
+	// connection may carry. The upstream default of 2 collapses small-file
+	// NFS throughput to ~0.8 Gbps on a 2.5 Gbps link because per-file
+	// LOOKUP/OPEN/READ/CLOSE RPCs serialise. Measured on the backup path
+	// (single-connection NFSv4.2 pull from 192.168.1.254): raising this to
+	// 128 moved sustained rate from 2.05 Gbps to 2.30 Gbps (82 % → 92 % of
+	// line) on the same 14 GB subtree, with no destination side back-pressure.
+	// Affects new NFS mounts only; set at boot before the backup path mounts.
+	{"/sys/module/sunrpc/parameters/tcp_slot_table_entries", "128", false, false},
+
 	// Dirty page flush thresholds. Background 5 % starts writeback early;
 	// hard cap 20 % prevents write stalls from a single large flush.
 	{"/proc/sys/vm/dirty_background_ratio", "5", false, false},

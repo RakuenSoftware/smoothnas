@@ -200,22 +200,7 @@ func (a *Adapter) CreateNamespaceSnapshot(namespaceID string) (*tiering.Namespac
 	}
 	qtDur := time.Duration(quiesceTimeout) * time.Second
 
-	// 5. Quiesce FUSE daemon (blocks new O_CREAT).
-	if err := a.server.SendQuiesce(namespaceID, qtDur); err != nil {
-		a.recordSnapshotTimeoutState(namespaceID)
-		return nil, &tiering.AdapterError{
-			Kind:    tiering.ErrTransient,
-			Message: "daemon quiesce timed out: " + err.Error(),
-		}
-	}
-	daemonReleased := false
-	defer func() {
-		if !daemonReleased {
-			a.server.SendRelease(namespaceID)
-		}
-	}()
-
-	// 6. Quiesce movement workers (wait for in-progress copies to complete).
+	// 5. Quiesce movement workers (wait for in-progress copies to complete).
 	qc := quiesceForNS(namespaceID)
 	if err := qc.beginQuiesce(qtDur); err != nil {
 		a.recordSnapshotTimeoutState(namespaceID)
@@ -264,9 +249,7 @@ func (a *Adapter) CreateNamespaceSnapshot(namespaceID string) (*tiering.Namespac
 		}
 	}
 
-	// 10. Release quiesce (daemon + workers) now that snapshot is committed.
-	a.server.SendRelease(namespaceID)
-	daemonReleased = true
+	// Release movement-worker quiesce now that snapshot is committed.
 	qc.endQuiesce()
 
 	// 11. Persist snapshot record.

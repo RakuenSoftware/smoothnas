@@ -1,7 +1,6 @@
 # Proposal: mdadm Heat Engine — dm-stats Heat Sampling
 
 **Status:** Done
-**Date:** 2026-04-10
 **Part of:** mdadm-complete-heat-engine (Step 4 of 9)
 **Depends on:** mdadm-heat-engine-03-region-inventory
 

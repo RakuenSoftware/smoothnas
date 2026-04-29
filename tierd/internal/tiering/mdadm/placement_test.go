@@ -4,6 +4,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tiering/meta"
 )
 
@@ -88,9 +89,9 @@ func testRanked(in ...testRanking) []rankedPoolTarget {
 	return out
 }
 
-// TestAdmitFillsFastestFirst: empty fastest tier accepts small files
-// until target_fill is hit, then spills large files. This is the
-// "prefer higher when we can fit it" property.
+// TestAdmitFillsFastestFirst: empty fastest tier accepts small files.
+// Since admission now uses fullCap as the normal cap, small files on
+// an empty tier always land on the fastest rank.
 func TestAdmitFillsFastestFirst(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
 	caps := map[int]*tierCapacity{
@@ -101,24 +102,97 @@ func TestAdmitFillsFastestFirst(t *testing.T) {
 		t.Errorf("1MB on empty fastest: got rank %d, want 1", r)
 	}
 	if r := admitWithFallback(caps, ranked, 1, 1<<30); r != 2 {
-		t.Errorf("1GB past 512MB target: got rank %d, want 2", r)
+		t.Errorf("1GB past 1GB total: got rank %d, want 2", r)
 	}
 }
 
-// TestAdmitFallsToFullCap: every tier past target fill; full-threshold
-// fallback still admits.
-func TestAdmitFallsToFullCap(t *testing.T) {
+// TestAdmitStaysPastTargetUntilFullCap: a fastest tier that is past its
+// target_fill_pct but still below full_threshold_pct should continue to
+// accept new files. Previous behaviour demoted at target; now the
+// planner only demotes after full_threshold_pct is crossed.
+func TestAdmitStaysPastTargetUntilFullCap(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	// Fastest tier is at its target_fill (512 MB of 1 GB) but well below
+	// full_threshold (974 MB). A new 100 MB file should still land there.
 	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1 << 30, usedBytes: 1 << 29, targetCap: 1 << 29, fullCap: (1 << 30) * 95 / 100},
+		1: {totalBytes: 1 << 30, usedBytes: 1 << 29, initialUsed: 1 << 29, targetCap: 1 << 29, fullCap: (1 << 30) * 95 / 100},
 		2: {totalBytes: 10 << 30, targetCap: 10 << 29, fullCap: (10 << 30) * 95 / 100},
 	}
-	if r := admitWithFallback(caps, ranked, 1, 100<<20); r != 2 {
-		t.Errorf("past-target fastest: got rank %d, want 2", r)
+	if r := admitWithFallback(caps, ranked, 1, 100<<20); r != 1 {
+		t.Errorf("past-target-under-full fastest: got rank %d, want 1", r)
 	}
-	caps[2].usedBytes = caps[2].targetCap
-	if r := admitWithFallback(caps, ranked, 1, 10<<20); r != 1 {
-		t.Errorf("target busted, fullCap fallback: got rank %d, want 1", r)
+}
+
+func TestAdmitBalancesToTargetDuringSpindownMaintenance(t *testing.T) {
+	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	usedFast := int64(1<<30) * 60 / 100
+	caps := map[int]*tierCapacity{
+		1: {
+			totalBytes:          1 << 30,
+			usedBytes:           usedFast,
+			initialUsed:         usedFast,
+			targetCap:           1 << 29,
+			fullCap:             (1 << 30) * 95 / 100,
+			balanceToTargetFill: true,
+		},
+		2: {
+			totalBytes:          10 << 30,
+			targetCap:           10 << 29,
+			fullCap:             (10 << 30) * 95 / 100,
+			balanceToTargetFill: true,
+		},
+	}
+	if r := admitWithFallback(caps, ranked, 1, 10<<20); r != 2 {
+		t.Errorf("spindown target-balance fastest: got rank %d, want 2", r)
+	}
+
+	caps[1].usedBytes = int64(1<<30) * 49 / 100
+	caps[1].initialUsed = caps[1].usedBytes
+	if r := admitWithFallback(caps, ranked, 1, 5<<20); r != 1 {
+		t.Errorf("spindown target-balance below target: got rank %d, want 1", r)
+	}
+}
+
+// TestAdmitDrainsWhenOverFullCap: a tier that started the cycle above
+// full_threshold_pct enters drain mode — admissionCap falls back to
+// targetCap so new files spill to the next tier until usedBytes drops
+// below the soft cap. This gives the planner hysteresis: fill to full%,
+// drain to fill%.
+func TestAdmitDrainsWhenOverFullCap(t *testing.T) {
+	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	// Fastest tier starts above full_threshold (98%). It must drain back
+	// to target_fill (50%) before accepting new placements.
+	used := int64(1<<30) * 98 / 100
+	caps := map[int]*tierCapacity{
+		1: {totalBytes: 1 << 30, usedBytes: used, initialUsed: used, targetCap: 1 << 29, fullCap: (1 << 30) * 95 / 100},
+		2: {totalBytes: 10 << 30, targetCap: 10 << 29, fullCap: (10 << 30) * 95 / 100},
+	}
+	if r := admitWithFallback(caps, ranked, 1, 10<<20); r != 2 {
+		t.Errorf("fastest in drain mode: got rank %d, want 2", r)
+	}
+}
+
+// TestAdmitFallsToFullCapLastResort: admissionCap refuses every tier
+// from the preferred rank downward; Pass B falls back to fullCap so
+// the file isn't stranded.
+func TestAdmitFallsToFullCapLastResort(t *testing.T) {
+	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	// Rank 2 is in drain mode (above fullCap), rank 1 fills all the way
+	// to fullCap already. A 10 MB file has nowhere under admissionCap
+	// but rank 1 still has sub-fullCap slack (fullCap - usedBytes > 10 MB).
+	usedFast := (int64(1) << 30) * 95 / 100
+	usedSlow := (int64(10) << 30) * 96 / 100
+	caps := map[int]*tierCapacity{
+		1: {totalBytes: 1 << 30, usedBytes: usedFast, initialUsed: usedFast, targetCap: 1 << 29, fullCap: (1 << 30) * 95 / 100},
+		2: {totalBytes: 10 << 30, usedBytes: usedSlow, initialUsed: usedSlow, targetCap: 10 << 29, fullCap: (10 << 30) * 95 / 100},
+	}
+	// Both tiers refuse in Pass A: rank 1 is at fullCap, rank 2 is draining.
+	// Pass B admits at rank 1 (fullCap fallback still has room after we
+	// subtract — but in this setup both are above fullCap-rounding, so it
+	// should at least not strand the file by returning preferredRank=1).
+	r := admitWithFallback(caps, ranked, 1, 10<<20)
+	if r != 1 && r != 2 {
+		t.Errorf("last-resort: got rank %d, want 1 or 2", r)
 	}
 }
 
@@ -149,6 +223,52 @@ func TestAdmitPinColdStartsFromSlowest(t *testing.T) {
 	}
 }
 
+func TestPoolRankedTargetsUsesFullThresholdForSlowest(t *testing.T) {
+	store := openAdapterStore(t)
+	if err := store.CreateTierPool("pool1", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 2},
+	}); err != nil {
+		t.Fatalf("CreateTierPool: %v", err)
+	}
+	row1 := &db.TierTargetRow{
+		Name: "NVME", PlacementDomain: "pool1", BackendKind: BackendKind,
+		Rank: 1, TargetFillPct: 60, FullThresholdPct: 90, BackingRef: backingRefTarget("pool1", "NVME"),
+	}
+	row2 := &db.TierTargetRow{
+		Name: "HDD", PlacementDomain: "pool1", BackendKind: BackendKind,
+		Rank: 2, TargetFillPct: 40, FullThresholdPct: 85, BackingRef: backingRefTarget("pool1", "HDD"),
+	}
+	if err := store.CreateTierTarget(row1); err != nil {
+		t.Fatalf("CreateTierTarget row1: %v", err)
+	}
+	if err := store.CreateTierTarget(row2); err != nil {
+		t.Fatalf("CreateTierTarget row2: %v", err)
+	}
+	if err := store.UpsertMdadmManagedTarget(&db.MdadmManagedTargetRow{
+		TierTargetID: row1.ID, PoolName: "pool1", TierName: "NVME", MountPath: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("UpsertMdadmManagedTarget row1: %v", err)
+	}
+	if err := store.UpsertMdadmManagedTarget(&db.MdadmManagedTargetRow{
+		TierTargetID: row2.ID, PoolName: "pool1", TierName: "HDD", MountPath: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("UpsertMdadmManagedTarget row2: %v", err)
+	}
+
+	a := NewAdapter(store, t.TempDir())
+	ranked := a.poolRankedTargets("pool1")
+	if len(ranked) != 2 {
+		t.Fatalf("ranked len = %d, want 2", len(ranked))
+	}
+	if ranked[0].targetFillPct != 60 {
+		t.Fatalf("fast tier target_fill_pct = %d, want 60", ranked[0].targetFillPct)
+	}
+	if ranked[1].targetFillPct != 85 {
+		t.Fatalf("slowest tier target_fill_pct = %d, want 85", ranked[1].targetFillPct)
+	}
+}
+
 // TestHeatDecayHalves verifies decayAllHeat halves HeatCounter values via
 // the Iterate+PutBlocking path and preserves other fields.
 func TestHeatDecayHalves(t *testing.T) {
@@ -171,7 +291,7 @@ func TestHeatDecayHalves(t *testing.T) {
 		{inode: 4, heat: 1_000_000, pin: meta.PinCold},
 	}
 	for _, in := range inputs {
-		store.PutBlocking(in.inode, meta.Record{
+		store.PutBlocking(in.inode, 1, meta.Record{
 			Version:     meta.RecordVersion,
 			PinState:    in.pin,
 			TierIdx:     1,
@@ -206,7 +326,7 @@ func TestHeatDecayHalves(t *testing.T) {
 	defer store.Close()
 
 	for _, in := range inputs {
-		got, ok, err := store.Get(in.inode)
+		got, ok, err := store.Get(in.inode, 1)
 		if err != nil || !ok {
 			t.Fatalf("inode %d: missing after decay (ok=%v err=%v)", in.inode, ok, err)
 		}

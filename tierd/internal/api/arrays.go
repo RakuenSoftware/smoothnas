@@ -15,7 +15,10 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/tier"
 )
 
-var listMDADMArrays = mdadm.List
+var (
+	listMDADMArrays = mdadm.List
+	scrubMDADMArray = mdadm.Scrub
+)
 
 // ArraysHandler handles /api/arrays* and /api/tiers* endpoints.
 type ArraysHandler struct {
@@ -28,21 +31,21 @@ type ArraysHandler struct {
 	// state.
 	poolMu sync.Map
 	// provisionPerTierStorage creates an independent VG/LV per tier slot.
-	// Used for new pools with per-tier FUSE routing.
+	// Used for new pools with per-tier smoothfs routing.
 	provisionPerTierStorage func(poolName, tierName string) error
-	// ensureNamespace creates a FUSE-managed namespace for the pool if one
+	// ensureNamespace creates a smoothfs-backed namespace for the pool if one
 	// does not already exist. Called after successful per-tier provisioning
-	// so the FUSE mount at /mnt/{pool} is set up automatically.
+	// so the smoothfs mount at /mnt/{pool} is set up automatically.
 	ensureNamespace func(poolName string) error
 	// purgeBackupsForPath cancels in-flight backup runs and deletes backup
 	// configs whose LocalPath falls under the given mount path. Called at the
 	// start of destroyTierPool so a backup schedule does not immediately race
 	// rsync against a freshly recreated tier. Returns configs deleted.
 	purgeBackupsForPath func(mountPath string) (int, error)
-	// destroyPoolNamespaces stops FUSE daemons and tears down backing mounts
+	// destroyPoolNamespaces stops smoothfs mounts and tears down backing mounts
 	// for every managed namespace belonging to the given pool. Called before
 	// LVM teardown in destroyTierPool so the mount point is free and the
-	// daemon cannot re-create the FUSE mount during / after destruction.
+	// teardown cannot race with a re-created smoothfs mount during / after destruction.
 	destroyPoolNamespaces func(poolName string) error
 	// asyncDone is an optional channel signalled when an async goroutine
 	// (tier assign/delete) completes. Used by tests to wait for background
@@ -58,9 +61,9 @@ type tierMapVerification struct {
 func NewArraysHandler(store *db.Store) *ArraysHandler {
 	m := tier.NewManager(store)
 	return &ArraysHandler{
-		store:            store,
-		arraysCache:      cache.New[[]richArray](30 * time.Second),
-		tierMapInfo:      make(map[string]tierMapVerification),
+		store:                   store,
+		arraysCache:             cache.New[[]richArray](30 * time.Second),
+		tierMapInfo:             make(map[string]tierMapVerification),
 		provisionPerTierStorage: m.ProvisionPerTierStorage,
 		ensureNamespace:         func(string) error { return nil },
 		purgeBackupsForPath:     func(string) (int, error) { return 0, nil },
@@ -68,7 +71,7 @@ func NewArraysHandler(store *db.Store) *ArraysHandler {
 	}
 }
 
-// SetEnsureNamespace sets the callback used to create a FUSE-managed namespace
+// SetEnsureNamespace sets the callback used to create a smoothfs-backed namespace
 // for a pool after its first successful per-tier provisioning.
 func (h *ArraysHandler) SetEnsureNamespace(fn func(string) error) {
 	h.ensureNamespace = fn
@@ -80,7 +83,7 @@ func (h *ArraysHandler) SetPurgeBackupsForPath(fn func(string) (int, error)) {
 	h.purgeBackupsForPath = fn
 }
 
-// SetDestroyPoolNamespaces wires the callback that stops FUSE daemons and
+// SetDestroyPoolNamespaces wires the callback that stops smoothfs mounts and
 // tears down backing targets for a pool's managed namespaces during tier
 // destruction.
 func (h *ArraysHandler) SetDestroyPoolNamespaces(fn func(string) error) {
@@ -138,7 +141,7 @@ func (h *ArraysHandler) Route(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/api/tiers"):
 		h.routeTiers(w, r)
 	default:
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		jsonNotFound(w)
 	}
 }
 
@@ -155,7 +158,7 @@ func (h *ArraysHandler) routeArrays(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPost:
 			h.createArray(w, r)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 		return
 	}
@@ -178,26 +181,26 @@ func (h *ArraysHandler) routeArrays(w http.ResponseWriter, r *http.Request) {
 		case http.MethodDelete:
 			h.deleteArray(w, r, arrayPath)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "disks":
 		if r.Method == http.MethodPost {
 			h.addDisk(w, r, arrayPath)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "scrub":
 		if r.Method == http.MethodPost {
 			h.scrubArray(w, r, arrayPath)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	default:
 		// /api/arrays/{id}/disks/{disk} or /api/arrays/{id}/disks/{disk}/replace
 		if strings.HasPrefix(subpath, "disks/") {
 			h.routeArrayDisk(w, r, arrayPath, strings.TrimPrefix(subpath, "disks/"))
 		} else {
-			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			jsonNotFound(w)
 		}
 	}
 }
@@ -216,16 +219,16 @@ func (h *ArraysHandler) routeArrayDisk(w http.ResponseWriter, r *http.Request, a
 		if r.Method == http.MethodDelete {
 			h.removeDisk(w, r, arrayPath, diskPath)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "replace":
 		if r.Method == http.MethodPost {
 			h.replaceDisk(w, r, arrayPath, diskPath)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	default:
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		jsonNotFound(w)
 	}
 }
 
@@ -292,12 +295,12 @@ type createArrayRequest struct {
 func (h *ArraysHandler) createArray(w http.ResponseWriter, r *http.Request) {
 	var req createArrayRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 
 	if req.Name == "" || req.Level == "" || len(req.Disks) == 0 {
-		http.Error(w, `{"error":"name, level, and disks required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "name, level, and disks required", http.StatusBadRequest, "arrays.create_fields_required")
 		return
 	}
 
@@ -362,10 +365,7 @@ func (h *ArraysHandler) getArray(w http.ResponseWriter, r *http.Request, path st
 }
 
 func (h *ArraysHandler) deleteArray(w http.ResponseWriter, r *http.Request, path string) {
-	if a, err := h.store.GetTierAssignmentByArrayPath(path); err == nil {
-		http.Error(w, fmt.Sprintf(`{"error":"array is backing tier %s slot %s; delete the tier before destroying the array"}`, a.TierName, a.Slot), http.StatusConflict)
-		return
-	}
+	assignment, _ := h.store.GetTierAssignmentByArrayPath(path)
 
 	a, _ := mdadm.Detail(path)
 
@@ -377,13 +377,13 @@ func (h *ArraysHandler) deleteArray(w http.ResponseWriter, r *http.Request, path
 	}
 
 	jobID := jobs.StartTagged("array-destroy")
-	go h.runDeleteArray(jobID, path, name, memberDisks)
+	go h.runDeleteArray(jobID, path, name, memberDisks, assignment)
 
 	w.WriteHeader(http.StatusAccepted)
 	fmt.Fprintf(w, `{"job_id":"%s"}`, jobID)
 }
 
-func (h *ArraysHandler) runDeleteArray(jobID, path, name string, memberDisks []string) {
+func (h *ArraysHandler) runDeleteArray(jobID, path, name string, memberDisks []string, assignment *db.TierArrayAssignment) {
 	progress := func(msg string) { jobs.UpdateProgress(jobID, msg) }
 
 	progress("Stopping RAID array...")
@@ -402,6 +402,14 @@ func (h *ArraysHandler) runDeleteArray(jobID, path, name string, memberDisks []s
 	_ = lvm.WipeSignatures(path)
 	_ = lvm.RemovePV(path)
 
+	if assignment != nil {
+		progress("Clearing tier assignment...")
+		if err := h.store.ClearTierAssignment(assignment.TierName, assignment.Slot); err != nil {
+			jobs.Fail(jobID, err)
+			return
+		}
+	}
+
 	progress("Saving mdadm configuration...")
 	mdadm.SaveConf()
 
@@ -414,7 +422,7 @@ func (h *ArraysHandler) addDisk(w http.ResponseWriter, r *http.Request, arrayPat
 		Disk string `json:"disk"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Disk == "" {
-		http.Error(w, `{"error":"disk path required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "disk path required", http.StatusBadRequest, "arrays.disk_path_required")
 		return
 	}
 
@@ -446,7 +454,7 @@ func (h *ArraysHandler) replaceDisk(w http.ResponseWriter, r *http.Request, arra
 		NewDisk string `json:"new_disk"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.NewDisk == "" {
-		http.Error(w, `{"error":"new_disk path required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "new_disk path required", http.StatusBadRequest, "arrays.new_disk_path_required")
 		return
 	}
 
@@ -460,7 +468,22 @@ func (h *ArraysHandler) replaceDisk(w http.ResponseWriter, r *http.Request, arra
 }
 
 func (h *ArraysHandler) scrubArray(w http.ResponseWriter, r *http.Request, path string) {
-	if err := mdadm.Scrub(path); err != nil {
+	if h.store != nil {
+		if assignment, err := h.store.GetTierAssignmentByArrayPath(path); err == nil {
+			decision, err := poolMaintenanceDecision(h.store, assignment.TierName, spindownNow())
+			if err != nil {
+				serverError(w, err)
+				return
+			}
+			if rejectBlockedMaintenance(w, assignment.TierName, "mdadm scrub", decision) {
+				return
+			}
+		} else if err != db.ErrNotFound {
+			serverError(w, err)
+			return
+		}
+	}
+	if err := scrubMDADMArray(path); err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

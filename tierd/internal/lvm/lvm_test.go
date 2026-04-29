@@ -1,6 +1,8 @@
 package lvm
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -52,6 +54,30 @@ func TestValidateDevicePath(t *testing.T) {
 		if err := ValidateDevicePath(p); err == nil {
 			t.Errorf("ValidateDevicePath(%q) should fail", p)
 		}
+	}
+}
+
+func TestEnsureFSTabEntryUsesNoFailAndUpgradesExistingEntry(t *testing.T) {
+	orig := fstabPath
+	fstabPath = filepath.Join(t.TempDir(), "fstab")
+	t.Cleanup(func() { fstabPath = orig })
+
+	initial := "/dev/tier-media-NVME/data /mnt/.tierd-backing/media/NVME xfs defaults 0 0\n"
+	if err := os.WriteFile(fstabPath, []byte(initial), 0o644); err != nil {
+		t.Fatalf("seed fstab: %v", err)
+	}
+
+	if err := EnsureFSTabEntry("tier-media-NVME", "data", "/mnt/.tierd-backing/media/NVME", "xfs"); err != nil {
+		t.Fatalf("EnsureFSTabEntry: %v", err)
+	}
+
+	data, err := os.ReadFile(fstabPath)
+	if err != nil {
+		t.Fatalf("read fstab: %v", err)
+	}
+	want := "/dev/tier-media-NVME/data /mnt/.tierd-backing/media/NVME xfs defaults,nofail 0 0"
+	if got := strings.TrimSpace(string(data)); got != want {
+		t.Fatalf("fstab entry = %q, want %q", got, want)
 	}
 }
 

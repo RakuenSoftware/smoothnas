@@ -1,22 +1,33 @@
 SmoothNAS Third-Party Software Notice
 
-SmoothNAS does not bundle, distribute, or modify any third-party
-software in its ISO images or release artifacts.
+SmoothNAS ISO images and release artifacts include bundled third-party
+software needed to install the appliance without rebuilding the kernel
+or storage stack on the target machine.
 
-During installation, the SmoothNAS custom installer runs debootstrap
-to install Debian, then apt-get to install packages. All packages are
-downloaded by the user's machine directly from Debian's repositories.
+During installation, the SmoothNAS custom installer runs `debootstrap`
+to install Debian, then `apt-get` to install packages from a mix of:
+
+- Debian repositories reached by the target machine during install
+- a bundled local package cache embedded in the ISO
+- a pinned checkout of the standalone `RakuenSoftware/smoothfs` source tree
 
 This includes:
 
-  - ZFS (zfsutils-linux, zfs-dkms): downloaded from Debian's "contrib"
-    repository. ZFS is licensed under the CDDL, which is incompatible
-    with the GPL. SmoothNAS does not distribute ZFS.
+  - OpenZFS (`zfs`, `zfs-dkms`, and supporting libraries): bundled from
+    the SmoothKernel/OpenZFS build artifacts embedded in the ISO. ZFS is
+    licensed under the CDDL, which is incompatible with the GPL.
 
   - Samba, NFS, targetcli, nginx, and all other system packages:
-    downloaded from Debian's "main" repository during installation.
+    installed from Debian's repositories during installation unless a
+    package is explicitly bundled in the local appliance cache.
+
+  - smoothfs source: included from the pinned
+    `RakuenSoftware/smoothfs` repository checkout so DKMS can build the
+    module for the installed kernel on first boot.
 
 The SmoothNAS ISO contains only:
   - A Linux kernel and initrd (from Debian's netboot build)
   - Boot structures (isolinux for BIOS, GRUB for UEFI)
-  - The SmoothNAS installer script (shell script)
+  - The SmoothNAS installer and first-boot scripts
+  - A bundled SmoothKernel/OpenZFS package cache
+  - A pinned smoothfs source checkout and local apt metadata

@@ -9,6 +9,7 @@ import (
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/lvm"
+	"github.com/JBailes/SmoothNAS/tierd/internal/tier/backend"
 )
 
 func newTestManager(t *testing.T, assignments map[string]string) *Manager {
@@ -94,6 +95,29 @@ func stubTierLVM(t *testing.T) {
 	unmountLV = func(string) error { return nil }
 	removeLV = func(string, string) error { return nil }
 
+	// The mdadm provision path now lives in tier/backend/mdadm.go and uses
+	// its own function-var shims. Redirect them at the same stubs so tests
+	// that call ProvisionPerTierStorage see a fully faked LVM layer.
+	resetBackend := (&backend.MdadmHooks{
+		LookupPV:         func(string) (*lvm.PVLookup, error) { return nil, nil },
+		WipeSignatures:   func(string) error { return nil },
+		CreatePV:         func(string) error { return nil },
+		EnsureVG:         func(string, string) error { return nil },
+		AddPVTags:        func(string, string, string) error { return nil },
+		ListPVsInVG:      func(string) ([]lvm.PVInfo, error) { return nil, nil },
+		LVExists:         func(string, string) (bool, error) { return false, nil },
+		CreateLVOnDevs:   func(string, string, string, []string) error { return nil },
+		FormatLV:         func(string, string, string) error { return nil },
+		RemoveLV:         func(string, string) error { return nil },
+		VGRemove:         func(string) error { return nil },
+		Mount:            func(string, string, string) error { return nil },
+		IsMounted:        func(string) bool { return true },
+		EnsureFSTabEntry: func(string, string, string, string) error { return nil },
+		RepairFilesystem: func(string, string) error { return nil },
+		MkdirAll:         func(string, os.FileMode) error { return nil },
+	}).Install()
+	t.Cleanup(resetBackend)
+
 	t.Cleanup(func() {
 		listPVsInVG = origListPVsInVG
 		lookupPV = origLookupPV
@@ -169,30 +193,34 @@ func TestProvisionPerTierStorageRepairsDirtyFilesystem(t *testing.T) {
 	m := newTestManager(t, map[string]string{"HDD": "/dev/md1"})
 	stubTierLVM(t)
 
-	// Simulate an LV that already exists (from a prior aborted provision).
-	lvExists = func(string, string) (bool, error) { return true, nil }
-	isMounted = func(string) bool { return false }
-
-	// First mount attempt fails with "needs cleaning".
+	// The provision path now runs inside tier/backend/mdadm.go, so
+	// override the backend's hooks (which stubTierLVM seeded with
+	// no-op defaults above). Any field left unset reverts to whatever
+	// stubTierLVM installed.
 	mountAttempts := 0
-	mountLV = func(vg, name, mp string) error {
-		mountAttempts++
-		if mountAttempts == 1 {
-			return fmt.Errorf("mount: %s: needs cleaning: exit status 32", mp)
-		}
-		return nil
-	}
 	var fsckCalled bool
-	repairFilesystem = func(vg, name string) error {
-		fsckCalled = true
-		return nil
-	}
+	reset := (&backend.MdadmHooks{
+		LVExists:  func(string, string) (bool, error) { return true, nil },
+		IsMounted: func(string) bool { return false },
+		Mount: func(vg, name, mp string) error {
+			mountAttempts++
+			if mountAttempts == 1 {
+				return fmt.Errorf("mount: %s: needs cleaning: exit status 32", mp)
+			}
+			return nil
+		},
+		RepairFilesystem: func(vg, name string) error {
+			fsckCalled = true
+			return nil
+		},
+	}).Install()
+	t.Cleanup(reset)
 
 	if err := m.ProvisionPerTierStorage("media", "HDD"); err != nil {
 		t.Fatalf("ProvisionPerTierStorage: %v", err)
 	}
 	if !fsckCalled {
-		t.Fatal("expected repairFilesystem to be called on dirty filesystem")
+		t.Fatal("expected RepairFilesystem to be called on dirty filesystem")
 	}
 	if mountAttempts != 2 {
 		t.Fatalf("expected 2 mount attempts (fail + retry), got %d", mountAttempts)

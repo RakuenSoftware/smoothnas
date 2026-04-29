@@ -1,7 +1,6 @@
 # Proposal: mdadm Tiering — Phase 1: Infrastructure
 
 **Status:** Pending
-**Date:** 2026-04-09
 **Implements:** mdadm-tiering
 **Depends on:** base appliance (tierd service, web UI shell, disk inventory, mdadm array management)
 **Followed by:** mdadm-complete-heat-engine (Phase 2)

@@ -149,9 +149,6 @@ func TestGetCapabilitiesValidTarget(t *testing.T) {
 	if caps.MovementGranularity != "region" {
 		t.Errorf("MovementGranularity = %q", caps.MovementGranularity)
 	}
-	if caps.FUSEMode != "n/a" {
-		t.Errorf("FUSEMode = %q, want n/a", caps.FUSEMode)
-	}
 }
 
 func TestGetCapabilitiesInvalidTargetID(t *testing.T) {
@@ -174,15 +171,20 @@ func TestGetCapabilitiesNotFound(t *testing.T) {
 
 func TestGetSetPolicy(t *testing.T) {
 	store := openStore(t)
-	seedPool(t, store, "pool1", "HDD", 3)
+	if err := store.CreateTierPool("pool1", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 3},
+	}); err != nil {
+		t.Fatalf("CreateTierPool: %v", err)
+	}
 	a := mdadmadapter.NewAdapter(store, t.TempDir())
 
 	// Seed fill policy.
-	if err := store.SetTierSlotFill("pool1", "HDD", 70, 90); err != nil {
+	if err := store.SetTierSlotFill("pool1", "NVME", 70, 90); err != nil {
 		t.Fatalf("SetTierSlotFill: %v", err)
 	}
 
-	pol, err := a.GetPolicy("mdadm:pool1:HDD")
+	pol, err := a.GetPolicy("mdadm:pool1:NVME")
 	if err != nil {
 		t.Fatalf("GetPolicy: %v", err)
 	}
@@ -194,16 +196,52 @@ func TestGetSetPolicy(t *testing.T) {
 	}
 
 	// Update via adapter.
-	if err := a.SetPolicy("mdadm:pool1:HDD", tiering.TargetPolicy{TargetFillPct: 60, FullThresholdPct: 85}); err != nil {
+	if err := a.SetPolicy("mdadm:pool1:NVME", tiering.TargetPolicy{TargetFillPct: 60, FullThresholdPct: 85}); err != nil {
 		t.Fatalf("SetPolicy: %v", err)
 	}
 
-	pol2, err := a.GetPolicy("mdadm:pool1:HDD")
+	pol2, err := a.GetPolicy("mdadm:pool1:NVME")
 	if err != nil {
 		t.Fatalf("GetPolicy after set: %v", err)
 	}
 	if pol2.TargetFillPct != 60 {
 		t.Errorf("TargetFillPct after set = %d, want 60", pol2.TargetFillPct)
+	}
+}
+
+func TestGetSetPolicySlowestTierUsesFullThresholdAsTarget(t *testing.T) {
+	store := openStore(t)
+	seedPool(t, store, "pool1", "HDD", 3)
+	a := mdadmadapter.NewAdapter(store, t.TempDir())
+
+	if err := store.SetTierSlotFill("pool1", "HDD", 70, 90); err != nil {
+		t.Fatalf("SetTierSlotFill: %v", err)
+	}
+
+	pol, err := a.GetPolicy("mdadm:pool1:HDD")
+	if err != nil {
+		t.Fatalf("GetPolicy: %v", err)
+	}
+	if pol.TargetFillPct != 90 {
+		t.Errorf("TargetFillPct = %d, want 90 for slowest tier", pol.TargetFillPct)
+	}
+	if pol.FullThresholdPct != 90 {
+		t.Errorf("FullThresholdPct = %d, want 90", pol.FullThresholdPct)
+	}
+
+	if err := a.SetPolicy("mdadm:pool1:HDD", tiering.TargetPolicy{TargetFillPct: 60, FullThresholdPct: 85}); err != nil {
+		t.Fatalf("SetPolicy: %v", err)
+	}
+
+	slot, err := store.GetTierSlot("pool1", "HDD")
+	if err != nil {
+		t.Fatalf("GetTierSlot: %v", err)
+	}
+	if slot.TargetFillPct != 85 {
+		t.Errorf("stored TargetFillPct = %d, want 85 for slowest tier", slot.TargetFillPct)
+	}
+	if slot.FullThresholdPct != 85 {
+		t.Errorf("stored FullThresholdPct = %d, want 85", slot.FullThresholdPct)
 	}
 }
 
@@ -259,4 +297,3 @@ func TestGetDegradedStateAfterReconcileWithMissingSlot(t *testing.T) {
 		t.Errorf("expected critical reconciliation_required state, got: %+v", states)
 	}
 }
-

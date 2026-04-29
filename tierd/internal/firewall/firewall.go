@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/JBailes/SmoothNAS/tierd/internal/nfs"
 )
 
 // Protocol represents a sharing protocol and its ports.
@@ -35,6 +37,12 @@ var ProtocolPorts = map[string][]Port{
 		{Number: 2049, Protocol: "tcp", Comment: "NFS"},
 		{Number: 111, Protocol: "tcp", Comment: "rpcbind (NFSv3)"},
 		{Number: 111, Protocol: "udp", Comment: "rpcbind (NFSv3)"},
+		{Number: nfs.MountdPort, Protocol: "tcp", Comment: "mountd (NFSv3)"},
+		{Number: nfs.MountdPort, Protocol: "udp", Comment: "mountd (NFSv3)"},
+		{Number: nfs.StatdPort, Protocol: "tcp", Comment: "statd (NFSv3)"},
+		{Number: nfs.StatdPort, Protocol: "udp", Comment: "statd (NFSv3)"},
+		{Number: nfs.LockdPort, Protocol: "tcp", Comment: "lockd (NFSv3)"},
+		{Number: nfs.LockdPort, Protocol: "udp", Comment: "lockd (NFSv3)"},
 	},
 	"iscsi": {
 		{Number: 3260, Protocol: "tcp", Comment: "iSCSI"},

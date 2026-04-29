@@ -8,11 +8,13 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	diskpkg "github.com/JBailes/SmoothNAS/tierd/internal/disk"
 )
@@ -84,6 +86,11 @@ func PrepareDisks(disks []string) error {
 		if err := ValidateDiskPath(d); err != nil {
 			return err
 		}
+	}
+	if err := diskpkg.RequireUnassigned(disks); err != nil {
+		return err
+	}
+	for _, d := range disks {
 		if err := releaseHolders(d); err != nil {
 			return fmt.Errorf("release holders %s: %w", d, err)
 		}
@@ -351,18 +358,161 @@ func parseDetail(path, output string) (*Array, error) {
 	return a, nil
 }
 
-// Stop stops and destroys an array.
+// Stop stops and destroys an array. Before stopping it releases anything
+// holding the array device — mounted filesystems, LVM VGs, or ZFS pools —
+// since mdadm --stop needs exclusive access. wipefs at the end clears
+// residual signatures so the array doesn't get auto-reassembled.
 func Stop(path string) error {
 	if err := ValidateArrayPath(path); err != nil {
 		return err
 	}
 
-	cmd := exec.Command("mdadm", "--stop", path)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("mdadm stop: %s: %w", strings.TrimSpace(string(out)), err)
+	var lastOut []byte
+	var lastErr error
+
+	for attempt := 0; attempt < 3; attempt++ {
+		releaseArrayHolders(path)
+
+		cmd := exec.Command("mdadm", "--stop", path)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return updateConf()
+		}
+
+		lastOut = out
+		lastErr = err
+		forceReleaseArrayHolders(path)
+		time.Sleep(500 * time.Millisecond)
 	}
 
-	return updateConf()
+	return fmt.Errorf("mdadm stop: %s: %w", strings.TrimSpace(string(lastOut)), lastErr)
+}
+
+// releaseArrayHolders tears down anything keeping an md device busy:
+// ZFS pools backed by it, LVM VGs with it as a PV, and mounted filesystems
+// on the array or its partitions. All steps are best-effort — the caller's
+// mdadm --stop will report the real failure if something still holds on.
+func releaseArrayHolders(arrayPath string) {
+	// Destroy any ZFS pool that uses this array as a vdev. The caller is
+	// destroying the array, so dependent pools must yield rather than keep the
+	// md device busy. zpool status -LP prints resolved device paths; match the
+	// exact array path.
+	if out, err := exec.Command("zpool", "list", "-H", "-o", "name").Output(); err == nil {
+		for _, pool := range strings.Fields(string(out)) {
+			if pool == "" {
+				continue
+			}
+			statusOut, err := exec.Command("zpool", "status", "-LP", pool).Output()
+			if err != nil {
+				continue
+			}
+			if strings.Contains(string(statusOut), arrayPath) {
+				releaseZPoolHolders(pool)
+				if err := exec.Command("zpool", "destroy", "-f", pool).Run(); err != nil {
+					log.Printf("mdadm: zpool destroy -f %s before array stop: %v", pool, err)
+					exec.Command("zpool", "export", "-f", pool).Run()
+				}
+			}
+		}
+	}
+
+	for _, dev := range arrayDevices(arrayPath) {
+		exec.Command("swapoff", dev).Run()
+	}
+
+	killDeviceHolders(arrayPath)
+	unmountArrayMounts(arrayPath, false)
+
+	// Deactivate LVM VG if the array is a PV.
+	for _, dev := range arrayDevices(arrayPath) {
+		if pvOut, err := exec.Command("pvs", "--noheadings", "-o", "vg_name", dev).Output(); err == nil {
+			if vg := strings.TrimSpace(string(pvOut)); vg != "" {
+				exec.Command("vgchange", "-an", "--force", vg).Run()
+				exec.Command("pvremove", "-ff", "-y", dev).Run()
+			}
+		}
+	}
+
+	// Clear signatures on the array so a stale FS/PV/ZFS label doesn't
+	// cause it to be claimed again before the stop lands.
+	exec.Command("wipefs", "-a", arrayPath).Run()
+}
+
+func forceReleaseArrayHolders(arrayPath string) {
+	unmountArrayMounts(arrayPath, true)
+	for _, dev := range arrayDevices(arrayPath) {
+		killDeviceHolders(dev)
+		exec.Command("swapoff", dev).Run()
+		exec.Command("blockdev", "--flushbufs", dev).Run()
+	}
+}
+
+func arrayDevices(arrayPath string) []string {
+	out, err := exec.Command("lsblk", "-ln", "-o", "PATH", arrayPath).Output()
+	if err != nil {
+		return []string{arrayPath}
+	}
+	seen := map[string]bool{}
+	var devices []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		dev := strings.TrimSpace(line)
+		if dev == "" || seen[dev] {
+			continue
+		}
+		seen[dev] = true
+		devices = append(devices, dev)
+	}
+	if !seen[arrayPath] {
+		devices = append([]string{arrayPath}, devices...)
+	}
+	return devices
+}
+
+func unmountArrayMounts(arrayPath string, kill bool) {
+	lsOut, _ := exec.Command("lsblk", "-ln", "-o", "MOUNTPOINT", arrayPath).Output()
+	mounts := strings.Fields(strings.TrimSpace(string(lsOut)))
+	for i := len(mounts) - 1; i >= 0; i-- {
+		mount := mounts[i]
+		if kill {
+			killDeviceHolders(mount)
+		}
+		exec.Command("nsenter", "-t", "1", "-m", "--", "umount", "-f", mount).Run()
+		exec.Command("nsenter", "-t", "1", "-m", "--", "umount", "-l", mount).Run()
+		exec.Command("umount", "-f", mount).Run()
+		exec.Command("umount", "-l", mount).Run()
+	}
+}
+
+func releaseZPoolHolders(pool string) {
+	out, err := exec.Command("zfs", "list", "-H", "-r", "-t", "filesystem", "-o", "name,mountpoint", pool).Output()
+	if err != nil {
+		return
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		fields := strings.Fields(lines[i])
+		if len(fields) < 2 {
+			continue
+		}
+		dataset, mount := fields[0], fields[1]
+		if mount != "-" && mount != "legacy" && mount != "none" && mount != "/" {
+			killDeviceHolders(mount)
+		}
+		exec.Command("zfs", "unmount", "-f", dataset).Run()
+	}
+}
+
+func killDeviceHolders(path string) {
+	if _, err := exec.LookPath("fuser"); err != nil {
+		return
+	}
+	out, err := exec.Command("fuser", "-km", path).CombinedOutput()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return
+		}
+		log.Printf("mdadm: fuser -km %s: %v (out=%q)", path, err, strings.TrimSpace(string(out)))
+	}
 }
 
 // ZeroSuperblocks removes mdadm superblocks from the given disks.
