@@ -114,11 +114,9 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          if [ "${{ github.repository }}" = "JBailes/SmoothNAS" ] && [ "${{ github.ref_name }}" != "main" ]; then
-            sudo apt-get install -y libpam0g-dev gcc
-          else
-            sudo apt-get install -y xorriso isolinux syslinux-utils cpio gzip file curl libpam0g-dev gcc
-          fi
+          sudo apt-get install -y \
+            xorriso isolinux syslinux-utils cpio gzip file curl \
+            libpam0g-dev gcc dpkg-dev
 
       - uses: actions/setup-go@v5
         with:
@@ -155,14 +153,84 @@ jobs:
           }
           EOFM
 
+      # --- Sibling repos for the ISO build ---
+
+      - name: Resolve smoothkernel ref
+        id: smoothkernel_ref
+        run: |
+          set -euo pipefail
+          SHA="$(git ls-remote https://github.com/RakuenSoftware/smoothkernel HEAD | awk '{print $1}')"
+          [ -n "$SHA" ] || { echo "Failed to resolve smoothkernel HEAD" >&2; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Pinning smoothkernel to $SHA"
+
+      - name: Restore SmoothKernel artifact cache
+        id: smoothkernel_cache
+        uses: actions/cache@v4
+        with:
+          path: deps/smoothkernel-out
+          key: smoothkernel-${{ steps.smoothkernel_ref.outputs.sha }}-amd64
+
+      - name: Build SmoothKernel + ZFS (cache miss)
+        if: steps.smoothkernel_cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y \
+            bc bison flex libelf-dev libssl-dev libncurses-dev pahole \
+            rsync debhelper kmod fakeroot
+          git clone --filter=blob:none https://github.com/RakuenSoftware/smoothkernel deps/smoothkernel-src
+          cd deps/smoothkernel-src
+          git checkout "${{ steps.smoothkernel_ref.outputs.sha }}"
+          cat > build.env <<'ENVEOF'
+          KERNEL_VERSION=6.19.12
+          LOCALVERSION=-smoothnas
+          ZFS_VERSION=2.4.1
+          CONFIG_SOURCE=$(CURDIR)/configs/smooth-amd64.config
+          CACHYOS_PATCHSET=cachyos-6.19.12
+          NOBARA_PATCHSET=nobara-picks
+          POST_NOBARA_PATCHSET=post-nobara-6.19.12
+          OUT_DIR=$(CURDIR)/out-smoothnas
+          STRIP_DEBUG_INFO=1
+          NET_TUNING=1
+          SERVER_TUNING=1
+          APPLIANCE_TRIM=1
+          ENVEOF
+          make kernel
+          make zfs
+          mkdir -p "$GITHUB_WORKSPACE/deps/smoothkernel-out"
+          cp out-smoothnas/*.deb "$GITHUB_WORKSPACE/deps/smoothkernel-out/"
+
+      - name: Checkout smoothiso
+        uses: actions/checkout@v4
+        with:
+          repository: RakuenSoftware/smoothiso
+          path: deps/smoothiso
+
+      - name: Checkout smoothgui
+        uses: actions/checkout@v4
+        with:
+          repository: RakuenSoftware/smoothgui
+          path: deps/smoothgui
+
+      - name: Build smoothgui installer frontend
+        working-directory: deps/smoothgui
+        run: |
+          echo '//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}' >> .npmrc
+          npm ci
+          npm run build:installer
+
       - name: Build ISO
-        if: github.repository != 'JBailes/SmoothNAS' || github.ref_name == 'main'
+        env:
+          SMOOTHISO_DIR: ${{ github.workspace }}/deps/smoothiso
+          SMOOTHGUI_DIR: ${{ github.workspace }}/deps/smoothgui
+          SMOOTHKERNEL_DIR: ${{ github.workspace }}/deps/smoothkernel-out
+          ZFS_ARTIFACT_DIR: ${{ github.workspace }}/deps/smoothkernel-out
+          SMOOTHFS_REPO_URL: https://github.com/RakuenSoftware/smoothfs.git
         run: |
           chmod +x iso/build-iso.sh
           ./iso/build-iso.sh ${{ steps.meta.outputs.version }}
 
       - name: Create GitHub Release
-        if: github.repository != 'JBailes/SmoothNAS' || github.ref_name == 'main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
@@ -171,20 +239,6 @@ jobs:
           prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
           files: |
             iso/output/smoothnas-${{ steps.meta.outputs.version }}.iso
-            bin/tierd
-            dist/tierd-ui.tar.gz
-            dist/manifest.json
-          generate_release_notes: true
-
-      - name: Create Lightweight GitHub Release
-        if: github.repository == 'JBailes/SmoothNAS' && github.ref_name != 'main'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          name: ${{ steps.meta.outputs.name }}
-          draft: false
-          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
-          files: |
             bin/tierd
             dist/tierd-ui.tar.gz
             dist/manifest.json
