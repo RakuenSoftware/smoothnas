@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strings"
+	"path/filepath"
+	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/lvm"
+	"github.com/JBailes/SmoothNAS/tierd/internal/spindown"
+	"github.com/JBailes/SmoothNAS/tierd/internal/tier/backend"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tiermeta"
 )
 
@@ -56,12 +59,34 @@ func NewManager(store *db.Store) *Manager {
 }
 
 // SetMetaStore attaches a tiermeta.Store for write-through LV-backed metadata.
+// Also registers it as the mdadm backend's meta-LV provider so the backend
+// can carve out the per-tier metadata LV without dragging the tiermeta
+// package into its import graph.
 func (m *Manager) SetMetaStore(meta *tiermeta.Store) {
 	m.meta = meta
+	backend.SetMdadmMetaProvider(meta)
 }
 
 func tierVGName(tierName string) string {
 	return "tier-" + tierName
+}
+
+// sameDevice reports whether two /dev paths point at the same underlying
+// block device. Device-mapper exposes the same LV under multiple names —
+// /dev/{vg}/{lv}, /dev/mapper/{vg}-{lv}, and /dev/dm-N all alias to one
+// dm device — so a raw string compare produces false conflicts. Resolve
+// symlinks before comparing; fall back to raw equality if either path is
+// unresolvable (missing device, permission error).
+func sameDevice(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ra, aerr := filepath.EvalSymlinks(a)
+	rb, berr := filepath.EvalSymlinks(b)
+	if aerr != nil || berr != nil {
+		return false
+	}
+	return ra == rb
 }
 
 func deviceRanks(assignments []db.TierArrayAssignment) map[string]int {
@@ -94,7 +119,7 @@ func PerTierVGName(poolName, tierName string) string {
 }
 
 // PerTierBackingMount returns the backing mount path for a specific tier.
-// The path is outside /mnt/{pool} so it is not shadowed by the FUSE mount.
+// The path is outside /mnt/{pool} so it is not shadowed by the smoothfs mount.
 func PerTierBackingMount(poolName, tierName string) string {
 	return "/mnt/.tierd-backing/" + poolName + "/" + tierName
 }
@@ -102,7 +127,7 @@ func PerTierBackingMount(poolName, tierName string) string {
 // ProvisionPerTierStorage creates an independent VG/LV for a single tier slot.
 // Unlike ProvisionStorage (which creates a monolithic LV spanning all PVs),
 // this creates a dedicated VG and LV per tier so each tier's I/O is isolated.
-// The FUSE daemon then routes file opens to the correct tier.
+// The smoothfs kernel module then routes file opens to the correct tier.
 func (m *Manager) ProvisionPerTierStorage(poolName, tierName string) error {
 	pool, err := m.store.GetTierInstance(poolName)
 	if err != nil {
@@ -113,110 +138,45 @@ func (m *Manager) ProvisionPerTierStorage(poolName, tierName string) error {
 	if err != nil {
 		return fmt.Errorf("get tier slot %s/%s: %w", poolName, tierName, err)
 	}
-	if slot.State == db.TierSlotStateEmpty || slot.ArrayPath == "" {
-		return fmt.Errorf("tier slot %s/%s has no array assigned", poolName, tierName)
+	if slot.State == db.TierSlotStateEmpty {
+		return fmt.Errorf("tier slot %s/%s has no backing assigned", poolName, tierName)
 	}
 
-	vg := PerTierVGName(poolName, tierName)
+	kind := slot.BackingKind
+	if kind == "" {
+		kind = "mdadm"
+	}
+
+	// ref is kind-specific: mdadm uses the array path (pre-migration
+	// rows have ArrayPath populated and BackingRef empty; post-migration
+	// rows fill both); zfs/btrfs/bcachefs use BackingRef only.
+	ref := slot.BackingRef
+	if kind == "mdadm" && ref == "" {
+		ref = slot.ArrayPath
+	}
+	if ref == "" {
+		return fmt.Errorf("tier slot %s/%s has no backing ref", poolName, tierName)
+	}
+
 	mountPoint := PerTierBackingMount(poolName, tierName)
-	const lvName = "data"
 
-	// Check if the VG already exists (idempotent).
-	if ok, _ := lvExists(vg, lvName); ok {
-		// Already provisioned — ensure it's mounted.
-		if !isMounted(mountPoint) {
-			_ = os.MkdirAll(mountPoint, 0755)
-			if err := mountLV(vg, lvName, mountPoint); err != nil {
-				// "Structure needs cleaning" (EUCLEAN) means the filesystem was
-				// left dirty — run fsck to repair it and retry the mount once.
-				if strings.Contains(err.Error(), "needs cleaning") {
-					if fsckErr := repairFilesystem(vg, lvName); fsckErr != nil {
-						return fmt.Errorf("re-mount %s: filesystem repair failed: %w", mountPoint, fsckErr)
-					}
-					if err2 := mountLV(vg, lvName, mountPoint); err2 != nil {
-						return fmt.Errorf("re-mount %s (after fsck): %w", mountPoint, err2)
-					}
-				} else {
-					return fmt.Errorf("re-mount %s: %w", mountPoint, err)
-				}
-			}
-		}
-		return nil
-	}
-
-	// Prepare the PV.
-	pv, err := lookupPV(slot.ArrayPath)
+	b, err := backend.Lookup(kind)
 	if err != nil {
-		return fmt.Errorf("lookup pv %s: %w", slot.ArrayPath, err)
+		return fmt.Errorf("tier provision: %w", err)
 	}
-	if pv != nil && pv.VGName != "" && pv.VGName != vg {
-		_ = removePVLabel(slot.ArrayPath)
-		_ = wipeSignatures(slot.ArrayPath)
-		pv = nil
+	if err := b.Provision(poolName, tierName, ref, mountPoint, backend.ProvisionOpts{
+		Filesystem: pool.Filesystem,
+	}); err != nil {
+		return fmt.Errorf("%s provision: %w", kind, err)
 	}
-	if pv == nil {
-		if err := wipeSignatures(slot.ArrayPath); err != nil {
-			return fmt.Errorf("wipefs %s: %w", slot.ArrayPath, err)
-		}
-		if err := createPV(slot.ArrayPath); err != nil {
-			return fmt.Errorf("pvcreate %s: %w", slot.ArrayPath, err)
-		}
-	}
+	log.Printf("tier provision: per-tier storage ready at %s (%s ref=%s)",
+		mountPoint, kind, ref)
 
-	// Create dedicated VG for this tier.
-	if err := ensureVG(vg, slot.ArrayPath); err != nil {
-		return fmt.Errorf("ensure vg %s: %w", vg, err)
-	}
-	if err := addPVTags(slot.ArrayPath, poolName, tierName); err != nil {
-		log.Printf("tier provision: tag pv %s: %v", slot.ArrayPath, err)
-	}
-
-	// Carve out the tiermeta LV before allocating the data LV so there is
-	// guaranteed free space.  The meta LV is sized at 0.1% of the PV.
-	// Non-fatal: if this fails the data LV still gets created.
-	if m.meta != nil {
-		pvInfos, _ := listPVsInVG(vg)
-		var pvSizeBytes uint64
-		for _, p := range pvInfos {
-			if p.Device == slot.ArrayPath {
-				pvSizeBytes = p.SizeBytes
-				break
-			}
-		}
-		if err := m.meta.CreateSlotMetaLV(poolName, tierName, slot.ArrayPath, pvSizeBytes); err != nil {
-			log.Printf("tier provision: create meta lv for %s/%s: %v", poolName, tierName, err)
-		}
-	}
-
-	// Create data LV using all remaining available space.
-	createArgs := []string{slot.ArrayPath}
-	if err := createLVOnPVs(vg, lvName, "100%FREE", createArgs); err != nil {
-		return fmt.Errorf("create lv %s/%s: %w", vg, lvName, err)
-	}
-
-	// Format.
-	if err := formatLV(vg, lvName, pool.Filesystem); err != nil {
-		_ = removeLV(vg, lvName)
-		_ = vgRemove(vg)
-		return fmt.Errorf("format lv: %w", err)
-	}
-
-	// Mount.
-	if err := os.MkdirAll(mountPoint, 0755); err != nil {
-		return fmt.Errorf("create mount point: %w", err)
-	}
-	if err := mountLV(vg, lvName, mountPoint); err != nil {
-		return fmt.Errorf("mount lv: %w", err)
-	}
-	if err := ensureFSTabEntry(vg, lvName, mountPoint, pool.Filesystem); err != nil {
-		log.Printf("tier provision: fstab entry for %s/%s: %v", vg, lvName, err)
-	}
-
-	log.Printf("tier provision: per-tier storage ready at %s (vg=%s)", mountPoint, vg)
-
-	// Record the slot assignment in the meta store.
-	if m.meta != nil {
-		if err := m.meta.AssignSlot(poolName, tierName, slot.ArrayPath, slot.ArrayPath); err != nil {
+	// mdadm-only post-step: record the slot in the placement meta store
+	// so the planner can move files across slots. ZFS pools track this
+	// via dataset properties, so it doesn't apply there.
+	if kind == "mdadm" && m.meta != nil {
+		if err := m.meta.AssignSlot(poolName, tierName, ref, ref); err != nil {
 			// May already be assigned if pool was pre-seeded from Bootstrap.
 			log.Printf("tier provision: meta assign slot %s/%s: %v", poolName, tierName, err)
 		}
@@ -248,6 +208,16 @@ func (m *Manager) Reconcile() {
 		return
 	}
 	for _, pool := range pools {
+		decision, _, err := spindown.DecisionFor(m.store, spindown.PoolEnabledKey(pool.Name), spindown.PoolWindowsKey(pool.Name), time.Now())
+		if err != nil {
+			log.Printf("tier reconcile: spindown policy for %s: %v", pool.Name, err)
+			continue
+		}
+		if !decision.Allowed {
+			log.Printf("tier reconcile: skipping spindown pool %s outside active window; next_active_at=%s",
+				pool.Name, decision.NextActiveAt)
+			continue
+		}
 		m.reconcilePool(pool, discoveredByPool[pool.Name])
 	}
 }
@@ -307,7 +277,10 @@ func (m *Manager) reconcilePool(pool db.TierInstance, discoveredPVs map[string]s
 		}
 	}
 
-	if pool.State != db.TierPoolStateHealthy && pool.State != db.TierPoolStateDegraded {
+	// Allow the reconcile to proceed when the pool is in `error` so it can
+	// self-heal once the underlying condition clears. Provisioning and
+	// destroying are lifecycle states the reconcile must not race with.
+	if pool.State != db.TierPoolStateHealthy && pool.State != db.TierPoolStateDegraded && pool.State != db.TierPoolStateError {
 		_ = m.store.MarkTierReconciled(pool.Name)
 		return
 	}
@@ -333,7 +306,8 @@ func (m *Manager) reconcilePool(pool db.TierInstance, discoveredPVs map[string]s
 
 	expectedDev := "/dev/" + vg + "/" + lvName
 	if isMounted(mountPoint) {
-		if existing := mountedByDev(mountPoint); existing != "" && existing != expectedDev {
+		existing := mountedByDev(mountPoint)
+		if existing != "" && !sameDevice(existing, expectedDev) {
 			log.Printf("tier reconcile: %s mounted by %s, expected %s", mountPoint, existing, expectedDev)
 			_ = m.store.SetTierInstanceError(pool.Name, "mount_path_conflict")
 			_ = m.store.MarkTierReconciled(pool.Name)
@@ -372,6 +346,22 @@ func (m *Manager) reconcilePool(pool db.TierInstance, discoveredPVs map[string]s
 	if err := verifyLVSegments(vg, lvName, deviceRanks(assignments)); err != nil {
 		log.Printf("tier reconcile: segment verify %s: %v", pool.Name, err)
 		_ = m.store.SetTierInstanceError(pool.Name, "segment_order_violation")
+		_ = m.store.MarkTierReconciled(pool.Name)
+		return
+	}
+
+	// Everything verified. If we were previously in `error`, clear it —
+	// the condition that tripped the error has cleared.
+	if pool.State == db.TierPoolStateError {
+		target := db.TierPoolStateHealthy
+		if anyMissing {
+			target = db.TierPoolStateDegraded
+		}
+		if err := m.store.TransitionTierInstanceState(pool.Name, target); err != nil {
+			log.Printf("tier reconcile: clear error on %s: %v", pool.Name, err)
+		} else {
+			log.Printf("tier reconcile: %s recovered from error to %s", pool.Name, target)
+		}
 	}
 
 	_ = m.store.MarkTierReconciled(pool.Name)

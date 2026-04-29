@@ -1,7 +1,6 @@
 # Proposal: mdadm Heat Engine — Schema Migration
 
 **Status:** Pending
-**Date:** 2026-04-10
 **Part of:** mdadm-complete-heat-engine (Step 1 of 9)
 **Depends on:** mdadm-tiering-infra-04-data-model
 

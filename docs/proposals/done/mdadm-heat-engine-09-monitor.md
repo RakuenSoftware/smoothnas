@@ -1,7 +1,6 @@
 # Proposal: mdadm Heat Engine — Monitor Integration
 
 **Status:** Done
-**Date:** 2026-04-10
 **Part of:** mdadm-complete-heat-engine (Step 9 of 9)
 **Depends on:** mdadm-heat-engine-04-dmstats, mdadm-heat-engine-05-migration-engine, mdadm-heat-engine-06-policy-engine
 

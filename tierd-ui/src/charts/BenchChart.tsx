@@ -1,3 +1,4 @@
+import { useI18n } from '@rakuensoftware/smoothgui';
 import './charts.scss';
 
 interface Props {
@@ -38,6 +39,7 @@ function buildPath(points: any[], field: string, yMax: number, duration: number)
 }
 
 export default function BenchChart({ points, mode, duration }: Props) {
+  const { t } = useI18n();
   const showRead = ['randrw', 'randread', 'read'].includes(mode);
   const showWrite = ['randrw', 'randwrite', 'write'].includes(mode);
   const mbpsMax = axisMax(points, ['read_mbps', 'write_mbps']);
@@ -67,12 +69,12 @@ export default function BenchChart({ points, mode, duration }: Props) {
       </svg>
       <div className="chart-legend">
         {showRead && <>
-          <span className="legend-item"><svg width="24" height="12" className="legend-icon"><line x1="0" y1="6" x2="24" y2="6" stroke="#1976d2" strokeWidth="2" /></svg>Read MB/s</span>
-          <span className="legend-item"><svg width="24" height="12" className="legend-icon"><line x1="0" y1="6" x2="24" y2="6" stroke="#1976d2" strokeWidth="1.5" strokeDasharray="4,3" /></svg>Read IOPS</span>
+          <span className="legend-item"><svg width="24" height="12" className="legend-icon"><line x1="0" y1="6" x2="24" y2="6" stroke="#1976d2" strokeWidth="2" /></svg>{t('benchmarks.col.readMbps')}</span>
+          <span className="legend-item"><svg width="24" height="12" className="legend-icon"><line x1="0" y1="6" x2="24" y2="6" stroke="#1976d2" strokeWidth="1.5" strokeDasharray="4,3" /></svg>{t('benchmarks.col.readIops')}</span>
         </>}
         {showWrite && <>
-          <span className="legend-item"><svg width="24" height="12" className="legend-icon"><line x1="0" y1="6" x2="24" y2="6" stroke="#ef6c00" strokeWidth="2" /></svg>Write MB/s</span>
-          <span className="legend-item"><svg width="24" height="12" className="legend-icon"><line x1="0" y1="6" x2="24" y2="6" stroke="#ef6c00" strokeWidth="1.5" strokeDasharray="4,3" /></svg>Write IOPS</span>
+          <span className="legend-item"><svg width="24" height="12" className="legend-icon"><line x1="0" y1="6" x2="24" y2="6" stroke="#ef6c00" strokeWidth="2" /></svg>{t('benchmarks.col.writeMbps')}</span>
+          <span className="legend-item"><svg width="24" height="12" className="legend-icon"><line x1="0" y1="6" x2="24" y2="6" stroke="#ef6c00" strokeWidth="1.5" strokeDasharray="4,3" /></svg>{t('benchmarks.col.writeIops')}</span>
         </>}
       </div>
     </div>

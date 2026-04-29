@@ -1,6 +1,6 @@
 // Package meta stores per-object tier metadata on the pool's fastest tier.
 //
-// The store is designed for the FUSE hot path: synchronous reads at mmap
+// The store is designed for the hot path: synchronous reads at mmap
 // latency, and writes that enqueue into a per-shard batched writer so the
 // caller never waits on disk. The file that a record describes always lives
 // in a tier's backing filesystem — the record itself is a cache/hint that

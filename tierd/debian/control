@@ -1,0 +1,32 @@
+Source: tierd
+Section: admin
+Priority: optional
+Maintainer: SmoothNAS / RakuenSoftware <support@smoothnas.com>
+Build-Depends: debhelper-compat (= 13),
+               golang-go (>= 2:1.24~),
+               libc6-dev,
+               ca-certificates
+Standards-Version: 4.6.2
+Homepage: https://github.com/JBailes/SmoothNAS
+
+Package: tierd
+Architecture: amd64 arm64
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         systemd
+Recommends: smoothfs-dkms,
+            smoothfs-samba-vfs
+Description: SmoothNAS storage management daemon
+ tierd is the SmoothNAS control-plane daemon. It owns the pool,
+ tier, share, and movement state machines that sit above smoothfs
+ and the protocol exports (NFS, SMB, iSCSI). Talks to the smoothfs
+ kernel module over generic netlink, persists control-plane state
+ in SQLite, and exposes a REST API + `tierd-cli` for operators and
+ upper-layer tooling.
+ .
+ This package ships the tierd daemon, the tierd-cli operator CLI,
+ and systemd units for the long-lived control plane plus one-shot
+ host initialization before tierd starts. smoothfs-dkms and
+ smoothfs-samba-vfs are Recommends rather than Depends: tierd runs
+ (degraded) on hosts without smoothfs installed — useful for day-one
+ appliance provisioning where tier pools haven't been created yet.

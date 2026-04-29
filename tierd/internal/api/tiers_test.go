@@ -7,12 +7,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
+	"github.com/JBailes/SmoothNAS/tierd/internal/disk"
 	"github.com/JBailes/SmoothNAS/tierd/internal/lvm"
 	"github.com/JBailes/SmoothNAS/tierd/internal/mdadm"
+	"github.com/JBailes/SmoothNAS/tierd/internal/spindown"
 )
 
 func newTestHandler(t *testing.T) *ArraysHandler {
@@ -24,9 +27,6 @@ func newTestHandler(t *testing.T) *ArraysHandler {
 	t.Cleanup(func() { store.Close() })
 	if err := store.Migrate(); err != nil {
 		t.Fatalf("migrate: %v", err)
-	}
-	if err := store.MigrateShares(); err != nil {
-		t.Fatalf("migrate shares: %v", err)
 	}
 	h := NewArraysHandler(store)
 	h.asyncDone = make(chan struct{}, 4)
@@ -47,6 +47,14 @@ func newTestHandler(t *testing.T) *ArraysHandler {
 	origLazyUnmountPath := lazyUnmountPath
 	origRemoveTierFSTab := removeTierFSTab
 	origRemoveTierLV := removeTierLV
+	origStatfsPath := statfsPath
+	origRemountNoatime := remountNoatime
+	origReadMountInfo := readMountInfo
+	origScrubMDADMArray := scrubMDADMArray
+	origSpindownNow := spindownNow
+	origListDisksForSpindown := listDisksForSpindown
+	origQueryPowerStateForSpindown := queryPowerStateForSpindown
+	origZFSMemberDevicesForSpindown := zfsMemberDevicesForSpindown
 	createPoolVG = func(string) error { return nil }
 	removePoolVG = func(string) error { return nil }
 	removePoolVGPlaceholder = func(string) error { return nil }
@@ -63,6 +71,14 @@ func newTestHandler(t *testing.T) *ArraysHandler {
 	lazyUnmountPath = func(string) error { return nil }
 	removeTierFSTab = func(string, string, string) error { return nil }
 	removeTierLV = func(string, string) error { return nil }
+	statfsPath = origStatfsPath
+	remountNoatime = func(string) error { return nil }
+	readMountInfo = origReadMountInfo
+	scrubMDADMArray = func(string) error { return nil }
+	spindownNow = func() time.Time { return time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC) }
+	listDisksForSpindown = func() ([]disk.Disk, error) { return nil, nil }
+	queryPowerStateForSpindown = func(string) (string, error) { return "active", nil }
+	zfsMemberDevicesForSpindown = func(string) []string { return nil }
 	t.Cleanup(func() {
 		createPoolVG = origCreatePoolVG
 		removePoolVG = origRemovePoolVG
@@ -80,6 +96,14 @@ func newTestHandler(t *testing.T) *ArraysHandler {
 		lazyUnmountPath = origLazyUnmountPath
 		removeTierFSTab = origRemoveTierFSTab
 		removeTierLV = origRemoveTierLV
+		statfsPath = origStatfsPath
+		remountNoatime = origRemountNoatime
+		readMountInfo = origReadMountInfo
+		scrubMDADMArray = origScrubMDADMArray
+		spindownNow = origSpindownNow
+		listDisksForSpindown = origListDisksForSpindown
+		queryPowerStateForSpindown = origQueryPowerStateForSpindown
+		zfsMemberDevicesForSpindown = origZFSMemberDevicesForSpindown
 	})
 	return h
 }
@@ -104,6 +128,532 @@ func TestListTiersEndpoint(t *testing.T) {
 	}
 }
 
+func TestPoolSpindownRequiresMetadataOnFastest(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.store.CreateTierPool("media", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 2},
+	}); err != nil {
+		t.Fatalf("create tier pool: %v", err)
+	}
+	if err := h.store.AssignBackingToTier("media", "NVME", "zfs", "fast"); err != nil {
+		t.Fatalf("assign fast: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tiers/media/spindown", nil)
+	w := httptest.NewRecorder()
+	h.Route(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET spindown: status %d body %s", w.Code, w.Body.String())
+	}
+	var got poolSpindownPolicyResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Eligible {
+		t.Fatalf("expected pool without meta_on_fastest to be ineligible: %+v", got)
+	}
+	if len(got.Reasons) == 0 || !strings.Contains(got.Reasons[0], "metadata") {
+		t.Fatalf("expected metadata reason, got %+v", got.Reasons)
+	}
+}
+
+func TestPoolSpindownEnableRemountsNoatimeAndPersists(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.store.CreateTierPoolWithOptions("media", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 2},
+	}, true); err != nil {
+		t.Fatalf("create tier pool: %v", err)
+	}
+	if err := h.store.AssignBackingToTier("media", "NVME", "zfs", "fast"); err != nil {
+		t.Fatalf("assign fast: %v", err)
+	}
+	if err := h.store.AssignBackingToTier("media", "HDD", "zfs", "slow"); err != nil {
+		t.Fatalf("assign slow: %v", err)
+	}
+	readMountInfo = func() ([]byte, error) {
+		return []byte(`1 0 8:1 / /mnt/media rw,relatime - smoothfs none rw
+2 0 8:2 / /mnt/.tierd-backing/media/NVME rw,relatime - xfs /dev/test rw
+3 0 8:3 / /mnt/.tierd-backing/media/HDD rw,relatime - xfs /dev/test rw
+`), nil
+	}
+	var remounted []string
+	remountNoatime = func(path string) error {
+		remounted = append(remounted, path)
+		return nil
+	}
+
+	w := postJSON(h, http.MethodPut, "/api/tiers/media/spindown", map[string]any{"enabled": true})
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT spindown: status %d body %s", w.Code, w.Body.String())
+	}
+	if len(remounted) != 3 {
+		t.Fatalf("expected three noatime remounts, got %#v", remounted)
+	}
+	enabled, err := h.store.GetBoolConfig(poolSpindownConfigKey("media"), false)
+	if err != nil || !enabled {
+		t.Fatalf("stored spindown enabled = %v err=%v", enabled, err)
+	}
+}
+
+func TestPoolSpindownRequiresConfirmedSSDTiersAtTargetFill(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.store.CreateTierPoolWithOptions("media", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 2},
+	}, true); err != nil {
+		t.Fatalf("create tier pool: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "NVME", "md0"); err != nil {
+		t.Fatalf("assign NVME tier: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "HDD", "md1"); err != nil {
+		t.Fatalf("assign HDD tier: %v", err)
+	}
+	listMDADMArrays = func() ([]mdadm.Array, error) {
+		return []mdadm.Array{
+			{Path: "/dev/md0", MemberDisks: []string{"/dev/nvme0n1"}},
+			{Path: "/dev/md1", MemberDisks: []string{"/dev/sda"}},
+		}, nil
+	}
+	listDisksForSpindown = func() ([]disk.Disk, error) {
+		return []disk.Disk{
+			{Path: "/dev/nvme0n1", Rotational: false},
+			{Path: "/dev/sda", Rotational: true},
+		}, nil
+	}
+	statfsPath = func(path string, st *syscall.Statfs_t) error {
+		if !strings.HasSuffix(path, "/NVME") {
+			return syscall.ENOENT
+		}
+		st.Bsize = 1
+		st.Blocks = 100
+		st.Bfree = 80
+		st.Bavail = 80
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tiers/media/spindown", nil)
+	w := httptest.NewRecorder()
+	h.Route(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET spindown: status %d body %s", w.Code, w.Body.String())
+	}
+	var got poolSpindownPolicyResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Eligible {
+		t.Fatalf("expected SSD below target fill to block spindown: %+v", got)
+	}
+	if !got.SSDTargetFill.Required || got.SSDTargetFill.Satisfied {
+		t.Fatalf("unexpected SSD warm-fill status: %+v", got.SSDTargetFill)
+	}
+	if len(got.SSDTargetFill.Tiers) != 1 || got.SSDTargetFill.Tiers[0].Name != "NVME" {
+		t.Fatalf("unexpected warm-fill tiers: %+v", got.SSDTargetFill.Tiers)
+	}
+	tierStatus := got.SSDTargetFill.Tiers[0]
+	if tierStatus.Reason != "below target_fill_pct" || tierStatus.Direction != "promote_to_ssd" || tierStatus.DeltaBytes != 30 {
+		t.Fatalf("unexpected below-target tier status: %+v", tierStatus)
+	}
+	if !strings.Contains(strings.Join(got.Reasons, "; "), "target_fill_pct") {
+		t.Fatalf("expected target_fill_pct reason, got %+v", got.Reasons)
+	}
+}
+
+func TestPoolSpindownBlocksConfirmedSSDTiersAboveTargetFill(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.store.CreateTierPoolWithOptions("media", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 2},
+	}, true); err != nil {
+		t.Fatalf("create tier pool: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "NVME", "md0"); err != nil {
+		t.Fatalf("assign NVME tier: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "HDD", "md1"); err != nil {
+		t.Fatalf("assign HDD tier: %v", err)
+	}
+	listMDADMArrays = func() ([]mdadm.Array, error) {
+		return []mdadm.Array{
+			{Path: "/dev/md0", MemberDisks: []string{"/dev/nvme0n1"}},
+			{Path: "/dev/md1", MemberDisks: []string{"/dev/sda"}},
+		}, nil
+	}
+	listDisksForSpindown = func() ([]disk.Disk, error) {
+		return []disk.Disk{
+			{Path: "/dev/nvme0n1", Rotational: false},
+			{Path: "/dev/sda", Rotational: true},
+		}, nil
+	}
+	statfsPath = func(path string, st *syscall.Statfs_t) error {
+		if !strings.HasSuffix(path, "/NVME") {
+			return syscall.ENOENT
+		}
+		st.Bsize = 1
+		st.Blocks = 100
+		st.Bfree = 40
+		st.Bavail = 40
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tiers/media/spindown", nil)
+	w := httptest.NewRecorder()
+	h.Route(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET spindown: status %d body %s", w.Code, w.Body.String())
+	}
+	var got poolSpindownPolicyResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Eligible {
+		t.Fatalf("expected SSD above target fill to block spindown: %+v", got)
+	}
+	if !got.SSDTargetFill.Required || got.SSDTargetFill.Satisfied {
+		t.Fatalf("unexpected SSD target-balance status: %+v", got.SSDTargetFill)
+	}
+	if len(got.SSDTargetFill.Tiers) != 1 {
+		t.Fatalf("unexpected target-balance tiers: %+v", got.SSDTargetFill.Tiers)
+	}
+	tierStatus := got.SSDTargetFill.Tiers[0]
+	if tierStatus.Reason != "above target_fill_pct" || tierStatus.Direction != "demote_from_ssd" || tierStatus.DeltaBytes != -10 {
+		t.Fatalf("unexpected above-target tier status: %+v", tierStatus)
+	}
+	if !strings.Contains(strings.Join(got.Reasons, "; "), "not at target_fill_pct") {
+		t.Fatalf("expected not-at-target reason, got %+v", got.Reasons)
+	}
+}
+
+func TestPoolSpindownAllowsConfirmedSSDTiersAtTargetFill(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.store.CreateTierPoolWithOptions("media", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 2},
+	}, true); err != nil {
+		t.Fatalf("create tier pool: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "NVME", "md0"); err != nil {
+		t.Fatalf("assign NVME tier: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "HDD", "md1"); err != nil {
+		t.Fatalf("assign HDD tier: %v", err)
+	}
+	listMDADMArrays = func() ([]mdadm.Array, error) {
+		return []mdadm.Array{
+			{Path: "/dev/md0", MemberDisks: []string{"/dev/nvme0n1"}},
+			{Path: "/dev/md1", MemberDisks: []string{"/dev/sda"}},
+		}, nil
+	}
+	listDisksForSpindown = func() ([]disk.Disk, error) {
+		return []disk.Disk{
+			{Path: "/dev/nvme0n1", Rotational: false},
+			{Path: "/dev/sda", Rotational: true},
+		}, nil
+	}
+	statfsPath = func(path string, st *syscall.Statfs_t) error {
+		if !strings.HasSuffix(path, "/NVME") {
+			return syscall.ENOENT
+		}
+		st.Bsize = 1
+		st.Blocks = 100
+		st.Bfree = 50
+		st.Bavail = 50
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tiers/media/spindown", nil)
+	w := httptest.NewRecorder()
+	h.Route(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET spindown: status %d body %s", w.Code, w.Body.String())
+	}
+	var got poolSpindownPolicyResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Eligible {
+		t.Fatalf("expected SSD at target fill to allow spindown: %+v", got)
+	}
+	if !got.SSDTargetFill.Required || !got.SSDTargetFill.Satisfied {
+		t.Fatalf("unexpected SSD warm-fill status: %+v", got.SSDTargetFill)
+	}
+	if len(got.SSDTargetFill.Tiers) != 1 || got.SSDTargetFill.Tiers[0].CurrentFillPct != 50 || got.SSDTargetFill.Tiers[0].DeltaBytes != 0 {
+		t.Fatalf("unexpected target-balance tier status: %+v", got.SSDTargetFill.Tiers)
+	}
+}
+
+func TestPoolSpindownBlocksWhileTargetBalanceMovementActive(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.store.CreateTierPoolWithOptions("media", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 2},
+	}, true); err != nil {
+		t.Fatalf("create tier pool: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "NVME", "md0"); err != nil {
+		t.Fatalf("assign NVME tier: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "HDD", "md1"); err != nil {
+		t.Fatalf("assign HDD tier: %v", err)
+	}
+	listMDADMArrays = func() ([]mdadm.Array, error) {
+		return []mdadm.Array{
+			{Path: "/dev/md0", MemberDisks: []string{"/dev/nvme0n1"}},
+			{Path: "/dev/md1", MemberDisks: []string{"/dev/sda"}},
+		}, nil
+	}
+	listDisksForSpindown = func() ([]disk.Disk, error) {
+		return []disk.Disk{
+			{Path: "/dev/nvme0n1", Rotational: false},
+			{Path: "/dev/sda", Rotational: true},
+		}, nil
+	}
+	statfsPath = func(path string, st *syscall.Statfs_t) error {
+		if !strings.HasSuffix(path, "/NVME") {
+			return syscall.ENOENT
+		}
+		st.Bsize = 1
+		st.Blocks = 100
+		st.Bfree = 50
+		st.Bavail = 50
+		return nil
+	}
+	if err := spindown.StoreTargetBalanceStatus(h.store, "media", spindown.TargetBalanceStatus{
+		Active:       true,
+		StartedAt:    "2026-04-26T19:50:00Z",
+		CheckedAt:    "2026-04-26T19:50:00Z",
+		PlannedMoves: 3,
+		PendingMoves: 3,
+		Reason:       "target-balance placement running",
+	}); err != nil {
+		t.Fatalf("store target balance status: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tiers/media/spindown", nil)
+	w := httptest.NewRecorder()
+	h.Route(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET spindown: status %d body %s", w.Code, w.Body.String())
+	}
+	var got poolSpindownPolicyResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Eligible {
+		t.Fatalf("expected active target-balance movement to block spindown: %+v", got)
+	}
+	if !got.SSDTargetFill.Satisfied {
+		t.Fatalf("target fill should be satisfied; movement alone should block: %+v", got.SSDTargetFill)
+	}
+	if !got.SSDTargetFill.Movement.Active || got.SSDTargetFill.Movement.PendingMoves != 3 {
+		t.Fatalf("unexpected movement status: %+v", got.SSDTargetFill.Movement)
+	}
+	if !strings.Contains(strings.Join(got.Reasons, "; "), "target-balance placement running") {
+		t.Fatalf("expected movement reason, got %+v", got.Reasons)
+	}
+}
+
+func TestPoolSpindownAllowsCandidateExhaustedTargetBalance(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.store.CreateTierPoolWithOptions("media", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 2},
+	}, true); err != nil {
+		t.Fatalf("create tier pool: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "NVME", "md0"); err != nil {
+		t.Fatalf("assign NVME tier: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "HDD", "md1"); err != nil {
+		t.Fatalf("assign HDD tier: %v", err)
+	}
+	listMDADMArrays = func() ([]mdadm.Array, error) {
+		return []mdadm.Array{
+			{Path: "/dev/md0", MemberDisks: []string{"/dev/nvme0n1"}},
+			{Path: "/dev/md1", MemberDisks: []string{"/dev/sda"}},
+		}, nil
+	}
+	listDisksForSpindown = func() ([]disk.Disk, error) {
+		return []disk.Disk{
+			{Path: "/dev/nvme0n1", Rotational: false},
+			{Path: "/dev/sda", Rotational: true},
+		}, nil
+	}
+	statfsPath = func(path string, st *syscall.Statfs_t) error {
+		if !strings.HasSuffix(path, "/NVME") {
+			return syscall.ENOENT
+		}
+		st.Bsize = 1
+		st.Blocks = 100
+		st.Bfree = 80
+		st.Bavail = 80
+		return nil
+	}
+	if err := spindown.StoreTargetBalanceStatus(h.store, "media", spindown.TargetBalanceStatus{
+		FinishedAt:         "2026-04-26T19:55:00Z",
+		CheckedAt:          "2026-04-26T19:55:00Z",
+		CandidateCount:     0,
+		CandidateExhausted: true,
+		Reason:             "target-balance placement exhausted candidates",
+	}); err != nil {
+		t.Fatalf("store target balance status: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tiers/media/spindown", nil)
+	w := httptest.NewRecorder()
+	h.Route(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET spindown: status %d body %s", w.Code, w.Body.String())
+	}
+	var got poolSpindownPolicyResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Eligible {
+		t.Fatalf("candidate-exhausted target balance should not block spindown: %+v", got)
+	}
+	if got.SSDTargetFill.Satisfied {
+		t.Fatalf("SSD target fill should still report exact target unsatisfied: %+v", got.SSDTargetFill)
+	}
+	if !got.SSDTargetFill.Movement.CandidateExhausted {
+		t.Fatalf("expected candidate-exhausted movement status: %+v", got.SSDTargetFill.Movement)
+	}
+	if strings.Contains(strings.Join(got.Reasons, "; "), "not at target_fill_pct") {
+		t.Fatalf("candidate-exhausted target balance should suppress actionable backlog reason, got %+v", got.Reasons)
+	}
+}
+
+func TestPoolSpindownActiveWindowsPersist(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.store.CreateTierPoolWithOptions("media", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 2},
+	}, true); err != nil {
+		t.Fatalf("create tier pool: %v", err)
+	}
+	if err := h.store.AssignBackingToTier("media", "HDD", "zfs", "slow"); err != nil {
+		t.Fatalf("assign slow: %v", err)
+	}
+
+	w := postJSON(h, http.MethodPut, "/api/tiers/media/spindown", map[string]any{
+		"enabled": true,
+		"active_windows": []map[string]any{{
+			"days":  []string{"daily"},
+			"start": "01:00",
+			"end":   "06:00",
+		}},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT spindown windows: status %d body %s", w.Code, w.Body.String())
+	}
+	var got poolSpindownPolicyResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ActiveNow {
+		t.Fatalf("expected noon to be outside 01:00-06:00 active window: %+v", got)
+	}
+	if got.NextActiveAt == "" {
+		t.Fatalf("expected next active time: %+v", got)
+	}
+	if len(got.ActiveWindows) != 1 || got.ActiveWindows[0].Start != "01:00" {
+		t.Fatalf("unexpected windows: %+v", got.ActiveWindows)
+	}
+}
+
+func TestMdadmScrubBlockedOutsidePoolActiveWindow(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.store.CreateTierPoolWithOptions("media", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 2},
+	}, true); err != nil {
+		t.Fatalf("create tier pool: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "HDD", "md0"); err != nil {
+		t.Fatalf("assign array: %v", err)
+	}
+	w := postJSON(h, http.MethodPut, "/api/tiers/media/spindown", map[string]any{
+		"enabled": true,
+		"active_windows": []map[string]any{{
+			"days":  []string{"daily"},
+			"start": "01:00",
+			"end":   "06:00",
+		}},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT spindown windows: status %d body %s", w.Code, w.Body.String())
+	}
+	scrubCalled := false
+	scrubMDADMArray = func(string) error {
+		scrubCalled = true
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/arrays/md0/scrub", nil)
+	rec := httptest.NewRecorder()
+	h.Route(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("scrub status %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if scrubCalled {
+		t.Fatal("scrub command ran outside active window")
+	}
+}
+
+func TestMdadmScrubAllowedOutsideWindowWhenHDDAlreadyActive(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.store.CreateTierPoolWithOptions("media", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 2},
+	}, true); err != nil {
+		t.Fatalf("create tier pool: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "HDD", "md0"); err != nil {
+		t.Fatalf("assign array: %v", err)
+	}
+	w := postJSON(h, http.MethodPut, "/api/tiers/media/spindown", map[string]any{
+		"enabled": true,
+		"active_windows": []map[string]any{{
+			"days":  []string{"daily"},
+			"start": "01:00",
+			"end":   "06:00",
+		}},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT spindown windows: status %d body %s", w.Code, w.Body.String())
+	}
+	listMDADMArrays = func() ([]mdadm.Array, error) {
+		return []mdadm.Array{{Path: "/dev/md0", MemberDisks: []string{"/dev/sda"}}}, nil
+	}
+	listDisksForSpindown = func() ([]disk.Disk, error) {
+		return []disk.Disk{{Path: "/dev/sda", Rotational: true}}, nil
+	}
+	queryPowerStateForSpindown = func(path string) (string, error) {
+		if path != "/dev/sda" {
+			t.Fatalf("unexpected power query path %q", path)
+		}
+		return "active", nil
+	}
+	scrubCalled := false
+	scrubMDADMArray = func(string) error {
+		scrubCalled = true
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/arrays/md0/scrub", nil)
+	rec := httptest.NewRecorder()
+	h.Route(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scrub status %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !scrubCalled {
+		t.Fatal("expected scrub command to run once HDD was externally active")
+	}
+}
+
 func TestListTiersIncludesTierDetailsAndLiveCapacity(t *testing.T) {
 	h := newTestHandler(t)
 	if err := h.store.CreateTierInstance("media"); err != nil {
@@ -119,13 +669,22 @@ func TestListTiersIncludesTierDetailsAndLiveCapacity(t *testing.T) {
 		t.Fatalf("transition healthy: %v", err)
 	}
 	listPoolPVs = func(vg string) ([]lvm.PVInfo, error) {
-		if vg != "tier-media" {
+		// poolDetailFromStore now queries per-tier VGs first and falls
+		// back to the legacy monolithic VG only when none exist.
+		// Simulate a legacy-layout pool: per-tier VGs return empty, the
+		// legacy "tier-media" VG holds all PVs.
+		switch vg {
+		case "tier-media":
+			return []lvm.PVInfo{
+				{Device: "/dev/md0", SizeBytes: 100},
+				{Device: "/dev/md1", SizeBytes: 300},
+			}, nil
+		case "tier-media-NVME", "tier-media-SSD", "tier-media-HDD":
+			return nil, nil
+		default:
 			t.Fatalf("unexpected vg %q", vg)
+			return nil, nil
 		}
-		return []lvm.PVInfo{
-			{Device: "/dev/md0", SizeBytes: 100},
-			{Device: "/dev/md1", SizeBytes: 300},
-		}, nil
 	}
 	poolUsageBytes = func(mountPoint string) uint64 {
 		if mountPoint != "/mnt/media" {
@@ -165,6 +724,69 @@ func TestListTiersIncludesTierDetailsAndLiveCapacity(t *testing.T) {
 	}
 }
 
+func TestListTiersUsesMountedBackingTotalCapacity(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.store.CreateTierInstance("media"); err != nil {
+		t.Fatalf("create tier: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", db.TierSlotNVME, "md0"); err != nil {
+		t.Fatalf("assign array: %v", err)
+	}
+	if err := h.store.TransitionTierInstanceState("media", db.TierPoolStateHealthy); err != nil {
+		t.Fatalf("transition healthy: %v", err)
+	}
+	listPoolPVs = func(vg string) ([]lvm.PVInfo, error) {
+		switch vg {
+		case "tier-media-NVME":
+			return []lvm.PVInfo{{Device: "/dev/md0", SizeBytes: 1000}}, nil
+		case "tier-media-SSD", "tier-media-HDD", "tier-media":
+			return nil, nil
+		default:
+			t.Fatalf("unexpected vg %q", vg)
+			return nil, nil
+		}
+	}
+	isMountPathBusy = func(path string) bool {
+		return path == "/mnt/.tierd-backing/media/NVME"
+	}
+	statfsPath = func(path string, st *syscall.Statfs_t) error {
+		if path != "/mnt/.tierd-backing/media/NVME" {
+			t.Fatalf("unexpected statfs path %q", path)
+		}
+		st.Blocks = 100
+		st.Bfree = 40
+		st.Bavail = 35
+		st.Bsize = 10
+		return nil
+	}
+	if err := h.store.SetControlPlaneConfig("tier_baseline.media.NVME", "900"); err != nil {
+		t.Fatalf("seed polluted baseline: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tiers", nil)
+	w := httptest.NewRecorder()
+	h.Route(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/tiers: status %d, body %s", w.Code, w.Body.String())
+	}
+	var got []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, w.Body.String())
+	}
+	tiers := got[0]["tiers"].([]any)
+	first := tiers[0].(map[string]any)
+	if first["capacity_bytes"] != float64(1000) {
+		t.Fatalf("capacity should be total blocks, not free bytes: %#v", first)
+	}
+	if first["free_bytes"] != float64(350) || first["used_bytes"] != float64(600) {
+		t.Fatalf("unexpected mounted usage: %#v", first)
+	}
+	if val, err := h.store.GetControlPlaneConfig("tier_baseline.media.NVME"); err != nil || val != "" {
+		t.Fatalf("polluted baseline was not cleared, val=%q err=%v", val, err)
+	}
+}
+
 func TestGetTierReturnsDetailedPoolObject(t *testing.T) {
 	h := newTestHandler(t)
 	if err := h.store.CreateTierInstance("media"); err != nil {
@@ -177,7 +799,12 @@ func TestGetTierReturnsDetailedPoolObject(t *testing.T) {
 		t.Fatalf("transition healthy: %v", err)
 	}
 	listPoolPVs = func(vg string) ([]lvm.PVInfo, error) {
-		return []lvm.PVInfo{{Device: "/dev/md0", SizeBytes: 512}}, nil
+		// Simulate legacy-only layout: PVs live in the monolithic VG,
+		// per-tier VGs don't exist yet.
+		if vg == "tier-media" {
+			return []lvm.PVInfo{{Device: "/dev/md0", SizeBytes: 512}}, nil
+		}
+		return nil, nil
 	}
 	poolUsageBytes = func(string) uint64 { return 128 }
 
@@ -436,6 +1063,7 @@ func TestCreateListAndDeleteTier(t *testing.T) {
 	req = httptest.NewRequest(http.MethodDelete, "/api/tiers/media", stringBody(`{"confirm_pool_name":"media"}`))
 	w = httptest.NewRecorder()
 	h.Route(w, req)
+	<-h.asyncDone
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 on delete, got %d: %s", w.Code, w.Body.String())
 	}

@@ -1,7 +1,6 @@
 # Proposal: mdadm Tiering Infrastructure — GET /api/tiers/{name}/map (PE Mapping)
 
 **Status:** Pending
-**Date:** 2026-04-09
 **Part of:** mdadm-tiering-infrastructure (Step 10 of 14)
 **Depends on:** mdadm-tiering-infra-12-pv-allocation
 

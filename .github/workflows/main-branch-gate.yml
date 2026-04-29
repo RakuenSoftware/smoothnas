@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Close non-testing PRs to main
-        if: ${{ github.head_ref != 'testing' }}
+        if: ${{ github.head_ref != 'testing' && github.event.pull_request.head.repo.full_name != github.repository }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -27,7 +27,7 @@ jobs:
 
       - name: Require testing as the source branch
         run: |
-          if [ "${{ github.head_ref }}" != "testing" ]; then
-            echo "Pull requests into main must come from testing. Got '${{ github.head_ref }}'."
+          if [ "${{ github.head_ref }}" != "testing" ] && [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
+            echo "Pull requests into main must come from testing unless they originate from this repository. Got '${{ github.head_ref }}' from '${{ github.event.pull_request.head.repo.full_name }}'."
             exit 1
           fi

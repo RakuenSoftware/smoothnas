@@ -125,7 +125,7 @@ func NewJobsHandler() *JobsHandler { return &JobsHandler{} }
 
 func (h *JobsHandler) Route(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		jsonNotFound(w)
 		return
 	}
 
@@ -134,7 +134,7 @@ func (h *JobsHandler) Route(w http.ResponseWriter, r *http.Request) {
 		// GET /api/jobs?tag=...
 		tag := r.URL.Query().Get("tag")
 		if tag == "" {
-			http.Error(w, `{"error":"tag query param required"}`, http.StatusBadRequest)
+			jsonErrorCoded(w, "tag query param required", http.StatusBadRequest, "jobs.tag_required")
 			return
 		}
 		result := jobs.ListByTag(tag)
@@ -148,7 +148,7 @@ func (h *JobsHandler) Route(w http.ResponseWriter, r *http.Request) {
 	// GET /api/jobs/{id}
 	job := jobs.Get(rest)
 	if job == nil {
-		http.Error(w, `{"error":"job not found"}`, http.StatusNotFound)
+		jsonErrorCoded(w, "job not found", http.StatusNotFound, "jobs.not_found")
 		return
 	}
 	json.NewEncoder(w).Encode(job)

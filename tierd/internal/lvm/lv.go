@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+var fstabPath = "/etc/fstab"
+
 // Volume represents a single logical volume in a pool VG,
 // along with its placement tier (derived from the PVs that back its
 // extents) and any mount/filesystem metadata.
@@ -248,24 +250,36 @@ func EnsureFSTabEntry(vg, name, mountPoint, fs string) error {
 		return err
 	}
 	dev := "/dev/" + vg + "/" + name
-	entry := fmt.Sprintf("%s %s %s defaults 0 0\n", dev, mountPoint, fs)
+	entry := fmt.Sprintf("%s %s %s defaults,nofail 0 0", dev, mountPoint, fs)
 
-	data, err := os.ReadFile("/etc/fstab")
+	data, err := os.ReadFile(fstabPath)
 	if err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
+		lines := strings.Split(string(data), "\n")
+		for i, line := range lines {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 && (fields[0] == dev || fields[1] == mountPoint) {
+				if line == entry {
+					return nil
+				}
+				lines[i] = entry
+				output := strings.Join(lines, "\n")
+				if !strings.HasSuffix(output, "\n") {
+					output += "\n"
+				}
+				if err := os.WriteFile(fstabPath, []byte(output), 0644); err != nil {
+					return fmt.Errorf("write /etc/fstab: %w", err)
+				}
 				return nil
 			}
 		}
 	}
 
-	f, err := os.OpenFile("/etc/fstab", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(fstabPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("open /etc/fstab: %w", err)
 	}
 	defer f.Close()
-	if _, err := f.WriteString(entry); err != nil {
+	if _, err := f.WriteString(entry + "\n"); err != nil {
 		return fmt.Errorf("append /etc/fstab: %w", err)
 	}
 	return nil
@@ -278,7 +292,7 @@ func RemoveFSTabEntry(vg, name, mountPoint string) error {
 	}
 	dev := "/dev/" + vg + "/" + name
 
-	data, err := os.ReadFile("/etc/fstab")
+	data, err := os.ReadFile(fstabPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -299,7 +313,7 @@ func RemoveFSTabEntry(vg, name, mountPoint string) error {
 	if !strings.HasSuffix(output, "\n") {
 		output += "\n"
 	}
-	if err := os.WriteFile("/etc/fstab", []byte(output), 0644); err != nil {
+	if err := os.WriteFile(fstabPath, []byte(output), 0644); err != nil {
 		return fmt.Errorf("write /etc/fstab: %w", err)
 	}
 	return nil

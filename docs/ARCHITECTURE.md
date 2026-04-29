@@ -18,6 +18,7 @@ flowchart TD
     API --> Mdadm["mdadm"]
     API --> LVM["LVM"]
     API --> ZFS["zpool / zfs"]
+    API --> Smoothfs["smoothfs kernel module\n(generic netlink)"]
     API --> Sharing["smb / nfs / iscsi tools"]
     API --> Network["system network config"]
     API --> Smart["smartctl"]
@@ -52,6 +53,20 @@ SmoothNAS does not try to replace Linux storage tooling. It orchestrates:
 
 That makes the system more inspectable and easier to recover manually.
 
+### Tiered storage lives in the kernel
+
+The data-plane filesystem for tiered pools is `smoothfs`, an in-tree
+stacked kernel module (`src/smoothfs/`). A pool is a kernel mount of
+`-t smoothfs` over one or more lower-tier mount points provisioned on
+mdadm/LVM (and optionally ZFS). Per-file placement and movement are
+planned in `tierd` and executed through the kernel module over generic
+netlink; there is no user-space filesystem daemon in the I/O path.
+
+Boot-time host remediation is intentionally separate from that
+long-lived control plane. A one-shot `tierd-host-init` systemd unit
+handles backup mount cleanup, package healing, and host tuning before
+`tierd` starts.
+
 ### API-driven orchestration
 
 The UI does not talk to shell scripts directly. It talks to a structured backend that:
@@ -60,6 +75,10 @@ The UI does not talk to shell scripts directly. It talks to a structured backend
 - stores durable state in SQLite
 - runs slow or destructive operations as jobs
 - emits progress and errors back to the browser
+
+That backend boundary is deliberate: one-shot host initialization runs
+before the daemon, while `tierd` stays focused on API, state machines,
+monitoring, reconciliation, and scheduler/control-loop work.
 
 ### Multiple storage paths instead of one forced abstraction
 
@@ -100,12 +119,16 @@ sequenceDiagram
     participant DB as tier_instance state
     participant Tier as tier manager
     participant LVM as lvm helpers
+    participant Smoothfs as smoothfs svc
 
     UI->>API: POST /api/tiers
     API->>DB: create tier instance
     API->>DB: assign arrays to NVME/SSD/HDD slots
     API->>Tier: provisionStorage(name)
     Tier->>LVM: pvcreate / ensure VG / create LV / mount
+    Tier->>Smoothfs: CreateManagedPool(name, tiers=[/mnt/.tierd-backing/...])
+    Smoothfs->>Smoothfs: write systemd mount unit + enable --now
+    Smoothfs-->>API: /mnt/<name> (type=smoothfs)
     API-->>UI: created tier + mountpoint
 ```
 
@@ -176,6 +199,19 @@ This still needs to be updated so:
 - the Go module identity matches the actual repository
 - the private update path can consume authenticated release artifacts instead of compiling on the target system
 - the deployment and release story are consistent
+
+### smoothfs repo extraction
+
+`smoothfs` now lives in the dedicated `RakuenSoftware/smoothfs` repo.
+SmoothNAS remains the appliance integrator and consumes:
+
+- the published Go module `github.com/RakuenSoftware/smoothfs`
+- the extracted control-plane package `github.com/RakuenSoftware/smoothfs/controlplane`
+- a pinned smoothfs source checkout during ISO bootstrap for DKMS/VFS installation
+
+The original extraction plan is preserved in
+[`proposals/done/smoothfs-repo-split.md`](./proposals/done/smoothfs-repo-split.md)
+as design history.
 
 ## 7. Design History
 

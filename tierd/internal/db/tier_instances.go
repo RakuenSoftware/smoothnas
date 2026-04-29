@@ -87,6 +87,10 @@ var validTierPoolTransitions = map[string]map[string]struct{}{
 	TierPoolStateError: {
 		TierPoolStateProvisioning: {},
 		TierPoolStateDestroying:   {},
+		// Allow self-healing back to healthy once the reconciler verifies
+		// the underlying condition that tripped the error has cleared.
+		TierPoolStateHealthy:  {},
+		TierPoolStateDegraded: {},
 	},
 }
 
@@ -117,6 +121,10 @@ type TierInstance struct {
 	LastReconciledAt string `json:"last_reconciled_at,omitempty"`
 	State            string `json:"state"`
 	ErrorReason      string `json:"error_reason,omitempty"`
+	// MetaOnFastest: when true, PoolMetaStore holds all metadata on the
+	// fastest tier only. Reduces metadata redundancy (failure of the
+	// fastest tier loses the index) in exchange for locality.
+	MetaOnFastest bool `json:"meta_on_fastest"`
 }
 
 type TierDefinition struct {
@@ -147,6 +155,17 @@ type TierSlot struct {
 	PVDevice         *string `json:"pv_device,omitempty"`
 	TargetFillPct    int     `json:"target_fill_pct"`
 	FullThresholdPct int     `json:"full_threshold_pct"`
+	// BackingKind identifies the storage layer that supplies this slot:
+	// "mdadm" (default; array_id + pv_device are the block device),
+	// "zfs" (backing_ref is the zpool name; tier data goes in a dataset),
+	// "btrfs", "bcachefs" (reserved for follow-up work).
+	BackingKind string `json:"backing_kind"`
+	// BackingRef is the kind-specific identifier:
+	//   mdadm    → block device path (/dev/md0), duplicated in PVDevice
+	//   zfs      → zpool name
+	//   btrfs    → device path or label
+	//   bcachefs → device path or UUID
+	BackingRef string `json:"backing_ref,omitempty"`
 }
 
 func NormalizeArrayPath(array string) string {
@@ -263,6 +282,13 @@ func (s *Store) CreateTierInstance(name string) error {
 }
 
 func (s *Store) CreateTierPool(name, filesystem string, tiers []TierDefinition) error {
+	return s.CreateTierPoolWithOptions(name, filesystem, tiers, false)
+}
+
+// CreateTierPoolWithOptions creates a tier pool. metaOnFastest controls
+// whether PoolMetaStore will concentrate all metadata on the fastest tier
+// (true) or spread it across every tier's .tierd-meta (false, default).
+func (s *Store) CreateTierPoolWithOptions(name, filesystem string, tiers []TierDefinition, metaOnFastest bool) error {
 	if err := ValidateTierInstanceName(name); err != nil {
 		return err
 	}
@@ -282,10 +308,14 @@ func (s *Store) CreateTierPool(name, filesystem string, tiers []TierDefinition) 
 	}
 	defer tx.Rollback()
 
+	metaFlag := 0
+	if metaOnFastest {
+		metaFlag = 1
+	}
 	res, err := tx.Exec(
-		`INSERT INTO tier_pools (name, filesystem, state, error_reason, last_reconciled_at)
-		 VALUES (?, ?, ?, NULL, NULL)`,
-		name, filesystem, TierPoolStateProvisioning,
+		`INSERT INTO tier_pools (name, filesystem, state, error_reason, last_reconciled_at, meta_on_fastest)
+		 VALUES (?, ?, ?, NULL, NULL, ?)`,
+		name, filesystem, TierPoolStateProvisioning, metaFlag,
 	)
 	if err != nil {
 		return fmt.Errorf("create tier pool: %w", err)
@@ -350,6 +380,7 @@ func scanTierInstance(row *sql.Row) (*TierInstance, error) {
 	var t TierInstance
 	var errorReason sql.NullString
 	var reconciledAt sql.NullString
+	var metaOnFastest int
 	if err := row.Scan(
 		&t.ID,
 		&t.Name,
@@ -359,6 +390,7 @@ func scanTierInstance(row *sql.Row) (*TierInstance, error) {
 		&t.CreatedAt,
 		&t.UpdatedAt,
 		&reconciledAt,
+		&metaOnFastest,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
@@ -366,6 +398,7 @@ func scanTierInstance(row *sql.Row) (*TierInstance, error) {
 		return nil, err
 	}
 	t.MountPoint = TierMountPoint(t.Name)
+	t.MetaOnFastest = metaOnFastest != 0
 	if errorReason.Valid {
 		t.ErrorReason = errorReason.String
 	}
@@ -380,7 +413,7 @@ func (s *Store) GetTierInstance(name string) (*TierInstance, error) {
 		return nil, err
 	}
 	t, err := scanTierInstance(s.db.QueryRow(
-		`SELECT id, name, filesystem, state, error_reason, created_at, updated_at, last_reconciled_at
+		`SELECT id, name, filesystem, state, error_reason, created_at, updated_at, last_reconciled_at, meta_on_fastest
 		 FROM tier_pools
 		 WHERE name = ?`,
 		name,
@@ -396,7 +429,7 @@ func (s *Store) GetTierInstance(name string) (*TierInstance, error) {
 
 func (s *Store) ListTierInstances() ([]TierInstance, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, filesystem, state, error_reason, created_at, updated_at, last_reconciled_at
+		`SELECT id, name, filesystem, state, error_reason, created_at, updated_at, last_reconciled_at, meta_on_fastest
 		 FROM tier_pools
 		 ORDER BY created_at, name`,
 	)
@@ -410,6 +443,7 @@ func (s *Store) ListTierInstances() ([]TierInstance, error) {
 		var t TierInstance
 		var errorReason sql.NullString
 		var reconciledAt sql.NullString
+		var metaOnFastest int
 		if err := rows.Scan(
 			&t.ID,
 			&t.Name,
@@ -419,10 +453,12 @@ func (s *Store) ListTierInstances() ([]TierInstance, error) {
 			&t.CreatedAt,
 			&t.UpdatedAt,
 			&reconciledAt,
+			&metaOnFastest,
 		); err != nil {
 			return nil, fmt.Errorf("scan tier pool: %w", err)
 		}
 		t.MountPoint = TierMountPoint(t.Name)
+		t.MetaOnFastest = metaOnFastest != 0
 		if errorReason.Valid {
 			t.ErrorReason = errorReason.String
 		}
@@ -487,6 +523,7 @@ func scanTierSlot(row scanner) (*TierSlot, error) {
 	var arrayID sql.NullInt64
 	var arrayPath sql.NullString
 	var pvDevice sql.NullString
+	var backingRef sql.NullString
 	if err := row.Scan(
 		&slot.ID,
 		&slot.PoolID,
@@ -499,6 +536,8 @@ func scanTierSlot(row scanner) (*TierSlot, error) {
 		&pvDevice,
 		&slot.TargetFillPct,
 		&slot.FullThresholdPct,
+		&slot.BackingKind,
+		&backingRef,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
@@ -515,6 +554,12 @@ func scanTierSlot(row scanner) (*TierSlot, error) {
 	if pvDevice.Valid {
 		pv := pvDevice.String
 		slot.PVDevice = &pv
+	}
+	if backingRef.Valid {
+		slot.BackingRef = backingRef.String
+	}
+	if slot.BackingKind == "" {
+		slot.BackingKind = "mdadm"
 	}
 	return &slot, nil
 }
@@ -534,7 +579,7 @@ func (s *Store) GetTierSlot(poolName, tierName string) (*TierSlot, error) {
 
 	slot, err := scanTierSlot(s.db.QueryRow(
 		`SELECT t.id, tp.id, tp.name, t.name, t.rank, t.state, t.array_id, ma.path, t.pv_device,
-		        t.target_fill_pct, t.full_threshold_pct
+		        t.target_fill_pct, t.full_threshold_pct, t.backing_kind, t.backing_ref
 		 FROM tiers t
 		 JOIN tier_pools tp ON tp.id = t.pool_id
 		 LEFT JOIN mdadm_arrays ma ON ma.id = t.array_id
@@ -557,7 +602,7 @@ func (s *Store) ListTierSlots(poolName string) ([]TierSlot, error) {
 
 	rows, err := s.db.Query(
 		`SELECT t.id, tp.id, tp.name, t.name, t.rank, t.state, t.array_id, ma.path, t.pv_device,
-		        t.target_fill_pct, t.full_threshold_pct
+		        t.target_fill_pct, t.full_threshold_pct, t.backing_kind, t.backing_ref
 		 FROM tiers t
 		 JOIN tier_pools tp ON tp.id = t.pool_id
 		 LEFT JOIN mdadm_arrays ma ON ma.id = t.array_id
@@ -642,9 +687,96 @@ func (s *Store) AssignArrayToTier(poolName, tierName string, arrayID int64, arra
 
 	if _, err := tx.Exec(
 		`UPDATE tiers
-		 SET state = ?, array_id = ?, pv_device = ?
+		 SET state = ?, array_id = ?, pv_device = ?,
+		     backing_kind = 'mdadm', backing_ref = ?
 		 WHERE pool_id = ? AND name = ?`,
-		TierSlotStateAssigned, arrayID, arrayPath, poolID, tierName,
+		TierSlotStateAssigned, arrayID, arrayPath, arrayPath, poolID, tierName,
+	); err != nil {
+		return fmt.Errorf("assign tier slot: %w", err)
+	}
+	return tx.Commit()
+}
+
+// AssignBackingToTier assigns a non-mdadm backing (ZFS pool, btrfs device,
+// bcachefs device) to a tier slot. array_id stays NULL since the backing
+// isn't an mdadm array; backing_kind / backing_ref carry the identity.
+// ref is interpreted per kind:
+//
+//	zfs      — the zpool name (tierd will create a dataset on it at provision)
+//	btrfs    — path or label of the btrfs filesystem (reserved)
+//	bcachefs — path or UUID (reserved)
+func (s *Store) AssignBackingToTier(poolName, tierName, kind, ref string) error {
+	if err := ValidateTierInstanceName(poolName); err != nil {
+		return err
+	}
+	tierName = strings.TrimSpace(tierName)
+	if tierName == "" {
+		return fmt.Errorf("tier name is required")
+	}
+	switch kind {
+	case "zfs", "btrfs", "bcachefs":
+		// accepted
+	case "mdadm":
+		return fmt.Errorf("use AssignArrayToTier for mdadm backings")
+	default:
+		return fmt.Errorf("unsupported backing kind %q", kind)
+	}
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return fmt.Errorf("backing ref required")
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var poolID int64
+	if err := tx.QueryRow(`SELECT id FROM tier_pools WHERE name = ?`, poolName).Scan(&poolID); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrNotFound
+		}
+		return fmt.Errorf("get tier pool: %w", err)
+	}
+
+	var currentState string
+	if err := tx.QueryRow(
+		`SELECT state FROM tiers WHERE pool_id = ? AND name = ?`,
+		poolID, tierName,
+	).Scan(&currentState); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrNotFound
+		}
+		return fmt.Errorf("get tier slot: %w", err)
+	}
+	if currentState != TierSlotStateEmpty {
+		return fmt.Errorf("tier %s/%s is already in state %s", poolName, tierName, currentState)
+	}
+
+	// Refuse double-assignment of the same backing ref to another slot.
+	var existingPoolName sql.NullString
+	var existingTierName sql.NullString
+	if err := tx.QueryRow(
+		`SELECT tp.name, t.name
+		 FROM tiers t
+		 JOIN tier_pools tp ON tp.id = t.pool_id
+		 WHERE t.backing_kind = ? AND t.backing_ref = ?`,
+		kind, ref,
+	).Scan(&existingPoolName, &existingTierName); err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("check backing assignment: %w", err)
+	}
+	if existingPoolName.Valid && existingTierName.Valid {
+		return fmt.Errorf("%s %q is already assigned to tier %s/%s",
+			kind, ref, existingPoolName.String, existingTierName.String)
+	}
+
+	if _, err := tx.Exec(
+		`UPDATE tiers
+		 SET state = ?, array_id = NULL, pv_device = NULL,
+		     backing_kind = ?, backing_ref = ?
+		 WHERE pool_id = ? AND name = ?`,
+		TierSlotStateAssigned, kind, ref, poolID, tierName,
 	); err != nil {
 		return fmt.Errorf("assign tier slot: %w", err)
 	}
@@ -662,7 +794,8 @@ func (s *Store) ClearTierAssignment(poolName, tierName string) error {
 
 	res, err := s.db.Exec(
 		`UPDATE tiers
-		 SET state = ?, array_id = NULL, pv_device = NULL
+		 SET state = ?, array_id = NULL, pv_device = NULL,
+		     backing_kind = 'mdadm', backing_ref = NULL
 		 WHERE pool_id = (SELECT id FROM tier_pools WHERE name = ?)
 		   AND name = ?`,
 		TierSlotStateEmpty, poolName, tierName,
@@ -886,7 +1019,8 @@ func (s *Store) MarkTierReconciled(name string) error {
 }
 
 // SetTierSlotFill updates the target-fill and full-threshold percentages for a
-// named tier slot within a pool. Values must be in the range [1, 100].
+// named tier slot within a pool. Values must be in the range [1, 100], and
+// target_fill_pct may not exceed full_threshold_pct.
 func (s *Store) SetTierSlotFill(poolName, slotName string, targetFillPct, fullThresholdPct int) error {
 	if err := ValidateTierInstanceName(poolName); err != nil {
 		return err
@@ -900,6 +1034,9 @@ func (s *Store) SetTierSlotFill(poolName, slotName string, targetFillPct, fullTh
 	}
 	if fullThresholdPct < 1 || fullThresholdPct > 100 {
 		return fmt.Errorf("full_threshold_pct must be between 1 and 100")
+	}
+	if targetFillPct > fullThresholdPct {
+		return fmt.Errorf("target_fill_pct must be less than or equal to full_threshold_pct")
 	}
 
 	res, err := s.db.Exec(
@@ -920,8 +1057,8 @@ func (s *Store) SetTierSlotFill(poolName, slotName string, targetFillPct, fullTh
 }
 
 // AddTierSlot inserts a new tier slot (level) into an existing pool. rank must
-// be unique within the pool and positive. targetFillPct must be strictly less
-// than fullThresholdPct; both must be in [1, 100].
+// be unique within the pool and positive. targetFillPct must be less than or
+// equal to fullThresholdPct; both must be in [1, 100].
 func (s *Store) AddTierSlot(poolName, slotName string, rank, targetFillPct, fullThresholdPct int) error {
 	if err := ValidateTierInstanceName(poolName); err != nil {
 		return err
@@ -939,8 +1076,8 @@ func (s *Store) AddTierSlot(poolName, slotName string, rank, targetFillPct, full
 	if fullThresholdPct < 1 || fullThresholdPct > 100 {
 		return fmt.Errorf("full_threshold_pct must be between 1 and 100")
 	}
-	if targetFillPct >= fullThresholdPct {
-		return fmt.Errorf("target_fill_pct must be less than full_threshold_pct")
+	if targetFillPct > fullThresholdPct {
+		return fmt.Errorf("target_fill_pct must be less than or equal to full_threshold_pct")
 	}
 
 	tx, err := s.db.Begin()

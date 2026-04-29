@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useI18n } from '@rakuensoftware/smoothgui';
 import { usePreload } from '../../contexts/PreloadContext';
 import { useToast } from '../../contexts/ToastContext';
 import { api } from '../../api/api';
@@ -12,6 +13,7 @@ import Snapshots from '../Snapshots/Snapshots';
 type Tab = 'pools' | 'datasets' | 'zvols' | 'snapshots';
 
 export default function Pools() {
+  const { t } = useI18n();
   const { pools, disks, invalidate } = usePreload();
   const toast = useToast();
   const [loading, setLoading] = useState(true);
@@ -22,6 +24,8 @@ export default function Pools() {
   const [selectedData, setSelectedData] = useState<string[]>([]);
   const [selectedSlog, setSelectedSlog] = useState<string[]>([]);
   const [selectedL2arc, setSelectedL2arc] = useState<string[]>([]);
+  const [importablePools, setImportablePools] = useState<any[]>([]);
+  const [selectedZfsMembers, setSelectedZfsMembers] = useState<string[]>([]);
   const [confirmVisible, setConfirmVisible] = useState(false);
   const [confirmTitle, setConfirmTitle] = useState('');
   const [confirmMessage, setConfirmMessage] = useState('');
@@ -29,11 +33,21 @@ export default function Pools() {
   const stopPollRef = useRef<(() => void) | null>(null);
 
   const unassignedDisks = disks.filter((d: any) => d.assignment === 'unassigned');
+  const zfsMemberDisks = importablePools.length > 0 ? disks.filter((d: any) => d.assignment === 'zfs-pool') : [];
 
   useEffect(() => { if (pools !== undefined) setLoading(false); }, [pools]);
-  useEffect(() => () => { stopPollRef.current?.(); }, []);
+  useEffect(() => {
+    loadImportablePools();
+    return () => { stopPollRef.current?.(); };
+  }, []);
 
-  function refresh() { invalidate('pools'); invalidate('disks'); }
+  function refresh() { invalidate('pools'); invalidate('disks'); loadImportablePools(); }
+
+  function loadImportablePools() {
+    api.getImportablePools()
+      .then((items: any[]) => setImportablePools(items || []))
+      .catch(() => setImportablePools([]));
+  }
 
   function toggleDisk(path: string, role: 'data' | 'slog' | 'l2arc') {
     const set = role === 'data' ? setSelectedData : role === 'slog' ? setSelectedSlog : setSelectedL2arc;
@@ -44,8 +58,8 @@ export default function Pools() {
     const timer = setInterval(() => {
       api.getJobStatus(jobId).then((job: any) => {
         if (job.status === 'completed') { clearInterval(timer); onComplete(); }
-        else if (job.status === 'failed') { clearInterval(timer); onError(job.error || 'Job failed'); }
-      }).catch(() => { clearInterval(timer); onError('Lost connection'); });
+        else if (job.status === 'failed') { clearInterval(timer); onError(job.error || t('arrays.error.jobFailed')); }
+      }).catch(() => { clearInterval(timer); onError(t('arrays.error.lostConnection')); });
     }, 2000);
     return () => clearInterval(timer);
   }
@@ -63,50 +77,86 @@ export default function Pools() {
         setSubmitting(false);
         setShowCreate(false);
         setSelectedData([]); setSelectedSlog([]); setSelectedL2arc([]);
-        toast.success('Pool created');
+        toast.success(t('pools.toast.created'));
         invalidate('pools'); invalidate('disks');
       }, (err) => {
         setSubmitting(false);
-        toast.error('Failed to create pool: ' + err);
+        toast.error(t('arrays.error.createPoolPrefix', { err }));
       });
     }).catch(e => {
       setSubmitting(false);
-      toast.error(extractError(e, 'Failed to create pool'));
+      toast.error(extractError(e, t('arrays.error.createPool')));
     });
   }
 
   function deletePool(name: string) {
-    setConfirmTitle('Destroy Pool');
-    setConfirmMessage(`This will permanently destroy pool "${name}" and all its datasets, zvols, and snapshots. This cannot be undone.`);
+    setConfirmTitle(t('arrays.confirm.destroyPoolTitle'));
+    setConfirmMessage(t('arrays.confirm.destroyPoolMessage', { name }));
     confirmAction.current = () => {
       setConfirmVisible(false);
       api.deletePool(name).then((res: any) => {
         stopPollRef.current = pollJob(res.job_id, () => {
-          toast.success('Pool destroyed');
+          toast.success(t('arrays.toast.poolDestroyed'));
           invalidate('pools');
-        }, (err) => toast.error('Destroy failed: ' + err));
-      }).catch(e => toast.error(extractError(e, 'Failed to destroy pool')));
+        }, (err) => toast.error(t('arrays.error.destroyArrayPrefix', { err })));
+      }).catch(e => toast.error(extractError(e, t('arrays.error.destroyPool'))));
     };
     setConfirmVisible(true);
   }
 
   function scrub(name: string) {
-    api.scrubPool(name).then(() => toast.info('Scrub started on ' + name))
-      .catch(e => toast.error(extractError(e, 'Failed to start scrub')));
+    api.scrubPool(name).then(() => toast.info(t('arrays.toast.scrubStarted', { name })))
+      .catch(e => toast.error(extractError(e, t('arrays.error.scrubStart'))));
+  }
+
+  function importPool(name: string) {
+    api.importPool(name).then(() => {
+      toast.success(t('arrays.toast.poolImported', { name }));
+      refresh();
+    }).catch(e => toast.error(extractError(e, t('arrays.error.import'))));
+  }
+
+  function toggleZfsMember(path: string) {
+    setSelectedZfsMembers(prev => prev.includes(path) ? prev.filter(p => p !== path) : [...prev, path]);
+  }
+
+  function wipeSelectedZfsMembers() {
+    if (selectedZfsMembers.length === 0) return;
+    setConfirmTitle(t('arrays.confirm.wipeMembersTitle'));
+    setConfirmMessage(t('arrays.confirm.wipeMembersMessage', { disks: selectedZfsMembers.join(', ') }));
+    confirmAction.current = () => {
+      setConfirmVisible(false);
+      setSubmitting(true);
+      api.wipeZfsMemberDisks(selectedZfsMembers).then((res: any) => {
+        stopPollRef.current = pollJob(res.job_id, () => {
+          setSubmitting(false);
+          setSelectedZfsMembers([]);
+          toast.success(t('arrays.toast.zfsMembersWiped'));
+          refresh();
+        }, (err) => {
+          setSubmitting(false);
+          toast.error(t('arrays.error.wipeFailedPrefix', { err }));
+        });
+      }).catch(e => {
+        setSubmitting(false);
+        toast.error(extractError(e, t('arrays.error.wipeFailed')));
+      });
+    };
+    setConfirmVisible(true);
   }
 
   return (
     <div className="page">
       <div className="page-header">
-        <h1>ZFS</h1>
-        <p className="subtitle">ZFS pool, dataset, zvol and snapshot management</p>
-        <button className="refresh-btn" onClick={refresh}>Refresh</button>
+        <h1>{t('pools.title')}</h1>
+        <p className="subtitle">{t('pools.subtitle')}</p>
+        <button className="refresh-btn" onClick={refresh}>{t('common.refresh')}</button>
       </div>
 
       <div className="tabs">
         {(['pools', 'datasets', 'zvols', 'snapshots'] as Tab[]).map(tab => (
           <button key={tab} className={`tab${activeTab === tab ? ' active' : ''}`} onClick={() => setActiveTab(tab)}>
-            {tab.charAt(0).toUpperCase() + tab.slice(1)}
+            {t(`pools.tab.${tab}`)}
           </button>
         ))}
       </div>
@@ -114,24 +164,65 @@ export default function Pools() {
       {activeTab === 'pools' && (
         <>
           <div style={{ marginBottom: 16 }}>
-            <button className="btn primary" onClick={() => setShowCreate(true)} disabled={showCreate}>Create Pool</button>
+            <button className="btn primary" onClick={() => setShowCreate(true)} disabled={showCreate}>{t('pools.button.createPool')}</button>
           </div>
+          {(importablePools.length > 0 || zfsMemberDisks.length > 0) && (
+            <div className="create-form">
+              <h3>{t('arrays.section.existingZfs')}</h3>
+              {importablePools.length > 0 && (
+                <table className="data-table" style={{ marginBottom: 16 }}>
+                  <thead>
+                    <tr><th>{t('arrays.col.pool')}</th><th>{t('arrays.col.state')}</th><th>{t('arrays.col.id')}</th><th>{t('arrays.col.status')}</th><th>{t('arrays.col.actions')}</th></tr>
+                  </thead>
+                  <tbody>
+                    {importablePools.map((pool: any) => (
+                      <tr key={pool.id || pool.name}>
+                        <td><strong>{pool.name}</strong></td>
+                        <td><span className={`badge ${pool.state?.toLowerCase()}`}>{pool.state || t('arrays.state.unknown')}</span></td>
+                        <td><code>{pool.id || '—'}</code></td>
+                        <td>{pool.status || t('arrays.import.readyToImport')}</td>
+                        <td className="action-cell">
+                          <button className="btn primary" onClick={() => importPool(pool.name)}>{t('arrays.import.button')}</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {zfsMemberDisks.length > 0 && (
+                <>
+                  <div style={{ marginBottom: 8, fontSize: 13, color: '#666' }}>{t('arrays.zfs.importableMembers')}</div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+                    {zfsMemberDisks.map((disk: any) => (
+                      <label key={disk.path} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', border: `2px solid ${selectedZfsMembers.includes(disk.path) ? '#ef5350' : '#ddd'}`, borderRadius: 6, cursor: 'pointer', background: selectedZfsMembers.includes(disk.path) ? '#ffebee' : '#fff' }}>
+                        <input type="checkbox" checked={selectedZfsMembers.includes(disk.path)} onChange={() => toggleZfsMember(disk.path)} />
+                        <span><strong>/dev/{disk.name}</strong> {disk.size_human}{disk.model ? ` — ${disk.model}` : ''}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <button className="btn danger" onClick={wipeSelectedZfsMembers} disabled={submitting || selectedZfsMembers.length === 0}>
+                    {t('arrays.zfs.wipeMembers')}
+                  </button>
+                </>
+              )}
+            </div>
+          )}
           {showCreate && (
             <div className="create-form">
-              <h3>Create Pool</h3>
+              <h3>{t('pools.create.title')}</h3>
               <div className="form-row">
-                <label>Name <input value={newPool.name} onChange={e => setNewPool(p => ({ ...p, name: e.target.value }))} /></label>
-                <label>vdev Type
+                <label>{t('arrays.field.name')} <input value={newPool.name} onChange={e => setNewPool(p => ({ ...p, name: e.target.value }))} /></label>
+                <label>{t('arrays.field.vdevType')}
                   <select value={newPool.vdev_type} onChange={e => setNewPool(p => ({ ...p, vdev_type: e.target.value }))}>
-                    <option value="mirror">Mirror</option>
-                    <option value="raidz1">RAIDZ-1</option>
-                    <option value="raidz2">RAIDZ-2</option>
-                    <option value="raidz3">RAIDZ-3</option>
-                    <option value="stripe">Stripe</option>
+                    <option value="mirror">{t('arrays.vdev.mirror')}</option>
+                    <option value="raidz1">{t('arrays.vdev.raidz1')}</option>
+                    <option value="raidz2">{t('arrays.vdev.raidz2')}</option>
+                    <option value="raidz3">{t('arrays.vdev.raidz3')}</option>
+                    <option value="stripe">{t('arrays.vdev.stripe')}</option>
                   </select>
                 </label>
               </div>
-              <div style={{ marginBottom: 8, fontSize: 13, color: '#666' }}>Data disks (required)</div>
+              <div style={{ marginBottom: 8, fontSize: 13, color: '#666' }}>{t('arrays.zfs.dataLabel')}</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
                 {unassignedDisks.map((disk: any) => {
                   const usedElsewhere = selectedSlog.includes(disk.path) || selectedL2arc.includes(disk.path);
@@ -142,10 +233,10 @@ export default function Pools() {
                     </label>
                   );
                 })}
-                {unassignedDisks.length === 0 && <p style={{ color: '#999' }}>No unassigned disks available.</p>}
+                {unassignedDisks.length === 0 && <p style={{ color: '#999' }}>{t('arrays.disks.noUnassigned')}</p>}
               </div>
-              {selectedData.length > 0 && <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>{selectedData.length} data disk(s) selected</p>}
-              <div style={{ marginBottom: 8, fontSize: 13, color: '#666' }}>SLOG disks — write cache (optional)</div>
+              {selectedData.length > 0 && <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>{t('arrays.zfs.dataSelected', { count: selectedData.length })}</p>}
+              <div style={{ marginBottom: 8, fontSize: 13, color: '#666' }}>{t('arrays.zfs.slogLabel')}</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
                 {unassignedDisks.map((disk: any) => {
                   const usedElsewhere = selectedData.includes(disk.path) || selectedL2arc.includes(disk.path);
@@ -156,9 +247,9 @@ export default function Pools() {
                     </label>
                   );
                 })}
-                {unassignedDisks.length === 0 && <p style={{ color: '#999' }}>No unassigned disks available.</p>}
+                {unassignedDisks.length === 0 && <p style={{ color: '#999' }}>{t('arrays.disks.noUnassigned')}</p>}
               </div>
-              <div style={{ marginBottom: 8, fontSize: 13, color: '#666' }}>L2ARC disks — read cache (optional)</div>
+              <div style={{ marginBottom: 8, fontSize: 13, color: '#666' }}>{t('arrays.zfs.l2arcLabel')}</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
                 {unassignedDisks.map((disk: any) => {
                   const usedElsewhere = selectedData.includes(disk.path) || selectedSlog.includes(disk.path);
@@ -169,24 +260,24 @@ export default function Pools() {
                     </label>
                   );
                 })}
-                {unassignedDisks.length === 0 && <p style={{ color: '#999' }}>No unassigned disks available.</p>}
+                {unassignedDisks.length === 0 && <p style={{ color: '#999' }}>{t('arrays.disks.noUnassigned')}</p>}
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
-                <button className="btn secondary" onClick={() => { setShowCreate(false); setSelectedData([]); setSelectedSlog([]); setSelectedL2arc([]); }} disabled={submitting}>Cancel</button>
+                <button className="btn secondary" onClick={() => { setShowCreate(false); setSelectedData([]); setSelectedSlog([]); setSelectedL2arc([]); }} disabled={submitting}>{t('common.cancel')}</button>
                 <button className="btn primary" onClick={createPool} disabled={submitting || selectedData.length === 0}>
-                  {submitting ? 'Creating...' : 'Create'}
+                  {submitting ? t('arrays.creating') : t('arrays.button.create')}
                 </button>
               </div>
             </div>
           )}
-          <Spinner loading={loading} text="Loading pools..." />
+          <Spinner loading={loading} text={t('pools.loading')} />
           {!loading && (
             pools.length === 0 ? (
-              <div className="empty-state"><div className="empty-icon">○</div><p>No ZFS pools configured.</p></div>
+              <div className="empty-state"><div className="empty-icon">○</div><p>{t('arrays.empty.zfs')}</p></div>
             ) : (
               <table className="data-table">
                 <thead>
-                  <tr><th>Pool</th><th>State</th><th>Size</th><th>Used</th><th>Free</th><th>Actions</th></tr>
+                  <tr><th>{t('arrays.col.pool')}</th><th>{t('arrays.col.state')}</th><th>{t('pools.col.size')}</th><th>{t('pools.col.used')}</th><th>{t('pools.col.free')}</th><th>{t('arrays.col.actions')}</th></tr>
                 </thead>
                 <tbody>
                   {pools.map((pool: any) => (
@@ -194,12 +285,12 @@ export default function Pools() {
                       <td><strong>{pool.name}</strong></td>
                       <td><span className={`badge ${pool.state?.toLowerCase()}`}>{pool.state}</span></td>
                       <td>{pool.size_human}</td>
-                      <td>{pool.alloc_human} ({pool.used_pct}%)</td>
+                      <td>{t('pools.summary.usedWithPct', { used: pool.alloc_human, pct: pool.used_pct })}</td>
                       <td>{pool.free_human}</td>
                       <td className="action-cell">
-                        <button className="btn secondary" onClick={() => scrub(pool.name)}>Scrub</button>
+                        <button className="btn secondary" onClick={() => scrub(pool.name)}>{t('arrays.action.scrub')}</button>
                         {' '}
-                        <button className="btn danger" onClick={() => deletePool(pool.name)}>Destroy</button>
+                        <button className="btn danger" onClick={() => deletePool(pool.name)}>{t('arrays.action.destroy')}</button>
                       </td>
                     </tr>
                   ))}
@@ -218,7 +309,7 @@ export default function Pools() {
         visible={confirmVisible}
         title={confirmTitle}
         message={confirmMessage}
-        confirmText="Destroy"
+        confirmText={confirmTitle === t('arrays.confirm.wipeMembersTitle') ? t('arrays.confirm.wipe') : t('arrays.action.destroy')}
         confirmClass="btn danger"
         onConfirm={() => confirmAction.current?.()}
         onCancel={() => setConfirmVisible(false)}

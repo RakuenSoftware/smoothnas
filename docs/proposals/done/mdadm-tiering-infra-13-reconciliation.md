@@ -1,7 +1,6 @@
 # Proposal: mdadm Tiering Infrastructure — Boot-time Reconciliation
 
 **Status:** Pending
-**Date:** 2026-04-09
 **Part of:** mdadm-tiering-infrastructure (Step 13 of 14)
 **Depends on:** mdadm-tiering-infra-04-data-model, mdadm-tiering-infra-12-pv-allocation
 

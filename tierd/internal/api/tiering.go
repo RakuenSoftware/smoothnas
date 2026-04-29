@@ -25,7 +25,6 @@ type capabilitiesResponse struct {
 	SupportsRecall      bool   `json:"supports_recall"`
 	RecallMode          string `json:"recall_mode"`
 	SnapshotMode        string `json:"snapshot_mode"`
-	FUSEMode            string `json:"fuse_mode"`
 	SupportsChecksums   bool   `json:"supports_checksums"`
 	SupportsCompression bool   `json:"supports_compression"`
 	SupportsWriteBias   bool   `json:"supports_write_bias"`
@@ -39,9 +38,9 @@ type capabilitiesResponse struct {
 // reconciliation, movement, and pin operations; they write back to the same
 // tables through the control plane.
 type TieringHandler struct {
-	store        *db.Store
-	mu           sync.RWMutex
-	adapters     []tiering.TieringAdapter
+	store         *db.Store
+	mu            sync.RWMutex
+	adapters      []tiering.TieringAdapter
 	lastReconcile time.Time
 }
 
@@ -109,19 +108,19 @@ func (h *TieringHandler) Route(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			h.listDomains(w, r)
 		} else {
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 
 	case strings.HasPrefix(path, "/api/tiering/domains/"):
 		id := strings.TrimPrefix(path, "/api/tiering/domains/")
 		if id == "" {
-			jsonError(w, "not found", http.StatusNotFound)
+			jsonNotFound(w)
 			return
 		}
 		if r.Method == http.MethodGet {
 			h.getDomain(w, r, id)
 		} else {
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 
 	// targets
@@ -129,13 +128,13 @@ func (h *TieringHandler) Route(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			h.listTargets(w, r)
 		} else {
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 
 	case strings.HasPrefix(path, "/api/tiering/targets/"):
 		rest := strings.TrimPrefix(path, "/api/tiering/targets/")
 		if rest == "" {
-			jsonError(w, "not found", http.StatusNotFound)
+			jsonNotFound(w)
 			return
 		}
 		// /api/tiering/targets/{id}/policy
@@ -144,7 +143,7 @@ func (h *TieringHandler) Route(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPut {
 				h.updateTargetPolicy(w, r, id)
 			} else {
-				jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+				jsonMethodNotAllowed(w)
 			}
 			return
 		}
@@ -152,7 +151,7 @@ func (h *TieringHandler) Route(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			h.getTarget(w, r, rest)
 		} else {
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 
 	// namespaces
@@ -163,7 +162,7 @@ func (h *TieringHandler) Route(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPost:
 			h.createNamespace(w, r)
 		default:
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 
 	case strings.HasPrefix(path, "/api/tiering/namespaces/"):
@@ -177,19 +176,19 @@ func (h *TieringHandler) Route(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPost:
 			h.createMovement(w, r)
 		default:
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 
 	case strings.HasPrefix(path, "/api/tiering/movements/"):
 		id := strings.TrimPrefix(path, "/api/tiering/movements/")
 		if id == "" {
-			jsonError(w, "not found", http.StatusNotFound)
+			jsonNotFound(w)
 			return
 		}
 		if r.Method == http.MethodDelete {
 			h.cancelMovement(w, r, id)
 		} else {
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 
 	// meta store stats (per-pool, per-shard)
@@ -197,7 +196,7 @@ func (h *TieringHandler) Route(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			h.metaStats(w, r)
 		} else {
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 
 	// degraded states
@@ -205,7 +204,7 @@ func (h *TieringHandler) Route(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			h.listDegradedStates(w, r)
 		} else {
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 
 	// reconcile
@@ -213,11 +212,11 @@ func (h *TieringHandler) Route(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			h.reconcile(w, r)
 		} else {
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 
 	default:
-		jsonError(w, "not found", http.StatusNotFound)
+		jsonNotFound(w)
 	}
 }
 
@@ -231,7 +230,7 @@ func (h *TieringHandler) routeNamespace(w http.ResponseWriter, r *http.Request, 
 	// /api/tiering/namespaces/{id}/objects/{object_id}/pin
 
 	if rest == "" {
-		jsonError(w, "not found", http.StatusNotFound)
+		jsonNotFound(w)
 		return
 	}
 
@@ -245,7 +244,7 @@ func (h *TieringHandler) routeNamespace(w http.ResponseWriter, r *http.Request, 
 		case http.MethodDelete:
 			h.deleteNamespace(w, r, nsID)
 		default:
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 		return
 	}
@@ -259,7 +258,7 @@ func (h *TieringHandler) routeNamespace(w http.ResponseWriter, r *http.Request, 
 		case http.MethodDelete:
 			h.unpinNamespace(w, r, nsID)
 		default:
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 
 	case "snapshot":
@@ -267,7 +266,7 @@ func (h *TieringHandler) routeNamespace(w http.ResponseWriter, r *http.Request, 
 		if r.Method == http.MethodPost {
 			h.createNamespaceSnapshot(w, r, nsID)
 		} else {
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 
 	case "snapshots":
@@ -276,7 +275,7 @@ func (h *TieringHandler) routeNamespace(w http.ResponseWriter, r *http.Request, 
 			if r.Method == http.MethodGet {
 				h.listNamespaceSnapshots(w, r, nsID)
 			} else {
-				jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+				jsonMethodNotAllowed(w)
 			}
 			return
 		}
@@ -288,7 +287,7 @@ func (h *TieringHandler) routeNamespace(w http.ResponseWriter, r *http.Request, 
 		case http.MethodDelete:
 			h.deleteNamespaceSnapshot(w, r, nsID, snapID)
 		default:
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 
 	case "files":
@@ -296,7 +295,7 @@ func (h *TieringHandler) routeNamespace(w http.ResponseWriter, r *http.Request, 
 		if r.Method == http.MethodGet {
 			h.listNamespaceFiles(w, r, nsID)
 		} else {
-			jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 
 	case "objects":
@@ -305,7 +304,7 @@ func (h *TieringHandler) routeNamespace(w http.ResponseWriter, r *http.Request, 
 			if r.Method == http.MethodGet {
 				h.listObjects(w, r, nsID)
 			} else {
-				jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+				jsonMethodNotAllowed(w)
 			}
 			return
 		}
@@ -317,7 +316,7 @@ func (h *TieringHandler) routeNamespace(w http.ResponseWriter, r *http.Request, 
 			if r.Method == http.MethodGet {
 				h.getObject(w, r, nsID, objectID)
 			} else {
-				jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+				jsonMethodNotAllowed(w)
 			}
 			return
 		}
@@ -328,27 +327,27 @@ func (h *TieringHandler) routeNamespace(w http.ResponseWriter, r *http.Request, 
 			case http.MethodDelete:
 				h.unpinObject(w, r, nsID, objectID)
 			default:
-				jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+				jsonMethodNotAllowed(w)
 			}
 			return
 		}
-		jsonError(w, "not found", http.StatusNotFound)
+		jsonNotFound(w)
 
 	default:
-		jsonError(w, "not found", http.StatusNotFound)
+		jsonNotFound(w)
 	}
 }
 
 // ---- response types ---------------------------------------------------------
 
 type placementDomainResponse struct {
-	ID          string              `json:"id"`
-	BackendKind string              `json:"backend_kind"`
-	Description string              `json:"description"`
-	TargetCount int                 `json:"target_count"`
-	Health      string              `json:"health"`
-	CreatedAt   string              `json:"created_at"`
-	UpdatedAt   string              `json:"updated_at"`
+	ID          string `json:"id"`
+	BackendKind string `json:"backend_kind"`
+	Description string `json:"description"`
+	TargetCount int    `json:"target_count"`
+	Health      string `json:"health"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 type tierTargetResponse struct {
@@ -370,23 +369,23 @@ type tierTargetResponse struct {
 }
 
 type managedNamespaceResponse struct {
-	ID                  string          `json:"id"`
-	Name                string          `json:"name"`
-	PlacementDomain     string          `json:"placement_domain"`
-	BackendKind         string          `json:"backend_kind"`
-	NamespaceKind       string          `json:"namespace_kind"`
-	ExposedPath         string          `json:"exposed_path"`
-	PinState            string          `json:"pin_state"`
-	IntentRevision      int64           `json:"intent_revision"`
-	Health              string          `json:"health"`
-	PlacementState      string          `json:"placement_state"`
-	BackendRef          string          `json:"backend_ref"`
-	CapacityBytes       uint64          `json:"capacity_bytes"`
-	UsedBytes           uint64          `json:"used_bytes"`
-	PolicyTargetIDs     json.RawMessage `json:"policy_target_ids"`
-	CreatedAt           string          `json:"created_at"`
-	UpdatedAt           string          `json:"updated_at"`
-	SnapshotMode        string          `json:"snapshot_mode,omitempty"`
+	ID              string          `json:"id"`
+	Name            string          `json:"name"`
+	PlacementDomain string          `json:"placement_domain"`
+	BackendKind     string          `json:"backend_kind"`
+	NamespaceKind   string          `json:"namespace_kind"`
+	ExposedPath     string          `json:"exposed_path"`
+	PinState        string          `json:"pin_state"`
+	IntentRevision  int64           `json:"intent_revision"`
+	Health          string          `json:"health"`
+	PlacementState  string          `json:"placement_state"`
+	BackendRef      string          `json:"backend_ref"`
+	CapacityBytes   uint64          `json:"capacity_bytes"`
+	UsedBytes       uint64          `json:"used_bytes"`
+	PolicyTargetIDs json.RawMessage `json:"policy_target_ids"`
+	CreatedAt       string          `json:"created_at"`
+	UpdatedAt       string          `json:"updated_at"`
+	SnapshotMode    string          `json:"snapshot_mode,omitempty"`
 }
 
 type namespaceSnapshotSummaryResponse struct {
@@ -398,26 +397,26 @@ type namespaceSnapshotSummaryResponse struct {
 }
 
 type namespaceSnapshotResponse struct {
-	SnapshotID      string                     `json:"snapshot_id"`
-	NamespaceID     string                     `json:"namespace_id"`
-	PoolName        string                     `json:"pool_name"`
-	ZFSSnapshotName string                     `json:"zfs_snapshot_name"`
-	BackingSnaps    []tiering.BackingSnapshot  `json:"backing_snapshots"`
-	MetaSnapshot    tiering.BackingSnapshot    `json:"meta_snapshot"`
-	CreatedAt       string                     `json:"created_at"`
-	Consistency     string                     `json:"consistency"`
+	SnapshotID      string                    `json:"snapshot_id"`
+	NamespaceID     string                    `json:"namespace_id"`
+	PoolName        string                    `json:"pool_name"`
+	ZFSSnapshotName string                    `json:"zfs_snapshot_name"`
+	BackingSnaps    []tiering.BackingSnapshot `json:"backing_snapshots"`
+	MetaSnapshot    tiering.BackingSnapshot   `json:"meta_snapshot"`
+	CreatedAt       string                    `json:"created_at"`
+	Consistency     string                    `json:"consistency"`
 }
 
 type managedObjectResponse struct {
-	ID                   string          `json:"id"`
-	NamespaceID          string          `json:"namespace_id"`
-	ObjectKind           string          `json:"object_kind"`
-	ObjectKey            string          `json:"object_key"`
-	PinState             string          `json:"pin_state"`
-	ActivityBand         string          `json:"activity_band"`
-	PlacementSummary     json.RawMessage `json:"placement_summary"`
-	BackendRef           string          `json:"backend_ref"`
-	UpdatedAt            string          `json:"updated_at"`
+	ID               string          `json:"id"`
+	NamespaceID      string          `json:"namespace_id"`
+	ObjectKind       string          `json:"object_kind"`
+	ObjectKey        string          `json:"object_key"`
+	PinState         string          `json:"pin_state"`
+	ActivityBand     string          `json:"activity_band"`
+	PlacementSummary json.RawMessage `json:"placement_summary"`
+	BackendRef       string          `json:"backend_ref"`
+	UpdatedAt        string          `json:"updated_at"`
 }
 
 type movementJobResponse struct {
@@ -515,7 +514,7 @@ func (h *TieringHandler) listDomains(w http.ResponseWriter, r *http.Request) {
 func (h *TieringHandler) getDomain(w http.ResponseWriter, r *http.Request, id string) {
 	d, err := h.store.GetPlacementDomain(id)
 	if errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "domain not found", http.StatusNotFound)
+		jsonErrorCoded(w, "domain not found", http.StatusNotFound, "tiering.domain_not_found")
 		return
 	}
 	if err != nil {
@@ -566,7 +565,7 @@ func (h *TieringHandler) listTargets(w http.ResponseWriter, r *http.Request) {
 func (h *TieringHandler) getTarget(w http.ResponseWriter, r *http.Request, id string) {
 	t, err := h.store.GetTierTarget(id)
 	if errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "target not found", http.StatusNotFound)
+		jsonErrorCoded(w, "target not found", http.StatusNotFound, "tiering.target_not_found")
 		return
 	}
 	if err != nil {
@@ -579,12 +578,12 @@ func (h *TieringHandler) getTarget(w http.ResponseWriter, r *http.Request, id st
 func (h *TieringHandler) updateTargetPolicy(w http.ResponseWriter, r *http.Request, id string) {
 	var req updateTargetPolicyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	err := h.store.UpdateTierTargetPolicy(id, req.TargetFillPct, req.FullThresholdPct)
 	if errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "target not found", http.StatusNotFound)
+		jsonErrorCoded(w, "target not found", http.StatusNotFound, "tiering.target_not_found")
 		return
 	}
 	if err != nil {
@@ -606,8 +605,15 @@ func (h *TieringHandler) listNamespaces(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	resp := make([]managedNamespaceResponse, 0, len(nss))
+	ca := h.coordinatedSnapshotAdapter()
 	for _, ns := range nss {
-		resp = append(resp, dbNamespaceToResponse(ns))
+		item := dbNamespaceToResponse(ns)
+		if ca != nil {
+			if mode, merr := ca.GetNamespaceSnapshotMode(ns.ID); merr == nil {
+				item.SnapshotMode = mode
+			}
+		}
+		resp = append(resp, item)
 	}
 	json.NewEncoder(w).Encode(resp)
 }
@@ -615,15 +621,15 @@ func (h *TieringHandler) listNamespaces(w http.ResponseWriter, r *http.Request) 
 func (h *TieringHandler) createNamespace(w http.ResponseWriter, r *http.Request) {
 	var req createNamespaceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	if req.Name == "" {
-		jsonError(w, "name is required", http.StatusBadRequest)
+		jsonErrorCoded(w, "name is required", http.StatusBadRequest, "tiering.name_required")
 		return
 	}
 	if req.PlacementDomain == "" {
-		jsonError(w, "placement_domain is required", http.StatusBadRequest)
+		jsonErrorCoded(w, "placement_domain is required", http.StatusBadRequest, "tiering.placement_domain_required")
 		return
 	}
 	kind := req.NamespaceKind
@@ -662,7 +668,7 @@ func (h *TieringHandler) coordinatedSnapshotAdapter() tiering.CoordinatedSnapsho
 func (h *TieringHandler) getNamespace(w http.ResponseWriter, r *http.Request, id string) {
 	ns, err := h.store.GetManagedNamespace(id)
 	if errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "namespace not found", http.StatusNotFound)
+		jsonErrorCoded(w, "namespace not found", http.StatusNotFound, "tiering.namespace_not_found")
 		return
 	}
 	if err != nil {
@@ -681,7 +687,7 @@ func (h *TieringHandler) getNamespace(w http.ResponseWriter, r *http.Request, id
 func (h *TieringHandler) deleteNamespace(w http.ResponseWriter, r *http.Request, id string) {
 	err := h.store.DeleteManagedNamespace(id)
 	if errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "namespace not found", http.StatusNotFound)
+		jsonErrorCoded(w, "namespace not found", http.StatusNotFound, "tiering.namespace_not_found")
 		return
 	}
 	if err != nil {
@@ -694,7 +700,7 @@ func (h *TieringHandler) deleteNamespace(w http.ResponseWriter, r *http.Request,
 func (h *TieringHandler) pinNamespace(w http.ResponseWriter, r *http.Request, id string) {
 	var req pinRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	if req.PinState == "" {
@@ -702,7 +708,7 @@ func (h *TieringHandler) pinNamespace(w http.ResponseWriter, r *http.Request, id
 	}
 	err := h.store.SetNamespacePinState(id, req.PinState)
 	if errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "namespace not found", http.StatusNotFound)
+		jsonErrorCoded(w, "namespace not found", http.StatusNotFound, "tiering.namespace_not_found")
 		return
 	}
 	if err != nil {
@@ -720,7 +726,7 @@ func (h *TieringHandler) pinNamespace(w http.ResponseWriter, r *http.Request, id
 func (h *TieringHandler) unpinNamespace(w http.ResponseWriter, r *http.Request, id string) {
 	err := h.store.SetNamespacePinState(id, "none")
 	if errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "namespace not found", http.StatusNotFound)
+		jsonErrorCoded(w, "namespace not found", http.StatusNotFound, "tiering.namespace_not_found")
 		return
 	}
 	if err != nil {
@@ -737,7 +743,7 @@ func (h *TieringHandler) unpinNamespace(w http.ResponseWriter, r *http.Request, 
 
 func (h *TieringHandler) createNamespaceSnapshot(w http.ResponseWriter, r *http.Request, id string) {
 	if _, err := h.store.GetManagedNamespace(id); errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "namespace not found", http.StatusNotFound)
+		jsonErrorCoded(w, "namespace not found", http.StatusNotFound, "tiering.namespace_not_found")
 		return
 	} else if err != nil {
 		serverError(w, err)
@@ -745,7 +751,7 @@ func (h *TieringHandler) createNamespaceSnapshot(w http.ResponseWriter, r *http.
 	}
 	ca := h.coordinatedSnapshotAdapter()
 	if ca == nil {
-		jsonError(w, "no adapter registered that supports coordinated snapshots", http.StatusServiceUnavailable)
+		jsonErrorCoded(w, "no adapter registered that supports coordinated snapshots", http.StatusServiceUnavailable, "tiering.snapshot_adapter_unavailable")
 		return
 	}
 	snap, err := ca.CreateNamespaceSnapshot(id)
@@ -775,7 +781,7 @@ func (h *TieringHandler) createNamespaceSnapshot(w http.ResponseWriter, r *http.
 
 func (h *TieringHandler) listNamespaceSnapshots(w http.ResponseWriter, r *http.Request, id string) {
 	if _, err := h.store.GetManagedNamespace(id); errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "namespace not found", http.StatusNotFound)
+		jsonErrorCoded(w, "namespace not found", http.StatusNotFound, "tiering.namespace_not_found")
 		return
 	} else if err != nil {
 		serverError(w, err)
@@ -806,7 +812,7 @@ func (h *TieringHandler) listNamespaceSnapshots(w http.ResponseWriter, r *http.R
 
 func (h *TieringHandler) getNamespaceSnapshot(w http.ResponseWriter, r *http.Request, id, snapID string) {
 	if _, err := h.store.GetManagedNamespace(id); errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "namespace not found", http.StatusNotFound)
+		jsonErrorCoded(w, "namespace not found", http.StatusNotFound, "tiering.namespace_not_found")
 		return
 	} else if err != nil {
 		serverError(w, err)
@@ -814,13 +820,13 @@ func (h *TieringHandler) getNamespaceSnapshot(w http.ResponseWriter, r *http.Req
 	}
 	ca := h.coordinatedSnapshotAdapter()
 	if ca == nil {
-		jsonError(w, "snapshot not found", http.StatusNotFound)
+		jsonErrorCoded(w, "snapshot not found", http.StatusNotFound, "tiering.snapshot_not_found")
 		return
 	}
 	snap, err := ca.GetNamespaceSnapshot(id, snapID)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			jsonError(w, "snapshot not found", http.StatusNotFound)
+			jsonErrorCoded(w, "snapshot not found", http.StatusNotFound, "tiering.snapshot_not_found")
 			return
 		}
 		serverError(w, err)
@@ -831,7 +837,7 @@ func (h *TieringHandler) getNamespaceSnapshot(w http.ResponseWriter, r *http.Req
 
 func (h *TieringHandler) deleteNamespaceSnapshot(w http.ResponseWriter, r *http.Request, id, snapID string) {
 	if _, err := h.store.GetManagedNamespace(id); errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "namespace not found", http.StatusNotFound)
+		jsonErrorCoded(w, "namespace not found", http.StatusNotFound, "tiering.namespace_not_found")
 		return
 	} else if err != nil {
 		serverError(w, err)
@@ -839,12 +845,12 @@ func (h *TieringHandler) deleteNamespaceSnapshot(w http.ResponseWriter, r *http.
 	}
 	ca := h.coordinatedSnapshotAdapter()
 	if ca == nil {
-		jsonError(w, "snapshot not found", http.StatusNotFound)
+		jsonErrorCoded(w, "snapshot not found", http.StatusNotFound, "tiering.snapshot_not_found")
 		return
 	}
 	if err := ca.DeleteNamespaceSnapshot(id, snapID); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			jsonError(w, "snapshot not found", http.StatusNotFound)
+			jsonErrorCoded(w, "snapshot not found", http.StatusNotFound, "tiering.snapshot_not_found")
 			return
 		}
 		serverError(w, err)
@@ -872,7 +878,7 @@ func snapshotToResponse(s *tiering.NamespaceSnapshot) namespaceSnapshotResponse 
 
 func (h *TieringHandler) listObjects(w http.ResponseWriter, r *http.Request, nsID string) {
 	if _, err := h.store.GetManagedNamespace(nsID); errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "namespace not found", http.StatusNotFound)
+		jsonErrorCoded(w, "namespace not found", http.StatusNotFound, "tiering.namespace_not_found")
 		return
 	} else if err != nil {
 		serverError(w, err)
@@ -893,7 +899,7 @@ func (h *TieringHandler) listObjects(w http.ResponseWriter, r *http.Request, nsI
 func (h *TieringHandler) getObject(w http.ResponseWriter, r *http.Request, nsID, objectID string) {
 	obj, err := h.store.GetManagedObject(objectID)
 	if errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "object not found", http.StatusNotFound)
+		jsonErrorCoded(w, "object not found", http.StatusNotFound, "tiering.object_not_found")
 		return
 	}
 	if err != nil {
@@ -901,7 +907,7 @@ func (h *TieringHandler) getObject(w http.ResponseWriter, r *http.Request, nsID,
 		return
 	}
 	if obj.NamespaceID != nsID {
-		jsonError(w, "object not found", http.StatusNotFound)
+		jsonErrorCoded(w, "object not found", http.StatusNotFound, "tiering.object_not_found")
 		return
 	}
 	json.NewEncoder(w).Encode(dbObjectToResponse(*obj))
@@ -955,7 +961,7 @@ func (h *TieringHandler) listNamespaceFiles(w http.ResponseWriter, r *http.Reque
 		_ = json.NewEncoder(w).Encode(entries)
 		return
 	}
-	jsonError(w, "namespace not found", http.StatusNotFound)
+	jsonErrorCoded(w, "namespace not found", http.StatusNotFound, "tiering.namespace_not_found")
 }
 
 func (h *TieringHandler) metaStats(w http.ResponseWriter, _ *http.Request) {
@@ -1004,7 +1010,7 @@ func looksLikePath(objectID string) bool {
 func (h *TieringHandler) pinObject(w http.ResponseWriter, r *http.Request, nsID, objectID string) {
 	var req pinRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	if req.PinState == "" {
@@ -1026,14 +1032,14 @@ func (h *TieringHandler) pinObject(w http.ResponseWriter, r *http.Request, nsID,
 			})
 			return
 		}
-		jsonError(w, "object not found", http.StatusNotFound)
+		jsonErrorCoded(w, "object not found", http.StatusNotFound, "tiering.object_not_found")
 		return
 	}
 
 	// Legacy UUID-keyed row in managed_objects.
 	obj, err := h.store.GetManagedObject(objectID)
 	if errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "object not found", http.StatusNotFound)
+		jsonErrorCoded(w, "object not found", http.StatusNotFound, "tiering.object_not_found")
 		return
 	}
 	if err != nil {
@@ -1041,7 +1047,7 @@ func (h *TieringHandler) pinObject(w http.ResponseWriter, r *http.Request, nsID,
 		return
 	}
 	if obj.NamespaceID != nsID {
-		jsonError(w, "object not found", http.StatusNotFound)
+		jsonErrorCoded(w, "object not found", http.StatusNotFound, "tiering.object_not_found")
 		return
 	}
 	if err := h.store.SetObjectPinState(objectID, req.PinState); err != nil {
@@ -1070,13 +1076,13 @@ func (h *TieringHandler) unpinObject(w http.ResponseWriter, r *http.Request, nsI
 			})
 			return
 		}
-		jsonError(w, "object not found", http.StatusNotFound)
+		jsonErrorCoded(w, "object not found", http.StatusNotFound, "tiering.object_not_found")
 		return
 	}
 
 	obj, err := h.store.GetManagedObject(objectID)
 	if errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "object not found", http.StatusNotFound)
+		jsonErrorCoded(w, "object not found", http.StatusNotFound, "tiering.object_not_found")
 		return
 	}
 	if err != nil {
@@ -1084,7 +1090,7 @@ func (h *TieringHandler) unpinObject(w http.ResponseWriter, r *http.Request, nsI
 		return
 	}
 	if obj.NamespaceID != nsID {
-		jsonError(w, "object not found", http.StatusNotFound)
+		jsonErrorCoded(w, "object not found", http.StatusNotFound, "tiering.object_not_found")
 		return
 	}
 	if err := h.store.SetObjectPinState(objectID, "none"); err != nil {
@@ -1117,11 +1123,11 @@ func (h *TieringHandler) listMovements(w http.ResponseWriter, r *http.Request) {
 func (h *TieringHandler) createMovement(w http.ResponseWriter, r *http.Request) {
 	var req createMovementRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	if req.NamespaceID == "" || req.SourceTargetID == "" || req.DestTargetID == "" {
-		jsonError(w, "namespace_id, source_target_id, and dest_target_id are required", http.StatusBadRequest)
+		jsonErrorCoded(w, "namespace_id, source_target_id, and dest_target_id are required", http.StatusBadRequest, "tiering.move_params_required")
 		return
 	}
 
@@ -1135,7 +1141,7 @@ func (h *TieringHandler) createMovement(w http.ResponseWriter, r *http.Request) 
 		State:          db.MovementJobStatePending,
 	}
 	if err := h.store.CreateMovementJob(job); errors.Is(err, db.ErrCrossDomainMovement) {
-		jsonError(w, "source and destination targets must be in the same placement domain", http.StatusUnprocessableEntity)
+		jsonErrorCoded(w, "source and destination targets must be in the same placement domain", http.StatusUnprocessableEntity, "tiering.move_cross_domain")
 		return
 	} else if err != nil {
 		serverError(w, err)
@@ -1148,7 +1154,7 @@ func (h *TieringHandler) createMovement(w http.ResponseWriter, r *http.Request) 
 func (h *TieringHandler) cancelMovement(w http.ResponseWriter, r *http.Request, id string) {
 	err := h.store.CancelMovementJob(id)
 	if errors.Is(err, db.ErrNotFound) {
-		jsonError(w, "movement not found", http.StatusNotFound)
+		jsonErrorCoded(w, "movement not found", http.StatusNotFound, "tiering.movement_not_found")
 		return
 	}
 	if err != nil {
@@ -1181,6 +1187,21 @@ func (h *TieringHandler) listDegradedStates(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *TieringHandler) reconcile(w http.ResponseWriter, r *http.Request) {
+	blocked, err := spindownBlockedTierPools(h.store, spindownNow())
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if len(blocked) > 0 {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":         "reconcile is outside one or more spindown active windows",
+			"blocked_pools": blocked,
+			"maintenance":   "deferred",
+		})
+		return
+	}
+
 	// Debounce: reject calls within reconcile_debounce_seconds of the last reconcile.
 	debounceSeconds := 60
 	if val, err := h.store.GetControlPlaneConfig("reconcile_debounce_seconds"); err == nil && val != "" {
@@ -1195,7 +1216,7 @@ func (h *TieringHandler) reconcile(w http.ResponseWriter, r *http.Request) {
 		remaining := int(math.Ceil((debounce - since).Seconds()))
 		h.mu.Unlock()
 		w.Header().Set("Retry-After", strconv.Itoa(remaining))
-		jsonError(w, "reconcile called too frequently; try again later", http.StatusTooManyRequests)
+		jsonErrorCoded(w, "reconcile called too frequently; try again later", http.StatusTooManyRequests, "tiering.reconcile_rate_limited")
 		return
 	}
 	h.lastReconcile = time.Now()
@@ -1248,7 +1269,6 @@ func dbTargetToResponse(t db.TierTargetRow) tierTargetResponse {
 			SupportsRecall:      caps.SupportsRecall,
 			RecallMode:          caps.RecallMode,
 			SnapshotMode:        caps.SnapshotMode,
-			FUSEMode:            caps.FUSEMode,
 			SupportsChecksums:   caps.SupportsChecksums,
 			SupportsCompression: caps.SupportsCompression,
 			SupportsWriteBias:   caps.SupportsWriteBias,

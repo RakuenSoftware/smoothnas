@@ -74,6 +74,14 @@ func TestGenerateRulesetNFSOnly(t *testing.T) {
 	if !strings.Contains(ruleset, "udp dport 111") {
 		t.Error("missing UDP rpcbind")
 	}
+	for _, port := range []string{"20048", "32765", "32767"} {
+		if !strings.Contains(ruleset, "tcp dport "+port) {
+			t.Errorf("missing TCP NFS helper port %s", port)
+		}
+		if !strings.Contains(ruleset, "udp dport "+port) {
+			t.Errorf("missing UDP NFS helper port %s", port)
+		}
+	}
 }
 
 func TestGenerateRulesetISCSIOnly(t *testing.T) {

@@ -3,6 +3,28 @@ bin/
 dist/
 tierd/tierd
 
+# Debian packaging outputs. Ship the source files under debian/ but
+# never the intermediates dpkg-buildpackage writes into the package
+# dir or the produced .deb/.buildinfo/.changes it writes one level up
+# (that's the parent of the source package, which for us is src/<x>/
+# for smoothfs-dkms and src/smoothfs/ for smoothfs-samba-vfs).
+**/*_[0-9]*.deb
+**/*_[0-9]*.buildinfo
+**/*_[0-9]*.changes
+**/debian/.debhelper/
+**/debian/files
+**/debian/*.substvars
+**/debian/*.debhelper
+**/debian/*.debhelper.log
+**/debian/debhelper-build-stamp
+**/debian/tmp/
+**/debian/smoothfs-dkms/
+**/debian/smoothfs-samba-vfs/
+**/debian/tierd/
+**/debian/vfs_smoothfs.so
+# Go build output directory used by tierd/debian/rules.
+tierd/debian/bin/
+
 # Node
 tierd-ui/node_modules/
 tierd-ui/dist/

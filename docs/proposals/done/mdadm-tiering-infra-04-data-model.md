@@ -1,7 +1,6 @@
 # Proposal: mdadm Tiering Infrastructure — Database Schema
 
 **Status:** Pending
-**Date:** 2026-04-09
 **Part of:** mdadm-tiering-infrastructure (Step 4 of 14)
 **Depends on:** mdadm-tiering-infra-01-naming-rules, mdadm-tiering-infra-02-pv-tags, mdadm-tiering-infra-03-state-machine
 

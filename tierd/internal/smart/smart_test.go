@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	tierddb "github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/smart"
 
 	"database/sql"
@@ -19,6 +20,9 @@ func openTestDB(t *testing.T) *sql.DB {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
+	if err := tierddb.MigrateDB(db); err != nil {
+		t.Fatalf("migrate db: %v", err)
+	}
 	return db
 }
 

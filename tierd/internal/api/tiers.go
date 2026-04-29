@@ -13,8 +13,11 @@ import (
 	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
+	"github.com/JBailes/SmoothNAS/tierd/internal/disk"
 	"github.com/JBailes/SmoothNAS/tierd/internal/lvm"
+	"github.com/JBailes/SmoothNAS/tierd/internal/spindown"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tier"
+	"github.com/JBailes/SmoothNAS/tierd/internal/tier/backend"
 )
 
 type createTierDefinitionRequest struct {
@@ -23,13 +26,20 @@ type createTierDefinitionRequest struct {
 }
 
 type createTierRequest struct {
-	Name       string                         `json:"name"`
-	Filesystem string                         `json:"filesystem"`
-	Tiers      *[]createTierDefinitionRequest `json:"tiers,omitempty"`
+	Name          string                         `json:"name"`
+	Filesystem    string                         `json:"filesystem"`
+	Tiers         *[]createTierDefinitionRequest `json:"tiers,omitempty"`
+	MetaOnFastest bool                           `json:"meta_on_fastest"`
 }
 
 type assignTierArrayRequest struct {
-	ArrayID int64 `json:"array_id"`
+	// Kind selects the backing backend. Empty or "mdadm" means the
+	// classic flow (ArrayID points at an mdadm_arrays row). "zfs",
+	// "btrfs", "bcachefs" use BackingRef — the kind-specific
+	// identifier (zpool name, btrfs device, etc.).
+	Kind       string `json:"kind,omitempty"`
+	ArrayID    int64  `json:"array_id,omitempty"`
+	BackingRef string `json:"backing_ref,omitempty"`
 }
 
 type deleteTierRequest struct {
@@ -73,6 +83,12 @@ type tierDetailResponse struct {
 	FreeBytes        uint64 `json:"free_bytes"`
 	TargetFillPct    int    `json:"target_fill_pct"`
 	FullThresholdPct int    `json:"full_threshold_pct"`
+	// BackingKind / BackingRef identify non-mdadm backings (zfs, btrfs,
+	// bcachefs). The UI uses these to render the row as "assigned" when
+	// array_id is NULL but the slot actually holds a ZFS pool (or later
+	// btrfs/bcachefs) — without these fields the slot appears empty.
+	BackingKind string `json:"backing_kind"`
+	BackingRef  string `json:"backing_ref,omitempty"`
 }
 
 type poolDetailResponse struct {
@@ -87,6 +103,7 @@ type poolDetailResponse struct {
 	CreatedAt        string               `json:"created_at"`
 	UpdatedAt        string               `json:"updated_at"`
 	LastReconciledAt any                  `json:"last_reconciled_at"`
+	MetaOnFastest    bool                 `json:"meta_on_fastest"`
 }
 
 type poolMapSegmentResponse struct {
@@ -103,6 +120,51 @@ type poolMapResponse struct {
 	Segments   []poolMapSegmentResponse `json:"segments"`
 	Verified   bool                     `json:"verified"`
 	VerifiedAt string                   `json:"verified_at"`
+}
+
+type poolSpindownMountResponse struct {
+	Path    string `json:"path"`
+	Mounted bool   `json:"mounted"`
+	Noatime bool   `json:"noatime"`
+}
+
+type poolSpindownWarmFillTierResponse struct {
+	Name           string `json:"name"`
+	Rank           int    `json:"rank"`
+	TargetFillPct  int    `json:"target_fill_pct"`
+	CurrentFillPct int    `json:"current_fill_pct"`
+	UsedBytes      uint64 `json:"used_bytes"`
+	TargetBytes    uint64 `json:"target_bytes"`
+	CapacityBytes  uint64 `json:"capacity_bytes"`
+	DeltaBytes     int64  `json:"delta_bytes"`
+	Direction      string `json:"direction,omitempty"`
+	Satisfied      bool   `json:"satisfied"`
+	Reason         string `json:"reason,omitempty"`
+}
+
+type poolSpindownWarmFillResponse struct {
+	Required  bool                               `json:"required"`
+	Satisfied bool                               `json:"satisfied"`
+	Reason    string                             `json:"reason,omitempty"`
+	Movement  spindown.TargetBalanceStatus       `json:"movement"`
+	Tiers     []poolSpindownWarmFillTierResponse `json:"tiers"`
+}
+
+type poolSpindownPolicyResponse struct {
+	Enabled       bool                         `json:"enabled"`
+	Eligible      bool                         `json:"eligible"`
+	Reasons       []string                     `json:"reasons"`
+	MetaOnFastest bool                         `json:"meta_on_fastest"`
+	SSDTargetFill poolSpindownWarmFillResponse `json:"ssd_target_fill"`
+	Mounts        []poolSpindownMountResponse  `json:"mounts"`
+	ActiveWindows []spindown.ActiveWindow      `json:"active_windows"`
+	ActiveNow     bool                         `json:"active_now"`
+	NextActiveAt  string                       `json:"next_active_at,omitempty"`
+}
+
+type updatePoolSpindownRequest struct {
+	Enabled       bool                     `json:"enabled"`
+	ActiveWindows *[]spindown.ActiveWindow `json:"active_windows,omitempty"`
 }
 
 var (
@@ -123,6 +185,9 @@ var (
 	removeTierLV            = lvm.RemoveLV
 	deactivateTierLV        = lvm.DeactivateLV
 	listManagedPVs          = lvm.ListManagedPVs
+	statfsPath              = syscall.Statfs
+	remountNoatime          = remountPathNoatime
+	readMountInfo           = func() ([]byte, error) { return os.ReadFile("/proc/self/mountinfo") }
 )
 
 func validateTierNameRequest(w http.ResponseWriter, tierName string) bool {
@@ -209,7 +274,9 @@ func (h *ArraysHandler) recoverStaleEmptyTier(tierName string) error {
 // routeTiers handles named tier instances:
 //   - GET/POST /api/tiers
 //   - DELETE /api/tiers/{name}
-//   - PUT/DELETE /api/tiers/{name}/tiers/{tier_name}
+//   - PUT /api/tiers/{name}/tiers/{tier_name} (per-slot assign; unassign
+//     is intentionally not offered — teardown only goes through a whole
+//     DELETE /api/tiers/{name})
 func (h *ArraysHandler) routeTiers(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	if path == "/api/tiers" || path == "/api/tiers/" {
@@ -219,7 +286,7 @@ func (h *ArraysHandler) routeTiers(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPost:
 			h.createTier(w, r)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 		return
 	}
@@ -227,7 +294,7 @@ func (h *ArraysHandler) routeTiers(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(path, "/api/tiers/")
 	parts := strings.SplitN(rest, "/", 2)
 	if len(parts) == 0 || parts[0] == "" {
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		jsonNotFound(w)
 		return
 	}
 	tierName := parts[0]
@@ -244,13 +311,22 @@ func (h *ArraysHandler) routeTiers(w http.ResponseWriter, r *http.Request) {
 		case http.MethodDelete:
 			h.deleteTier(w, r, tierName)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "map":
 		if r.Method == http.MethodGet {
 			h.getTierMap(w, r, tierName)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
+		}
+	case "spindown":
+		switch r.Method {
+		case http.MethodGet:
+			h.getPoolSpindown(w, r, tierName)
+		case http.MethodPut:
+			h.updatePoolSpindown(w, r, tierName)
+		default:
+			jsonMethodNotAllowed(w)
 		}
 	default:
 		switch {
@@ -259,19 +335,23 @@ func (h *ArraysHandler) routeTiers(w http.ResponseWriter, r *http.Request) {
 		case strings.HasPrefix(subpath, "tiers/"):
 			tierSlotName := strings.TrimPrefix(subpath, "tiers/")
 			if tierSlotName == "" {
-				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				jsonNotFound(w)
 				return
 			}
 			switch r.Method {
 			case http.MethodPut:
 				h.assignTierArray(w, r, tierName, tierSlotName)
-			case http.MethodDelete:
-				h.unassignTierArray(w, r, tierName, tierSlotName)
 			default:
-				http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+				// Per-slot unassign is intentionally not supported —
+				// a backing assignment is only cleared as part of the
+				// whole-tier destroy (DELETE /api/tiers/{name}), which
+				// runs coordinated teardown of LVM / ZFS / placement
+				// state. Half-detaching a slot would leave orphan data.
+				jsonErrorCoded(w, "method not allowed; destroy the whole tier instead",
+					http.StatusMethodNotAllowed, "tiers.cannot_delete_subset")
 			}
 		default:
-			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			jsonNotFound(w)
 		}
 	}
 }
@@ -283,7 +363,7 @@ func (h *ArraysHandler) getTier(w http.ResponseWriter, r *http.Request, poolName
 	resp, err := poolDetailFromStore(h, poolName)
 	if err != nil {
 		if err == db.ErrNotFound {
-			http.Error(w, `{"error":"pool not found"}`, http.StatusNotFound)
+			jsonErrorCoded(w, "pool not found", http.StatusNotFound, "tiers.pool_not_found")
 			return
 		}
 		serverError(w, err)
@@ -298,7 +378,7 @@ func (h *ArraysHandler) getTierMap(w http.ResponseWriter, r *http.Request, poolN
 	}
 	if _, err := h.store.GetTierInstance(poolName); err != nil {
 		if err == db.ErrNotFound {
-			http.Error(w, `{"error":"pool not found"}`, http.StatusNotFound)
+			jsonErrorCoded(w, "pool not found", http.StatusNotFound, "tiers.pool_not_found")
 			return
 		}
 		serverError(w, err)
@@ -311,7 +391,7 @@ func (h *ArraysHandler) getTierMap(w http.ResponseWriter, r *http.Request, poolN
 		return
 	}
 	if !exists {
-		http.Error(w, `{"error":"LV does not exist yet; assign an array to a tier slot first"}`, http.StatusServiceUnavailable)
+		jsonErrorCoded(w, "LV does not exist yet; assign an array to a tier slot first", http.StatusServiceUnavailable, "tiers.lv_unassigned")
 		return
 	}
 
@@ -321,6 +401,344 @@ func (h *ArraysHandler) getTierMap(w http.ResponseWriter, r *http.Request, poolN
 		return
 	}
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (h *ArraysHandler) getPoolSpindown(w http.ResponseWriter, r *http.Request, poolName string) {
+	if !validateTierNameRequest(w, poolName) {
+		return
+	}
+	resp, err := h.poolSpindownPolicy(poolName)
+	if err != nil {
+		if err == db.ErrNotFound {
+			jsonErrorCoded(w, "pool not found", http.StatusNotFound, "tiers.pool_not_found")
+			return
+		}
+		serverError(w, err)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (h *ArraysHandler) updatePoolSpindown(w http.ResponseWriter, r *http.Request, poolName string) {
+	if !validateTierNameRequest(w, poolName) {
+		return
+	}
+	var req updatePoolSpindownRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonInvalidRequestBody(w)
+		return
+	}
+	resp, err := h.poolSpindownPolicy(poolName)
+	if err != nil {
+		if err == db.ErrNotFound {
+			jsonErrorCoded(w, "pool not found", http.StatusNotFound, "tiers.pool_not_found")
+			return
+		}
+		serverError(w, err)
+		return
+	}
+	if req.Enabled {
+		if !resp.Eligible {
+			jsonError(w, "pool is not spindown eligible: "+strings.Join(resp.Reasons, "; "), http.StatusBadRequest)
+			return
+		}
+		pool, err := h.store.GetTierInstance(poolName)
+		if err != nil {
+			serverError(w, err)
+			return
+		}
+		slots, err := h.store.ListTierSlots(poolName)
+		if err != nil {
+			serverError(w, err)
+			return
+		}
+		if err := applyNoatimeToPoolMounts(*pool, slots); err != nil {
+			serverError(w, err)
+			return
+		}
+	}
+	if req.ActiveWindows != nil {
+		if _, err := spindown.StoreWindows(h.store, spindown.PoolWindowsKey(poolName), *req.ActiveWindows); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if err := h.store.SetBoolConfig(poolSpindownConfigKey(poolName), req.Enabled); err != nil {
+		serverError(w, err)
+		return
+	}
+	resp, err = h.poolSpindownPolicy(poolName)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (h *ArraysHandler) poolSpindownPolicy(poolName string) (*poolSpindownPolicyResponse, error) {
+	pool, err := h.store.GetTierInstance(poolName)
+	if err != nil {
+		return nil, err
+	}
+	slots, err := h.store.ListTierSlots(poolName)
+	if err != nil {
+		return nil, err
+	}
+	decision, windows, err := spindown.DecisionFor(h.store, poolSpindownConfigKey(poolName), spindown.PoolWindowsKey(poolName), spindownNow())
+	if err != nil {
+		return nil, err
+	}
+	enabled, err := spindown.Enabled(h.store, poolSpindownConfigKey(poolName))
+	if err != nil {
+		return nil, err
+	}
+
+	warmFill := poolSpindownSSDTargetFill(*pool, slots)
+	movement, err := spindown.LoadTargetBalanceStatus(h.store, poolName)
+	if err != nil {
+		return nil, err
+	}
+	warmFill.Movement = movement
+	reasons := poolSpindownIneligibleReasons(*pool, slots, warmFill)
+	resp := &poolSpindownPolicyResponse{
+		Enabled:       enabled,
+		Eligible:      len(reasons) == 0,
+		Reasons:       reasons,
+		MetaOnFastest: pool.MetaOnFastest,
+		SSDTargetFill: warmFill,
+		Mounts:        poolSpindownMounts(*pool, slots),
+		ActiveWindows: windows,
+		ActiveNow:     decision.ActiveNow,
+		NextActiveAt:  decision.NextActiveAt,
+	}
+	if resp.Reasons == nil {
+		resp.Reasons = []string{}
+	}
+	return resp, nil
+}
+
+func poolSpindownConfigKey(poolName string) string {
+	return spindown.PoolEnabledKey(poolName)
+}
+
+func poolSpindownIneligibleReasons(pool db.TierInstance, slots []db.TierSlot, warmFill poolSpindownWarmFillResponse) []string {
+	var reasons []string
+	assigned := assignedTierSlots(slots)
+	if len(assigned) == 0 {
+		reasons = append(reasons, "no assigned tier backings")
+	}
+	if !pool.MetaOnFastest {
+		reasons = append(reasons, "pool metadata is not pinned to the fastest tier")
+	}
+	if warmFill.Required && !warmFill.Satisfied && !warmFill.Movement.CandidateExhausted {
+		reasons = append(reasons, warmFill.Reason)
+	}
+	if warmFill.Movement.Active || warmFill.Movement.PendingMoves > 0 {
+		reasons = append(reasons, poolSpindownTargetBalanceMovementReason(warmFill.Movement))
+	}
+	return reasons
+}
+
+func poolSpindownTargetBalanceMovementReason(status spindown.TargetBalanceStatus) string {
+	if status.Reason != "" {
+		return status.Reason
+	}
+	if status.Active {
+		return "SSD target-balance placement is still running"
+	}
+	return "SSD target-balance placement has pending moves"
+}
+
+func poolSpindownSSDTargetFill(pool db.TierInstance, slots []db.TierSlot) poolSpindownWarmFillResponse {
+	resp := poolSpindownWarmFillResponse{
+		Satisfied: true,
+		Tiers:     []poolSpindownWarmFillTierResponse{},
+	}
+	assigned := assignedTierSlots(slots)
+	if len(assigned) == 0 {
+		resp.Reason = "no assigned tier backings"
+		return resp
+	}
+
+	mdadmMembers := map[string][]string{}
+	if arrays, err := listMDADMArrays(); err == nil {
+		for _, array := range arrays {
+			mdadmMembers[array.Path] = append([]string(nil), array.MemberDisks...)
+		}
+	}
+	disks, err := listDisksForSpindown()
+	if err != nil {
+		resp.Reason = "could not evaluate SSD target fill"
+		return resp
+	}
+	rotational := make(map[string]bool, len(disks))
+	for _, d := range disks {
+		rotational[disk.BaseDiskPath(d.Path)] = d.Rotational
+	}
+
+	nonRotationalSlots := make(map[string]bool)
+	slowestRotationalRank := 0
+	for _, slot := range assigned {
+		classification, ok := classifyTierSlotRotational(slot, mdadmMembers, rotational)
+		if !ok {
+			continue
+		}
+		if classification {
+			if slot.Rank > slowestRotationalRank {
+				slowestRotationalRank = slot.Rank
+			}
+			continue
+		}
+		nonRotationalSlots[slot.Name] = true
+	}
+	if slowestRotationalRank == 0 {
+		resp.Reason = "no confirmed rotational tier requires SSD warm-fill"
+		return resp
+	}
+
+	slowestRank := poolSlowestRank(slots)
+	for _, slot := range assigned {
+		if !nonRotationalSlots[slot.Name] || slot.Rank >= slowestRotationalRank {
+			continue
+		}
+		resp.Required = true
+		targetPct := effectiveSlotTargetFill(slot.Rank, slot.TargetFillPct, slot.FullThresholdPct, slowestRank)
+		tierResp := poolSpindownWarmFillTierResponse{
+			Name:          slot.Name,
+			Rank:          slot.Rank,
+			TargetFillPct: targetPct,
+			Satisfied:     true,
+		}
+		path := tier.PerTierBackingMount(pool.Name, slot.Name)
+		var st syscall.Statfs_t
+		if err := statfsPath(path, &st); err != nil || st.Blocks == 0 {
+			tierResp.Satisfied = false
+			tierResp.Reason = "could not read tier capacity"
+			resp.Satisfied = false
+			resp.Tiers = append(resp.Tiers, tierResp)
+			continue
+		}
+		blockSize := uint64(st.Bsize)
+		tierResp.CapacityBytes = st.Blocks * blockSize
+		tierResp.UsedBytes = (st.Blocks - st.Bfree) * blockSize
+		tierResp.TargetBytes = tierResp.CapacityBytes * uint64(targetPct) / 100
+		tierResp.CurrentFillPct = int(tierResp.UsedBytes * 100 / tierResp.CapacityBytes)
+		switch {
+		case tierResp.UsedBytes < tierResp.TargetBytes:
+			tierResp.Satisfied = false
+			tierResp.Reason = "below target_fill_pct"
+			tierResp.Direction = "promote_to_ssd"
+			tierResp.DeltaBytes = int64(tierResp.TargetBytes - tierResp.UsedBytes)
+			resp.Satisfied = false
+		case tierResp.UsedBytes > tierResp.TargetBytes:
+			tierResp.Satisfied = false
+			tierResp.Reason = "above target_fill_pct"
+			tierResp.Direction = "demote_from_ssd"
+			tierResp.DeltaBytes = -int64(tierResp.UsedBytes - tierResp.TargetBytes)
+			resp.Satisfied = false
+		}
+		resp.Tiers = append(resp.Tiers, tierResp)
+	}
+
+	switch {
+	case !resp.Required:
+		resp.Reason = "no confirmed SSD/NVMe tier requires warm-fill"
+	case resp.Satisfied:
+		resp.Reason = "all confirmed SSD/NVMe tiers are at target_fill_pct"
+	default:
+		resp.Reason = "SSD/NVMe tiers are not at target_fill_pct; keep HDDs active until warm-fill rebalance completes"
+	}
+	return resp
+}
+
+func classifyTierSlotRotational(slot db.TierSlot, mdadmMembers map[string][]string, rotational map[string]bool) (bool, bool) {
+	devices := managedTierSlotDevices(slot, mdadmMembers)
+	if len(devices) == 0 {
+		return false, false
+	}
+	confirmed := false
+	hasRotational := false
+	for _, device := range devices {
+		isRotational, ok := rotational[disk.BaseDiskPath(device)]
+		if !ok {
+			return false, false
+		}
+		if isRotational {
+			hasRotational = true
+		}
+		confirmed = true
+	}
+	return hasRotational, confirmed
+}
+
+func assignedTierSlots(slots []db.TierSlot) []db.TierSlot {
+	var assigned []db.TierSlot
+	for _, slot := range slots {
+		if slot.State != db.TierSlotStateEmpty {
+			assigned = append(assigned, slot)
+		}
+	}
+	return assigned
+}
+
+func poolSpindownMounts(pool db.TierInstance, slots []db.TierSlot) []poolSpindownMountResponse {
+	paths := []string{pool.MountPoint}
+	for _, slot := range assignedTierSlots(slots) {
+		paths = append(paths, tier.PerTierBackingMount(pool.Name, slot.Name))
+	}
+	out := make([]poolSpindownMountResponse, 0, len(paths))
+	for _, path := range paths {
+		noatime, mounted := mountHasOption(path, "noatime")
+		out = append(out, poolSpindownMountResponse{
+			Path:    path,
+			Mounted: mounted,
+			Noatime: noatime,
+		})
+	}
+	return out
+}
+
+func applyNoatimeToPoolMounts(pool db.TierInstance, slots []db.TierSlot) error {
+	for _, mount := range poolSpindownMounts(pool, slots) {
+		if !mount.Mounted {
+			continue
+		}
+		if err := remountNoatime(mount.Path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func remountPathNoatime(path string) error {
+	if !strings.HasPrefix(path, "/mnt/") {
+		return fmt.Errorf("refusing to remount non-managed path %s", path)
+	}
+	cmd := exec.Command("mount", "-o", "remount,noatime", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("remount noatime %s: %s: %w", path, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func mountHasOption(path, option string) (bool, bool) {
+	data, err := readMountInfo()
+	if err != nil {
+		return false, false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 6 || fields[4] != path {
+			continue
+		}
+		for _, opt := range strings.Split(fields[5], ",") {
+			if opt == option {
+				return true, true
+			}
+		}
+		return false, true
+	}
+	return false, false
 }
 
 func (h *ArraysHandler) refreshTierMap(poolName string) (*poolMapResponse, error) {
@@ -387,30 +805,46 @@ func poolDetailFromStore(h *ArraysHandler, poolName string) (*poolDetailResponse
 	if err != nil {
 		return nil, err
 	}
-	// Try legacy monolithic VG first, then fall back to per-tier VGs.
-	pvs, _ := listPoolPVs("tier-" + poolName)
-	pvByDevice := make(map[string]lvm.PVInfo, len(pvs))
+	slowestRank := 0
+	for _, slot := range slots {
+		if slot.Rank > slowestRank {
+			slowestRank = slot.Rank
+		}
+	}
+	// Per-tier VG lookup first: if any tier has its own VG (new layout),
+	// the legacy monolithic VG — even when it still contains the 4 MB
+	// loopback placeholder from createPoolVG — is not the source of truth
+	// and must not contribute capacity. Earlier this check was gated on
+	// len(legacy_pvs) == 0, but the placeholder PV keeps the legacy VG
+	// non-empty forever, so HDD/NVME capacity silently disappeared from
+	// the tier detail response for every pool created with per-tier VGs.
+	perTierPVs := make(map[string][]lvm.PVInfo) // tierName → PVs
 	var capacityBytes uint64
-	for _, pv := range pvs {
-		pvByDevice[pv.Device] = pv
-		capacityBytes += pv.SizeBytes
+	hasPerTierLayout := false
+	for _, slot := range slots {
+		if slot.State == db.TierSlotStateEmpty {
+			continue
+		}
+		vg := tier.PerTierVGName(poolName, slot.Name)
+		tierPVs, _ := listPoolPVs(vg)
+		if len(tierPVs) > 0 {
+			perTierPVs[slot.Name] = tierPVs
+			hasPerTierLayout = true
+			for _, pv := range tierPVs {
+				capacityBytes += pv.SizeBytes
+			}
+		}
 	}
 
-	// Per-tier VG lookup: for new pools, each tier has its own VG.
-	perTierPVs := make(map[string][]lvm.PVInfo) // tierName → PVs
-	if len(pvs) == 0 {
-		for _, slot := range slots {
-			if slot.State == db.TierSlotStateEmpty {
-				continue
-			}
-			vg := tier.PerTierVGName(poolName, slot.Name)
-			tierPVs, _ := listPoolPVs(vg)
-			if len(tierPVs) > 0 {
-				perTierPVs[slot.Name] = tierPVs
-				for _, pv := range tierPVs {
-					capacityBytes += pv.SizeBytes
-				}
-			}
+	// Legacy monolithic layout: no per-tier VGs exist, so pull capacity
+	// and PV→device mapping from the "tier-<pool>" VG.
+	pvByDevice := make(map[string]lvm.PVInfo)
+	var pvs []lvm.PVInfo
+	if !hasPerTierLayout {
+		pvs, _ = listPoolPVs("tier-" + poolName)
+		for _, pv := range pvs {
+			pvByDevice[pv.Device] = pv
+			capacityBytes += pv.SizeBytes
 		}
 	}
 
@@ -419,18 +853,29 @@ func poolDetailFromStore(h *ArraysHandler, poolName string) (*poolDetailResponse
 		Filesystem:    pool.Filesystem,
 		State:         pool.State,
 		MountPoint:    pool.MountPoint,
-		CapacityBytes: capacityBytes,
+		CapacityBytes: 0,
 		UsedBytes:     poolUsageBytes(pool.MountPoint),
 		ErrorReason:   nil,
 		Tiers:         make([]tierDetailResponse, 0, len(slots)),
 		CreatedAt:     pool.CreatedAt,
 		UpdatedAt:     pool.UpdatedAt,
+		MetaOnFastest: pool.MetaOnFastest,
 	}
 	if pool.ErrorReason != "" {
 		resp.ErrorReason = pool.ErrorReason
 	}
 	if pool.LastReconciledAt != "" {
 		resp.LastReconciledAt = pool.LastReconciledAt
+	}
+	// For legacy monolithic pools, `pv.UsedBytes` from LVM means "extents
+	// allocated to an LV", not filesystem usage. Since one LV spans every
+	// PV, each PV reports fully-used — and when the UI sums tier slots the
+	// pool looks 100% full. Prorate the filesystem's actual usage across
+	// slots by capacity share so the sum matches reality.
+	legacyMonolithic := len(pvs) > 0
+	var legacyPoolUsed uint64
+	if legacyMonolithic {
+		legacyPoolUsed = poolUsageBytes(pool.MountPoint)
 	}
 	for _, slot := range slots {
 		var arrayID any
@@ -442,12 +887,11 @@ func poolDetailFromStore(h *ArraysHandler, poolName string) (*poolDetailResponse
 			pvDevice = *slot.PVDevice
 		}
 		var capacity, usedBytes, freeBytes uint64
-		// Legacy: PV stats from monolithic VG.
+		// Legacy: take capacity from the PV but defer used/free to prorated
+		// pool FS usage below — never trust pv.UsedBytes here.
 		if slot.PVDevice != nil {
 			if pv, ok := pvByDevice[*slot.PVDevice]; ok {
 				capacity = pv.SizeBytes
-				usedBytes = pv.UsedBytes
-				freeBytes = pv.FreeBytes
 			}
 		}
 		// Per-tier: PV stats from per-tier VG give the VG capacity split, but
@@ -461,12 +905,10 @@ func poolDetailFromStore(h *ArraysHandler, poolName string) (*poolDetailResponse
 			for _, pv := range tierPVs {
 				capacity += pv.SizeBytes
 			}
+			// pv.UsedBytes is allocation, not FS usage; leave zeroed until
+			// backingFSUsage below supplies real numbers.
 			usedBytes = 0
 			freeBytes = 0
-			for _, pv := range tierPVs {
-				usedBytes += pv.UsedBytes
-				freeBytes += pv.FreeBytes
-			}
 		}
 		if fsCap, fsUsed, fsFree, ok := h.backingFSUsage(pool.Name, slot.Name); ok {
 			if fsCap > 0 {
@@ -474,7 +916,15 @@ func poolDetailFromStore(h *ArraysHandler, poolName string) (*poolDetailResponse
 			}
 			usedBytes = fsUsed
 			freeBytes = fsFree
+		} else if legacyMonolithic && capacityBytes > 0 && capacity > 0 {
+			// Prorate pool FS usage by this slot's capacity share.
+			usedBytes = uint64(float64(legacyPoolUsed) * float64(capacity) / float64(capacityBytes))
+			if usedBytes > capacity {
+				usedBytes = capacity
+			}
+			freeBytes = capacity - usedBytes
 		}
+		resp.CapacityBytes += capacity
 		resp.Tiers = append(resp.Tiers, tierDetailResponse{
 			Name:             slot.Name,
 			Rank:             slot.Rank,
@@ -484,11 +934,30 @@ func poolDetailFromStore(h *ArraysHandler, poolName string) (*poolDetailResponse
 			CapacityBytes:    capacity,
 			UsedBytes:        usedBytes,
 			FreeBytes:        freeBytes,
-			TargetFillPct:    slot.TargetFillPct,
+			TargetFillPct:    effectiveSlotTargetFill(slot.Rank, slot.TargetFillPct, slot.FullThresholdPct, slowestRank),
 			FullThresholdPct: slot.FullThresholdPct,
+			BackingKind:      slot.BackingKind,
+			BackingRef:       slot.BackingRef,
 		})
 	}
 	return resp, nil
+}
+
+func poolSlowestRank(slots []db.TierSlot) int {
+	slowestRank := 0
+	for _, slot := range slots {
+		if slot.Rank > slowestRank {
+			slowestRank = slot.Rank
+		}
+	}
+	return slowestRank
+}
+
+func effectiveSlotTargetFill(rank, targetFillPct, fullThresholdPct, slowestRank int) int {
+	if rank == slowestRank && fullThresholdPct > 0 {
+		return fullThresholdPct
+	}
+	return targetFillPct
 }
 
 func mountedPathUsageBytes(mountPoint string) uint64 {
@@ -544,7 +1013,7 @@ func killMountHolders(mountPath string) error {
 // capture the empty-FS metadata baseline right after mkfs.
 func statfsUsedBytes(mountPath string) (uint64, bool) {
 	var st syscall.Statfs_t
-	if err := syscall.Statfs(mountPath, &st); err != nil {
+	if err := statfsPath(mountPath, &st); err != nil {
 		return 0, false
 	}
 	bs := uint64(st.Bsize)
@@ -556,17 +1025,16 @@ func statfsUsedBytes(mountPath string) (uint64, bool) {
 // subtracted so "used" reflects user data, not XFS's per-AG reservation
 // pool. Returns ok=false when the mount is missing or statfs fails.
 //
-// Baseline discovery: on first read the current "used" is assumed to be the
-// metadata baseline and persisted under control_plane_config. Subsequent
-// reads subtract it. If a tier is reformatted the baseline must be cleared
-// (the create path does this).
+// The baseline is captured at provisioning time. If it is missing, report raw
+// statfs usage rather than guessing: a lazy first read can happen after user
+// data is already present, which would hide real usage.
 func (h *ArraysHandler) backingFSUsage(poolName, tierName string) (capacity, used, free uint64, ok bool) {
 	mountPath := tier.PerTierBackingMount(poolName, tierName)
 	if !isMountPathBusy(mountPath) {
 		return 0, 0, 0, false
 	}
 	var st syscall.Statfs_t
-	if err := syscall.Statfs(mountPath, &st); err != nil {
+	if err := statfsPath(mountPath, &st); err != nil {
 		return 0, 0, 0, false
 	}
 	bs := uint64(st.Bsize)
@@ -574,11 +1042,15 @@ func (h *ArraysHandler) backingFSUsage(poolName, tierName string) (capacity, use
 	free = st.Bavail * bs
 	used = (st.Blocks - st.Bfree) * bs
 
-	baseline := h.tierBaselineBytes(poolName, tierName, used)
+	baseline := h.tierBaselineBytes(poolName, tierName)
+	if baseline > capacity/20 {
+		// Empty filesystem metadata should be small. A larger stored baseline
+		// was almost certainly captured after user data arrived; discard it so
+		// the UI cannot report free space as total capacity or hide real usage.
+		_ = h.store.SetControlPlaneConfig("tier_baseline."+poolName+"."+tierName, "")
+		baseline = 0
+	}
 	if baseline > 0 {
-		if capacity > baseline {
-			capacity -= baseline
-		}
 		if used > baseline {
 			used -= baseline
 		} else {
@@ -589,11 +1061,9 @@ func (h *ArraysHandler) backingFSUsage(poolName, tierName string) (capacity, use
 }
 
 // tierBaselineBytes returns the recorded empty-FS metadata baseline for a
-// tier. If no baseline is recorded, currentUsed is treated as the baseline
-// (since the caller is computing it right after mkfs on a fresh tier) and
-// persisted. This self-heal keeps behavior correct across tierd restarts
-// without requiring explicit seeding.
-func (h *ArraysHandler) tierBaselineBytes(poolName, tierName string, currentUsed uint64) uint64 {
+// tier. Missing or unparsable values are treated as zero so late discovery
+// cannot mistake existing user data for empty-filesystem metadata overhead.
+func (h *ArraysHandler) tierBaselineBytes(poolName, tierName string) uint64 {
 	key := "tier_baseline." + poolName + "." + tierName
 	val, err := h.store.GetControlPlaneConfig(key)
 	if err == nil && val != "" {
@@ -601,9 +1071,7 @@ func (h *ArraysHandler) tierBaselineBytes(poolName, tierName string, currentUsed
 			return n
 		}
 	}
-	// First sighting — record currentUsed as baseline.
-	_ = h.store.SetControlPlaneConfig(key, strconv.FormatUint(currentUsed, 10))
-	return currentUsed
+	return 0
 }
 
 func (h *ArraysHandler) resolveArrayByID(arrayID int64) (*richArray, error) {
@@ -649,7 +1117,7 @@ func (h *ArraysHandler) listTiers(w http.ResponseWriter, r *http.Request) {
 func (h *ArraysHandler) createTier(w http.ResponseWriter, r *http.Request) {
 	var req createTierRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	if !validateTierNameRequest(w, req.Name) {
@@ -689,7 +1157,7 @@ func (h *ArraysHandler) createTier(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
-	if err := h.store.CreateTierPool(req.Name, filesystem, tierDefs); err != nil {
+	if err := h.store.CreateTierPoolWithOptions(req.Name, filesystem, tierDefs, req.MetaOnFastest); err != nil {
 		if isCreateTierConflict(err) {
 			jsonError(w, fmt.Sprintf("tier %s already exists", req.Name), http.StatusConflict)
 			return
@@ -714,18 +1182,28 @@ func (h *ArraysHandler) createTier(w http.ResponseWriter, r *http.Request) {
 	h.invalidateAll()
 	w.WriteHeader(http.StatusCreated)
 	resp := createTierResponse{
-		Name:          created.Name,
-		Filesystem:    created.Filesystem,
-		State:         created.State,
-		MountPoint:    created.MountPoint,
-		CapacityBytes: 0,
+		Name:             created.Name,
+		Filesystem:       created.Filesystem,
+		State:            created.State,
+		MountPoint:       created.MountPoint,
+		CapacityBytes:    0,
 		UsedBytes:        0,
 		CreatedAt:        created.CreatedAt,
 		UpdatedAt:        created.UpdatedAt,
 		LastReconciledAt: nil,
 		Tiers:            make([]createTierDefinitionResponse, 0, len(tierDefs)),
 	}
+	slowestRank := 0
 	for _, tier := range tierDefs {
+		if tier.Rank > slowestRank {
+			slowestRank = tier.Rank
+		}
+	}
+	for _, tier := range tierDefs {
+		targetFillPct := 50
+		if tier.Rank == slowestRank {
+			targetFillPct = 95
+		}
 		resp.Tiers = append(resp.Tiers, createTierDefinitionResponse{
 			Name:             tier.Name,
 			Rank:             tier.Rank,
@@ -733,7 +1211,7 @@ func (h *ArraysHandler) createTier(w http.ResponseWriter, r *http.Request) {
 			ArrayID:          nil,
 			PVDevice:         nil,
 			CapacityBytes:    0,
-			TargetFillPct:    50,
+			TargetFillPct:    targetFillPct,
 			FullThresholdPct: 95,
 		})
 	}
@@ -750,12 +1228,12 @@ func (h *ArraysHandler) deleteTier(w http.ResponseWriter, r *http.Request, tierN
 	var req deleteTierRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		unlock()
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	if req.ConfirmPoolName != tierName {
 		unlock()
-		jsonError(w, "confirm_pool_name must exactly match the pool name", http.StatusBadRequest)
+		jsonErrorCoded(w, "confirm_pool_name must exactly match the pool name", http.StatusBadRequest, "tiers.pool_name_mismatch")
 		return
 	}
 
@@ -763,7 +1241,7 @@ func (h *ArraysHandler) deleteTier(w http.ResponseWriter, r *http.Request, tierN
 	if err != nil {
 		unlock()
 		if err == db.ErrNotFound {
-			http.Error(w, `{"error":"tier not found"}`, http.StatusNotFound)
+			jsonErrorCoded(w, "tier not found", http.StatusNotFound, "tiers.tier_not_found")
 			return
 		}
 		serverError(w, err)
@@ -794,7 +1272,12 @@ func (h *ArraysHandler) deleteTier(w http.ResponseWriter, r *http.Request, tierN
 	}
 
 	// Release the lock and return immediately so the UI can poll the
-	// "destroying" state. The goroutine re-acquires the lock for teardown.
+	// "destroying" state. The DB state itself is the gate from here
+	// on — every mutating handler checks for TierPoolStateDestroying
+	// and rejects with 409. Holding lockPool through the teardown
+	// would force concurrent createTier/assign requests to block on
+	// the mutex and time out at the nginx layer (504) instead of
+	// failing fast.
 	unlock()
 	h.invalidateAll()
 	_ = json.NewEncoder(w).Encode(map[string]string{"state": "destroying"})
@@ -805,8 +1288,6 @@ func (h *ArraysHandler) deleteTier(w http.ResponseWriter, r *http.Request, tierN
 				h.asyncDone <- struct{}{}
 			}
 		}()
-		unlock := h.lockPool(tierName)
-		defer unlock()
 		if err := h.destroyTierPool(t); err != nil {
 			_ = h.store.SetTierInstanceDestroyingReason(tierName, err.Error())
 			h.invalidateAll()
@@ -861,7 +1342,7 @@ func (h *ArraysHandler) destroyTierPool(pool *db.TierInstance) error {
 
 	// Cancel and remove any backup_configs pointing at this pool's mount
 	// before tearing down the filesystem. Otherwise a running rsync will
-	// keep the FUSE mount busy (EBUSY on umount) and any backup scheduled
+	// keep the smoothfs mount busy (EBUSY on umount) and any backup scheduled
 	// against this path will immediately recreate files as soon as the pool
 	// is re-provisioned.
 	if n, err := h.purgeBackupsForPath(pool.MountPoint); err != nil {
@@ -870,8 +1351,8 @@ func (h *ArraysHandler) destroyTierPool(pool *db.TierInstance) error {
 		log.Printf("destroy pool %s: purged %d backup config(s) under %s", pool.Name, n, pool.MountPoint)
 	}
 
-	// Stop FUSE daemons and tear down backing mounts for any managed
-	// namespaces on this pool. Without this, the FUSE daemon keeps the
+	// Stop smoothfs mounts and tear down backing mounts for any managed
+	// namespaces on this pool. Without this, the smoothfs mount keeps the
 	// mount point busy and the next create attempt fails with "already
 	// mounted".
 	if err := h.destroyPoolNamespaces(pool.Name); err != nil {
@@ -944,8 +1425,28 @@ func (h *ArraysHandler) destroyTierPool(pool *db.TierInstance) error {
 		// name re-discovers its own.
 		_ = h.store.SetControlPlaneConfig("tier_baseline."+pool.Name+"."+slot.Name, "")
 
+		// Non-mdadm backings (zfs/btrfs/bcachefs) have nothing to do with
+		// LVM — dispatch straight to the backend's Destroy and move on to
+		// the next slot. The PV/VG/LV teardown below is all mdadm-only.
+		if slot.BackingKind != "" && slot.BackingKind != "mdadm" {
+			if b, err := backend.Lookup(slot.BackingKind); err == nil {
+				if err := b.Destroy(pool.Name, slot.Name, slot.BackingRef, backingMount); err != nil {
+					log.Printf("destroy pool %s: %s backend destroy %s: %v",
+						pool.Name, slot.BackingKind, slot.Name, err)
+				}
+			} else {
+				log.Printf("destroy pool %s: unknown backing kind %q for slot %s: %v",
+					pool.Name, slot.BackingKind, slot.Name, err)
+			}
+			_ = os.Remove(backingMount)
+			if err := h.store.ClearTierAssignment(pool.Name, slot.Name); err != nil {
+				return fmt.Errorf("clear tier slot %s: %w", slot.Name, err)
+			}
+			continue
+		}
+
 		// Unmount the per-tier backing mount if active. If normal umount
-		// fails because processes (rsync, orphan FUSE fds) still hold
+		// fails because processes (rsync, orphan smoothfs fds) still hold
 		// files on the mount, SIGKILL everything touching it and retry.
 		// This is aggressive but correct: the user asked to destroy the
 		// tier, anything still using it is orphan work that must yield.
@@ -1055,8 +1556,10 @@ func (h *ArraysHandler) ResumeDestroyingPools() {
 		}
 		log.Printf("resume destroying: retrying teardown for pool %q", p.Name)
 		go func() {
-			unlock := h.lockPool(p.Name)
-			defer unlock()
+			// No lockPool here for the same reason as the
+			// async destroy goroutine in deleteTier — the
+			// "destroying" DB state is the authoritative gate
+			// for concurrent mutations.
 			if err := h.destroyTierPool(&p); err != nil {
 				log.Printf("resume destroying: pool %q: %v", p.Name, err)
 				_ = h.store.SetTierInstanceDestroyingReason(p.Name, err.Error())
@@ -1081,7 +1584,7 @@ func (h *ArraysHandler) assignTierArray(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		unlock()
 		if err == db.ErrNotFound {
-			http.Error(w, `{"error":"tier not found"}`, http.StatusNotFound)
+			jsonErrorCoded(w, "tier not found", http.StatusNotFound, "tiers.tier_not_found")
 			return
 		}
 		serverError(w, err)
@@ -1095,43 +1598,76 @@ func (h *ArraysHandler) assignTierArray(w http.ResponseWriter, r *http.Request, 
 	var req assignTierArrayRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		unlock()
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
-	array, err := h.resolveArrayByID(req.ArrayID)
-	if err != nil {
-		unlock()
-		if err == db.ErrNotFound {
-			http.Error(w, `{"error":"array not found"}`, http.StatusNotFound)
-			return
-		}
-		jsonError(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	switch array.State {
-	case "active", "degraded", "clean":
-	default:
-		unlock()
-		jsonError(w, fmt.Sprintf("array %d is in state %s", req.ArrayID, array.State), http.StatusUnprocessableEntity)
-		return
+
+	kind := req.Kind
+	if kind == "" {
+		kind = "mdadm"
 	}
 
 	if _, err := h.store.GetTierSlot(poolName, tierName); err != nil {
 		unlock()
 		if err == db.ErrNotFound {
-			http.Error(w, `{"error":"tier slot not found"}`, http.StatusNotFound)
+			jsonErrorCoded(w, "tier slot not found", http.StatusNotFound, "tiers.slot_not_found")
 			return
 		}
 		serverError(w, err)
 		return
 	}
-	if err := h.store.AssignArrayToTier(poolName, tierName, req.ArrayID, array.Path); err != nil {
-		unlock()
-		if err == db.ErrNotFound {
-			http.Error(w, `{"error":"tier slot not found"}`, http.StatusNotFound)
+
+	switch kind {
+	case "mdadm":
+		if req.ArrayID <= 0 {
+			unlock()
+			jsonErrorCoded(w, "array_id required for mdadm backing", http.StatusBadRequest, "tiers.array_id_required")
 			return
 		}
-		jsonError(w, err.Error(), http.StatusConflict)
+		array, err := h.resolveArrayByID(req.ArrayID)
+		if err != nil {
+			unlock()
+			if err == db.ErrNotFound {
+				jsonErrorCoded(w, "array not found", http.StatusNotFound, "tiers.array_not_found")
+				return
+			}
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch array.State {
+		case "active", "degraded", "clean":
+		default:
+			unlock()
+			jsonError(w, fmt.Sprintf("array %d is in state %s", req.ArrayID, array.State), http.StatusUnprocessableEntity)
+			return
+		}
+		if err := h.store.AssignArrayToTier(poolName, tierName, req.ArrayID, array.Path); err != nil {
+			unlock()
+			if err == db.ErrNotFound {
+				jsonErrorCoded(w, "tier slot not found", http.StatusNotFound, "tiers.slot_not_found")
+				return
+			}
+			jsonError(w, err.Error(), http.StatusConflict)
+			return
+		}
+	case "zfs", "btrfs", "bcachefs":
+		if strings.TrimSpace(req.BackingRef) == "" {
+			unlock()
+			jsonError(w, "backing_ref required for "+kind+" backing", http.StatusBadRequest)
+			return
+		}
+		if err := h.store.AssignBackingToTier(poolName, tierName, kind, req.BackingRef); err != nil {
+			unlock()
+			if err == db.ErrNotFound {
+				jsonErrorCoded(w, "tier slot not found", http.StatusNotFound, "tiers.slot_not_found")
+				return
+			}
+			jsonError(w, err.Error(), http.StatusConflict)
+			return
+		}
+	default:
+		unlock()
+		jsonError(w, "unsupported backing kind: "+kind, http.StatusBadRequest)
 		return
 	}
 
@@ -1171,7 +1707,7 @@ func (h *ArraysHandler) assignTierArray(w http.ResponseWriter, r *http.Request, 
 				strconv.FormatUint(used, 10),
 			)
 		}
-		// Ensure a FUSE-managed namespace exists so writes to /mnt/{pool}
+		// Ensure a smoothfs-backed namespace exists so writes to /mnt/{pool}
 		// are routed through the tiering daemon to the backing stores.
 		if err := h.ensureNamespace(poolName); err != nil {
 			log.Printf("ensure namespace for pool %q: %v", poolName, err)
@@ -1183,10 +1719,6 @@ func (h *ArraysHandler) assignTierArray(w http.ResponseWriter, r *http.Request, 
 		}
 		h.invalidateAll()
 	}()
-}
-
-func (h *ArraysHandler) unassignTierArray(w http.ResponseWriter, r *http.Request, poolName, tierName string) {
-	jsonError(w, "tier downsize is not supported", http.StatusMethodNotAllowed)
 }
 
 // createTierLevelRequest is the body for POST /api/tiers/{name}/levels.
@@ -1225,7 +1757,7 @@ func (h *ArraysHandler) routeTierLevels(w http.ResponseWriter, r *http.Request, 
 			resp, err := poolDetailFromStore(h, poolName)
 			if err != nil {
 				if err == db.ErrNotFound {
-					http.Error(w, `{"error":"pool not found"}`, http.StatusNotFound)
+					jsonErrorCoded(w, "pool not found", http.StatusNotFound, "tiers.pool_not_found")
 					return
 				}
 				serverError(w, err)
@@ -1235,7 +1767,7 @@ func (h *ArraysHandler) routeTierLevels(w http.ResponseWriter, r *http.Request, 
 		case http.MethodPost:
 			h.addTierLevel(w, r, poolName)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 		return
 	}
@@ -1246,23 +1778,23 @@ func (h *ArraysHandler) routeTierLevels(w http.ResponseWriter, r *http.Request, 
 	case http.MethodDelete:
 		h.deleteTierLevel(w, r, poolName, levelName)
 	default:
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		jsonMethodNotAllowed(w)
 	}
 }
 
 func (h *ArraysHandler) addTierLevel(w http.ResponseWriter, r *http.Request, poolName string) {
 	var req createTierLevelRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	req.LevelName = strings.TrimSpace(req.LevelName)
 	if req.LevelName == "" {
-		jsonError(w, "level_name is required", http.StatusBadRequest)
+		jsonErrorCoded(w, "level_name is required", http.StatusBadRequest, "tiers.level_name_required")
 		return
 	}
 	if req.Rank <= 0 {
-		jsonError(w, "rank must be a positive integer", http.StatusBadRequest)
+		jsonErrorCoded(w, "rank must be a positive integer", http.StatusBadRequest, "tiers.rank_invalid")
 		return
 	}
 
@@ -1274,10 +1806,25 @@ func (h *ArraysHandler) addTierLevel(w http.ResponseWriter, r *http.Request, poo
 	if req.FullThresholdPct != nil {
 		fullThreshold = *req.FullThresholdPct
 	}
+	slots, err := h.store.ListTierSlots(poolName)
+	if err != nil {
+		if err == db.ErrNotFound {
+			jsonErrorCoded(w, "pool not found", http.StatusNotFound, "tiers.pool_not_found")
+			return
+		}
+		serverError(w, err)
+		return
+	}
+	if req.Rank > poolSlowestRank(slots) {
+		targetFill = fullThreshold
+	} else if targetFill >= fullThreshold {
+		jsonErrorCoded(w, "target_fill_pct must be less than full_threshold_pct", http.StatusBadRequest, "tiers.fill_thresholds_invalid")
+		return
+	}
 
 	if err := h.store.AddTierSlot(poolName, req.LevelName, req.Rank, targetFill, fullThreshold); err != nil {
 		if err == db.ErrNotFound {
-			http.Error(w, `{"error":"pool not found"}`, http.StatusNotFound)
+			jsonErrorCoded(w, "pool not found", http.StatusNotFound, "tiers.pool_not_found")
 			return
 		}
 		jsonError(w, err.Error(), http.StatusBadRequest)
@@ -1299,7 +1846,7 @@ func (h *ArraysHandler) addTierLevel(w http.ResponseWriter, r *http.Request, poo
 		CapacityBytes:    0,
 		UsedBytes:        0,
 		FreeBytes:        0,
-		TargetFillPct:    slot.TargetFillPct,
+		TargetFillPct:    effectiveSlotTargetFill(slot.Rank, slot.TargetFillPct, slot.FullThresholdPct, slot.Rank),
 		FullThresholdPct: slot.FullThresholdPct,
 	})
 }
@@ -1307,14 +1854,14 @@ func (h *ArraysHandler) addTierLevel(w http.ResponseWriter, r *http.Request, poo
 func (h *ArraysHandler) updateTierLevel(w http.ResponseWriter, r *http.Request, poolName, levelName string) {
 	var req updateTierLevelRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 
 	slot, err := h.store.GetTierSlot(poolName, levelName)
 	if err != nil {
 		if err == db.ErrNotFound {
-			http.Error(w, `{"error":"tier level not found"}`, http.StatusNotFound)
+			jsonErrorCoded(w, "tier level not found", http.StatusNotFound, "tiers.level_not_found")
 			return
 		}
 		serverError(w, err)
@@ -1329,8 +1876,16 @@ func (h *ArraysHandler) updateTierLevel(w http.ResponseWriter, r *http.Request, 
 	if req.FullThresholdPct != nil {
 		fullThreshold = *req.FullThresholdPct
 	}
-	if targetFill >= fullThreshold {
-		jsonError(w, "target_fill_pct must be less than full_threshold_pct", http.StatusBadRequest)
+	slots, err := h.store.ListTierSlots(poolName)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	slowestRank := poolSlowestRank(slots)
+	if slot.Rank == slowestRank {
+		targetFill = fullThreshold
+	} else if targetFill >= fullThreshold {
+		jsonErrorCoded(w, "target_fill_pct must be less than full_threshold_pct", http.StatusBadRequest, "tiers.fill_thresholds_invalid")
 		return
 	}
 
@@ -1361,7 +1916,7 @@ func (h *ArraysHandler) updateTierLevel(w http.ResponseWriter, r *http.Request, 
 		CapacityBytes:    0,
 		UsedBytes:        0,
 		FreeBytes:        0,
-		TargetFillPct:    slot.TargetFillPct,
+		TargetFillPct:    effectiveSlotTargetFill(slot.Rank, slot.TargetFillPct, slot.FullThresholdPct, slowestRank),
 		FullThresholdPct: slot.FullThresholdPct,
 	})
 }
@@ -1370,9 +1925,9 @@ func (h *ArraysHandler) deleteTierLevel(w http.ResponseWriter, r *http.Request, 
 	if err := h.store.DeleteTierSlot(poolName, levelName); err != nil {
 		switch err {
 		case db.ErrNotFound:
-			http.Error(w, `{"error":"tier level not found"}`, http.StatusNotFound)
+			jsonErrorCoded(w, "tier level not found", http.StatusNotFound, "tiers.level_not_found")
 		case db.ErrTierSlotInUse:
-			jsonError(w, "tier level has an assigned PV; unassign the array before deleting", http.StatusConflict)
+			jsonErrorCoded(w, "tier level has an assigned PV; unassign the array before deleting", http.StatusConflict, "tiers.level_has_pv")
 		default:
 			serverError(w, err)
 		}

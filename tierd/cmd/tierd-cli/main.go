@@ -1,0 +1,488 @@
+// tierd-cli is the operator CLI for tierd. The Phase 2 surface wires
+// smoothfs subcommands to the kernel via generic netlink — inspect,
+// promote, demote, quiesce, reconcile.
+package main
+
+import (
+	"bufio"
+	"encoding/hex"
+	"flag"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	smoothfsclient "github.com/RakuenSoftware/smoothfs"
+	"github.com/google/uuid"
+
+	"github.com/JBailes/SmoothNAS/tierd/internal/iscsi"
+)
+
+const exTempFail = 75
+
+func usage() {
+	fmt.Fprintf(os.Stderr, `tierd-cli — operator CLI for tierd
+
+Usage:
+  tierd-cli smoothfs <subcommand> --pool <uuid> [args...]
+  tierd-cli iscsi    <subcommand> [args...]
+
+Subcommands (smoothfs):
+  create-pool  --name <n> --tiers <a:b:c> [--uuid <u>] [--mount-base <path>]
+                                                   Write a systemd mount unit for a new smoothfs
+                                                   pool and enable --now it. Phase 2.5's mount-event
+                                                   auto-discovery handles the kernel-side registration.
+  destroy-pool --name <n> [--mount-base <path>]    Stop + disable the mount unit, remove the file.
+  list-pools                                       Systemd's view of smoothfs mount units on this host.
+  inspect   --pool <uuid> --oid <hex>             Print placement record for one object.
+  promote   --pool <uuid> --oid <hex> --to <rank> --seq <n> [--force]  Schedule a move to tier rank N.
+  demote    --pool <uuid> --oid <hex> --to <rank> --seq <n> [--force]  Same; planner-side semantics differ.
+  quiesce   --pool <uuid>                          Drain in-flight cutovers, refuse new MOVE_PLAN.
+  reconcile --pool <uuid> [--reason <txt>]         Lift quiesce; re-arm heat drain.
+  revoke    --pool <uuid> --oid <hex>               Force-tear-down writable mappings of <oid>
+                                                    so a subsequent promote/demote can proceed.
+
+Subcommands (iscsi):
+  create-fileio --iqn <iqn> --file <path>         Create a file-backed LUN via LIO. The backing
+                                                    file must already exist with its target size.
+                                                    Auto-pins PIN_LUN on smoothfs mounts (§6.5).
+  destroy       --iqn <iqn> [--file <path>]       Tear down the target; clears PIN_LUN if --file
+                                                    names a smoothfs-backed path.
+
+The promote/demote subcommands send a MOVE_PLAN; tierd's worker pool
+runs copy/verify/cutover/cleanup. Use 'inspect' to follow progress.
+`)
+}
+
+func main() {
+	flag.Usage = usage
+	flag.Parse()
+	args := flag.Args()
+	if len(args) < 1 {
+		usage()
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "smoothfs":
+		smoothfsCmd(args[1:])
+	case "iscsi":
+		iscsiCmd(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "tierd-cli: unknown command %q\n", args[0])
+		usage()
+		os.Exit(2)
+	}
+}
+
+func iscsiCmd(args []string) {
+	if len(args) < 1 {
+		usage()
+		os.Exit(2)
+	}
+	sub := args[0]
+	rest := args[1:]
+	fs := flag.NewFlagSet("iscsi "+sub, flag.ContinueOnError)
+	iqn := fs.String("iqn", "", "target IQN (required)")
+	path := fs.String("file", "", "backing file path")
+	if err := fs.Parse(rest); err != nil {
+		os.Exit(2)
+	}
+	if *iqn == "" {
+		fmt.Fprintln(os.Stderr, "tierd-cli iscsi: --iqn is required")
+		os.Exit(2)
+	}
+
+	switch sub {
+	case "create-fileio":
+		if *path == "" {
+			fmt.Fprintln(os.Stderr, "tierd-cli iscsi create-fileio: --file is required")
+			os.Exit(2)
+		}
+		if err := iscsi.CreateFileBackedTarget(*iqn, *path); err != nil {
+			fmt.Fprintf(os.Stderr, "create-fileio: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("created fileio target %s backing %s\n", *iqn, *path)
+	case "destroy":
+		if err := iscsi.DestroyFileBackedTarget(*iqn, *path); err != nil {
+			fmt.Fprintf(os.Stderr, "destroy: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("destroyed target %s\n", *iqn)
+	default:
+		fmt.Fprintf(os.Stderr, "tierd-cli iscsi: unknown subcommand %q\n", sub)
+		usage()
+		os.Exit(2)
+	}
+}
+
+// smoothfsPoolCmd handles the Phase 7.8 pool-lifecycle commands
+// (create-pool / destroy-pool / list-pools). Like the iscsi
+// subcommands, these call the library functions directly — they
+// drive systemd on the local host and don't need tierd's REST
+// auth, which also means CLI-created pools don't write to tierd's
+// SQLite. That's intentional and matches the iscsi CLI's pattern;
+// operators who want the persisted view should use the REST API
+// through the web UI. The systemd mount unit on disk is the real
+// source of truth either way.
+func smoothfsPoolCmd(sub string, args []string) {
+	fs := flag.NewFlagSet("smoothfs "+sub, flag.ContinueOnError)
+	name := fs.String("name", "", "pool name (lowercase alnum + ._-, ≤63)")
+	tierStr := fs.String("tiers", "", "colon-separated ordered tier paths (fastest first)")
+	uuidStr := fs.String("uuid", "", "explicit pool UUID (optional; autogenerated otherwise)")
+	mountBase := fs.String("mount-base", "", "mountpoint parent (default "+smoothfsclient.DefaultMountBase+")")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+
+	switch sub {
+	case "create-pool":
+		if *name == "" || *tierStr == "" {
+			fmt.Fprintln(os.Stderr, "tierd-cli smoothfs create-pool: --name and --tiers are required")
+			os.Exit(2)
+		}
+		req := smoothfsclient.CreateManagedPoolRequest{
+			Name:      *name,
+			Tiers:     strings.Split(*tierStr, ":"),
+			MountBase: *mountBase,
+		}
+		if *uuidStr != "" {
+			u, err := uuid.Parse(*uuidStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "bad --uuid: %v\n", err)
+				os.Exit(2)
+			}
+			req.UUID = u
+		}
+		p, err := smoothfsclient.CreateManagedPool(req)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "create-pool: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("created pool %s (uuid=%s) at %s\n  unit: %s\n",
+			p.Name, p.UUID, p.Mountpoint, p.UnitPath)
+	case "destroy-pool":
+		if *name == "" {
+			fmt.Fprintln(os.Stderr, "tierd-cli smoothfs destroy-pool: --name is required")
+			os.Exit(2)
+		}
+		// DestroyManagedPool wants the whole ManagedPool so it can
+		// resolve the unit path; reconstruct it from the name the
+		// operator gave us using the same helpers the library
+		// exposes (keeps CLI + REST behaviour identical — the REST
+		// path looks up the unit path from the DB, but the unit
+		// filename derivation is pure).
+		mp := smoothfsclient.ManagedPool{
+			Name:       *name,
+			Mountpoint: smoothfsclient.MountpointForPool(*mountBase, *name),
+		}
+		mp.UnitPath = "/etc/systemd/system/" + smoothfsclient.UnitFilenameFor(mp.Mountpoint)
+		if err := smoothfsclient.DestroyManagedPool(mp); err != nil {
+			fmt.Fprintf(os.Stderr, "destroy-pool: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("destroyed pool %s\n", mp.Name)
+	case "list-pools":
+		// No local state to enumerate — the CLI can't see tierd's
+		// DB without coordinating on the sqlite lock. Point the
+		// operator at systemd, which *is* the authoritative list.
+		out, err := exec.Command("systemctl", "list-units",
+			"--type=mount", "--state=active,loaded",
+			"--no-pager", "--plain", "--quiet").Output()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "list-pools: %v\n", err)
+			os.Exit(1)
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 {
+				continue
+			}
+			unit := fields[0]
+			// Only show units whose backing was declared smoothfs.
+			// `systemctl cat` is cheap and gives us the [Mount]
+			// section to filter on.
+			body, err := exec.Command("systemctl", "cat", unit).Output()
+			if err != nil {
+				continue
+			}
+			if strings.Contains(string(body), "Type=smoothfs") {
+				fmt.Println(unit)
+			}
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "smoothfsPoolCmd: unreachable %q\n", sub)
+		os.Exit(2)
+	}
+}
+
+func smoothfsCmd(args []string) {
+	if len(args) < 1 {
+		usage()
+		os.Exit(2)
+	}
+	sub := args[0]
+	rest := args[1:]
+
+	// Phase 7.8 — pool-lifecycle subcommands aren't addressed by
+	// a pool UUID (they're creating or listing them), so they
+	// take a disjoint flag set and short-circuit before the
+	// shared `--pool`-required parsing below.
+	switch sub {
+	case "create-pool", "destroy-pool", "list-pools":
+		smoothfsPoolCmd(sub, rest)
+		return
+	}
+
+	fs := flag.NewFlagSet("smoothfs "+sub, flag.ContinueOnError)
+	poolStr := fs.String("pool", "", "pool UUID (hyphenated)")
+	oidStr := fs.String("oid", "", "object_id (32 hex chars)")
+	to := fs.Int("to", -1, "destination tier rank (0=fastest)")
+	seq := fs.Uint64("seq", 0, "transaction sequence number")
+	reason := fs.String("reason", "", "reconcile reason")
+	force := fs.Bool("force", false, "bypass a PIN_LEASE pin; kernel fires FS_MODIFY so Samba can break its lease (promote/demote only)")
+	if err := fs.Parse(rest); err != nil {
+		os.Exit(2)
+	}
+
+	if *poolStr == "" {
+		fmt.Fprintln(os.Stderr, "--pool is required")
+		os.Exit(2)
+	}
+	pool, err := uuid.Parse(*poolStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bad --pool uuid: %v\n", err)
+		os.Exit(2)
+	}
+
+	client, err := smoothfsclient.Open()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "smoothfs netlink: %v\n", err)
+		os.Exit(exTempFail)
+	}
+	defer client.Close()
+
+	switch sub {
+	case "inspect":
+		oid := decodeOID(*oidStr)
+		res, err := client.Inspect(pool, oid)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "inspect: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("object_id:       %s\n", hex.EncodeToString(res.OID[:]))
+		fmt.Printf("current_tier:    %d\n", res.CurrentTier)
+		fmt.Printf("intended_tier:   %d\n", res.IntendedTier)
+		fmt.Printf("movement_state:  %s\n", res.MovementState)
+		fmt.Printf("pin_state:       %s\n", res.PinState)
+		fmt.Printf("cutover_gen:     %d\n", res.Generation)
+		fmt.Printf("transaction_seq: %d\n", res.TransactionSeq)
+		fmt.Printf("rel_path:        %q\n", res.RelPath)
+
+	case "cutover":
+		// Operator-issued cutover commit. Used for manual end-to-end
+		// validation; tierd's worker normally calls MoveCutover after
+		// it has copied + verified the file. Caller is responsible
+		// for having staged the file on the destination tier.
+		if *seq == 0 {
+			fmt.Fprintln(os.Stderr, "--seq is required (matching the seq passed to promote/demote)")
+			os.Exit(2)
+		}
+		oid := decodeOID(*oidStr)
+		if err := client.MoveCutover(pool, oid, *seq); err != nil {
+			fmt.Fprintf(os.Stderr, "cutover: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("cutover committed: object %s (seq=%d)\n", *oidStr, *seq)
+
+	case "promote", "demote":
+		if *to < 0 || *to > 255 {
+			fmt.Fprintln(os.Stderr, "--to is required (0=fastest)")
+			os.Exit(2)
+		}
+		if *seq == 0 {
+			fmt.Fprintln(os.Stderr, "--seq is required (positive transaction id)")
+			os.Exit(2)
+		}
+		oid := decodeOID(*oidStr)
+		if err := client.MovePlanForce(pool, oid, uint8(*to), *seq, *force); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", sub, err)
+			os.Exit(1)
+		}
+		forceNote := ""
+		if *force {
+			forceNote = " (force: bypasses PIN_LEASE, fsnotify on cutover)"
+		}
+		fmt.Printf("%s submitted: object %s → tier %d (seq=%d)%s\n",
+			sub, *oidStr, *to, *seq, forceNote)
+
+	case "quiesce":
+		if err := client.Quiesce(pool); err != nil {
+			fmt.Fprintf(os.Stderr, "quiesce: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("quiesce: pool drained; new MOVE_PLAN will be refused with EAGAIN")
+
+	case "reconcile":
+		if err := client.Reconcile(pool, *reason); err != nil {
+			fmt.Fprintf(os.Stderr, "reconcile: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("reconcile: quiesce lifted; heat drain re-armed")
+
+	case "revoke":
+		oid := decodeOID(*oidStr)
+		ins, err := client.Inspect(pool, oid)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "revoke inspect: %v\n", err)
+			os.Exit(1)
+		}
+		if err := client.RevokeMappings(pool, oid); err != nil {
+			fmt.Fprintf(os.Stderr, "revoke: %v\n", err)
+			os.Exit(1)
+		}
+		mappedPath := ""
+		if ins.CurrentTierPath != "" && ins.RelPath != "" {
+			mappedPath = filepath.Clean(filepath.Join(ins.CurrentTierPath, ins.RelPath))
+		}
+		terminated, killed, err := killMappingHolders(mappedPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "revoke holder teardown: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("revoke: %s quiesced; terminated=%d killed=%d path=%q\n",
+			*oidStr, terminated, killed, mappedPath)
+
+	default:
+		fmt.Fprintf(os.Stderr, "tierd-cli smoothfs: unknown subcommand %q\n", sub)
+		usage()
+		os.Exit(2)
+	}
+}
+
+func decodeOID(s string) [16]byte {
+	if s == "" {
+		fmt.Fprintln(os.Stderr, "--oid is required (32 hex chars)")
+		os.Exit(2)
+	}
+	if len(s) != 32 {
+		fmt.Fprintln(os.Stderr, "--oid must be 32 hex chars (16 bytes)")
+		os.Exit(2)
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "--oid hex decode: %v\n", err)
+		os.Exit(2)
+	}
+	var out [16]byte
+	copy(out[:], b)
+	return out
+}
+
+// keep the linker happy on platforms where strconv ends up unused
+var _ = strconv.Itoa
+
+func killMappingHolders(target string) (terminated, killed int, err error) {
+	if target == "" {
+		return 0, 0, nil
+	}
+	self := os.Getpid()
+	pids, err := mappedPIDs(target)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, pid := range pids {
+		if pid == self || pid <= 1 {
+			continue
+		}
+		if err := syscall.Kill(pid, syscall.SIGTERM); err == nil {
+			terminated++
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		remaining, err := mappedPIDs(target)
+		if err != nil {
+			return terminated, killed, err
+		}
+		if countLive(remaining, self) == 0 {
+			return terminated, killed, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	remaining, err := mappedPIDs(target)
+	if err != nil {
+		return terminated, killed, err
+	}
+	for _, pid := range remaining {
+		if pid == self || pid <= 1 {
+			continue
+		}
+		if err := syscall.Kill(pid, syscall.SIGKILL); err == nil {
+			killed++
+		}
+	}
+	return terminated, killed, nil
+}
+
+func countLive(pids []int, self int) int {
+	n := 0
+	for _, pid := range pids {
+		if pid != self && pid > 1 {
+			n++
+		}
+	}
+	return n
+}
+
+func mappedPIDs(target string) ([]int, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	target = filepath.Clean(target)
+	var pids []int
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		if processMapsPath(pid, target) {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
+}
+
+func processMapsPath(pid int, target string) bool {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/maps", pid))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 6 {
+			continue
+		}
+		perms := fields[1]
+		path := strings.Join(fields[5:], " ")
+		path = strings.TrimSuffix(path, " (deleted)")
+		if len(perms) < 4 || perms[1] != 'w' || perms[3] != 's' {
+			continue
+		}
+		if filepath.Clean(path) == target {
+			return true
+		}
+	}
+	return false
+}

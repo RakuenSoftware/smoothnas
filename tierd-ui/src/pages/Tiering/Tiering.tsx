@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useI18n } from '@rakuensoftware/smoothgui';
 import { useToast } from '../../contexts/ToastContext';
 import { api } from '../../api/api';
 import { extractError } from '../../utils/errors';
@@ -15,6 +16,7 @@ function formatTs(ts: string): string {
 }
 
 export default function Tiering() {
+  const { t } = useI18n();
   const toast = useToast();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -30,6 +32,7 @@ export default function Tiering() {
   const [confirmMessage, setConfirmMessage] = useState('');
   const confirmAction = useRef<(() => void) | null>(null);
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadNamespaces(); }, []);
 
   function loadNamespaces() {
@@ -41,7 +44,7 @@ export default function Tiering() {
         setLoading(false);
       })
       .catch(e => {
-        const msg = extractError(e, 'Failed to load tiering namespaces');
+        const msg = extractError(e, t('tiering.error.loadNamespaces'));
         setError(msg);
         setLoading(false);
       });
@@ -59,7 +62,7 @@ export default function Tiering() {
         }
       })
       .catch(e => {
-        toast.error(extractError(e, 'Failed to load namespace'));
+        toast.error(extractError(e, t('tiering.error.loadNamespace')));
         setNsLoading(false);
       });
   }
@@ -72,7 +75,7 @@ export default function Tiering() {
         setSnapsLoading(false);
       })
       .catch(e => {
-        toast.error(extractError(e, 'Failed to load snapshots'));
+        toast.error(extractError(e, t('tiering.error.loadSnapshots')));
         setSnapsLoading(false);
       });
   }
@@ -82,21 +85,19 @@ export default function Tiering() {
     setSnapCreating(true);
     api.createTieringNamespaceSnapshot(selectedNS.id)
       .then(() => {
-        toast.success('Snapshot created');
+        toast.success(t('tiering.toast.snapshotCreated'));
         loadSnapshots(selectedNS.id);
         setSnapCreating(false);
       })
       .catch(e => {
-        toast.error(extractError(e, 'Failed to create snapshot'));
+        toast.error(extractError(e, t('tiering.error.createSnapshot')));
         setSnapCreating(false);
       });
   }
 
   function confirmDeleteSnapshot(snap: any) {
-    setConfirmTitle('Delete Snapshot');
-    setConfirmMessage(
-      `Delete snapshot ${snap.snapshot_id}? This will permanently destroy the ZFS snapshot data for all backing datasets. This cannot be undone.`
-    );
+    setConfirmTitle(t('tiering.confirm.deleteTitle'));
+    setConfirmMessage(t('tiering.confirm.deleteMessage', { id: snap.snapshot_id }));
     confirmAction.current = () => deleteSnapshot(snap.snapshot_id);
     setConfirmVisible(true);
   }
@@ -105,11 +106,11 @@ export default function Tiering() {
     setConfirmVisible(false);
     api.deleteTieringNamespaceSnapshot(selectedNS.id, snapID)
       .then(() => {
-        toast.success('Snapshot deleted');
+        toast.success(t('tiering.toast.snapshotDeleted'));
         setSnapshots(prev => prev.filter(s => s.snapshot_id !== snapID));
       })
       .catch(e => {
-        toast.error(extractError(e, 'Failed to delete snapshot'));
+        toast.error(extractError(e, t('tiering.error.deleteSnapshot')));
       });
   }
 
@@ -120,8 +121,8 @@ export default function Tiering() {
   return (
     <div className="page-content">
       <div className="page-header">
-        <h1>Tiering</h1>
-        <button className="btn secondary" onClick={loadNamespaces}>Refresh</button>
+        <h1>{t('tiering.title')}</h1>
+        <button className="btn secondary" onClick={loadNamespaces}>{t('common.refresh')}</button>
       </div>
 
       <Spinner loading={loading} />
@@ -131,9 +132,9 @@ export default function Tiering() {
         <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'flex-start' }}>
           {/* Namespace list */}
           <div style={{ minWidth: '280px' }}>
-            <h2 style={{ marginBottom: '0.75rem' }}>Namespaces</h2>
+            <h2 style={{ marginBottom: '0.75rem' }}>{t('tiering.section.namespaces')}</h2>
             {namespaces.length === 0 && (
-              <div className="empty-state">No namespaces found.</div>
+              <div className="empty-state">{t('tiering.empty.namespaces')}</div>
             )}
             {namespaces.map(ns => (
               <div
@@ -158,15 +159,15 @@ export default function Tiering() {
                   <h2 style={{ marginBottom: '0.5rem' }}>{selectedNS.name}</h2>
                   <table className="detail-table" style={{ marginBottom: '1.25rem' }}>
                     <tbody>
-                      <tr><td>ID</td><td>{selectedNS.id}</td></tr>
-                      <tr><td>Backend</td><td>{selectedNS.backend_kind}</td></tr>
-                      <tr><td>Kind</td><td>{selectedNS.namespace_kind}</td></tr>
-                      <tr><td>Health</td><td>{selectedNS.health}</td></tr>
-                      <tr><td>Placement</td><td>{selectedNS.placement_state}</td></tr>
-                      <tr><td>Pin State</td><td>{selectedNS.pin_state}</td></tr>
-                      <tr><td>Exposed Path</td><td>{selectedNS.exposed_path || '—'}</td></tr>
+                      <tr><td>{t('tiering.detail.id')}</td><td>{selectedNS.id}</td></tr>
+                      <tr><td>{t('volumes.col.backend')}</td><td>{selectedNS.backend_kind}</td></tr>
+                      <tr><td>{t('tiering.detail.kind')}</td><td>{selectedNS.namespace_kind}</td></tr>
+                      <tr><td>{t('volumes.col.health')}</td><td>{selectedNS.health}</td></tr>
+                      <tr><td>{t('volumes.detail.placement')}</td><td>{selectedNS.placement_state}</td></tr>
+                      <tr><td>{t('tiering.detail.pinState')}</td><td>{selectedNS.pin_state}</td></tr>
+                      <tr><td>{t('tiering.detail.exposedPath')}</td><td>{selectedNS.exposed_path || '—'}</td></tr>
                       {selectedNS.snapshot_mode && (
-                        <tr><td>Snapshot Mode</td><td>{selectedNS.snapshot_mode}</td></tr>
+                        <tr><td>{t('volumes.detail.snapshotMode')}</td><td>{selectedNS.snapshot_mode}</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -182,27 +183,27 @@ export default function Tiering() {
                               onClick={createSnapshot}
                               disabled={snapCreating}
                             >
-                              {snapCreating ? 'Creating…' : 'Take Snapshot'}
+                              {snapCreating ? t('tiers.button.creating') : t('tiering.button.takeSnapshot')}
                             </button>
                           </div>
 
-                          <h3 style={{ marginBottom: '0.5rem' }}>Snapshots</h3>
+                          <h3 style={{ marginBottom: '0.5rem' }}>{t('pools.tab.snapshots')}</h3>
                           <Spinner loading={snapsLoading} />
                           {!snapsLoading && snapshots.length === 0 && (
-                            <div className="empty-state">No snapshots yet.</div>
+                            <div className="empty-state">{t('tiering.empty.snapshots')}</div>
                           )}
                           {!snapsLoading && snapshots.length > 0 && (
                             <>
                               {snapshots.length === 50 && (
                                 <div className="info-note" style={{ marginBottom: '0.5rem' }}>
-                                  Showing 50 most recent snapshots.
+                                  {t('tiering.snapshot.showing50')}
                                 </div>
                               )}
                               <table className="data-table">
                                 <thead>
                                   <tr>
-                                    <th>Created</th>
-                                    <th>Consistency</th>
+                                    <th>{t('snapshots.col.created')}</th>
+                                    <th>{t('tiering.col.consistency')}</th>
                                     <th></th>
                                   </tr>
                                 </thead>
@@ -212,13 +213,13 @@ export default function Tiering() {
                                       <td>{formatTs(snap.created_at)}</td>
                                       <td>
                                         {snap.consistency === 'atomic' ? (
-                                          <span style={{ color: '#4caf50', fontWeight: 600 }}>Atomic</span>
+                                          <span style={{ color: '#4caf50', fontWeight: 600 }}>{t('tiering.consistency.atomic')}</span>
                                         ) : (
                                           <span
                                             style={{ color: '#f44336', fontWeight: 600 }}
-                                            title="This snapshot may not be consistent across all datasets"
+                                            title={t('tiering.consistency.inconsistentTooltip')}
                                           >
-                                            Inconsistent
+                                            {t('tiering.consistency.inconsistent')}
                                           </span>
                                         )}
                                       </td>
@@ -227,7 +228,7 @@ export default function Tiering() {
                                           className="btn danger small"
                                           onClick={() => confirmDeleteSnapshot(snap)}
                                         >
-                                          Delete
+                                          {t('common.delete')}
                                         </button>
                                       </td>
                                     </tr>
@@ -239,9 +240,7 @@ export default function Tiering() {
                         </>
                       ) : (
                         <div className="info-note" style={{ padding: '0.75rem', background: 'var(--info-bg, #1a2a3a)', borderRadius: '4px', borderLeft: '3px solid var(--info-border, #4a90d9)' }}>
-                          Coordinated snapshots require all tier datasets to be in the same ZFS pool.
-                          This namespace uses backing datasets across multiple pools and cannot be
-                          snapshotted consistently.
+                          {t('tiering.snapshot.crossPoolNote')}
                         </div>
                       )}
                     </>
@@ -257,7 +256,7 @@ export default function Tiering() {
         visible={confirmVisible}
         title={confirmTitle}
         message={confirmMessage}
-        confirmText="Delete"
+        confirmText={t('common.delete')}
         confirmClass="btn danger"
         onConfirm={() => confirmAction.current && confirmAction.current()}
         onCancel={() => setConfirmVisible(false)}

@@ -2,20 +2,26 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	smoothfscontrol "github.com/RakuenSoftware/smoothfs/controlplane"
 	sgauth "github.com/RakuenSoftware/smoothgui/auth"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/api"
+	"github.com/JBailes/SmoothNAS/tierd/internal/backup"
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/lvm"
 	"github.com/JBailes/SmoothNAS/tierd/internal/mdadm"
 	"github.com/JBailes/SmoothNAS/tierd/internal/monitor"
+	"github.com/JBailes/SmoothNAS/tierd/internal/network"
+	"github.com/JBailes/SmoothNAS/tierd/internal/nfs"
 	"github.com/JBailes/SmoothNAS/tierd/internal/smart"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tier"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tiering"
@@ -27,14 +33,48 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/updater"
 )
 
+const tierdUsage = `tierd — SmoothNAS storage management daemon
+
+Usage:
+  tierd                    Run the daemon (typically invoked by systemd)
+  tierd --version          Print version and exit
+  tierd --help             Print this help and exit
+
+The daemon listens on 127.0.0.1:8420. For operator commands use tierd-cli.
+`
+
 const defaultAddr = "127.0.0.1:8420"
+
+// systemd-networkd config dir + sysfs root for the default-bond
+// policy. Match the NetworkHandler defaults so all writes land in
+// the same place.
+const (
+	defaultNetworkDir  = "/etc/systemd/network"
+	defaultSysClassNet = "/sys/class/net"
+)
 
 // version is set at build time via -ldflags.
 var version = "0.0.0-dev"
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "__pam_auth" {
-		os.Exit(sgauth.RunPAMHelper(os.Args[2:]))
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "__pam_auth":
+			os.Exit(sgauth.RunPAMHelper(os.Args[2:]))
+		case "__host_init":
+			runHostInit()
+			return
+		case "--version", "-v", "version":
+			fmt.Println(version)
+			return
+		case "--help", "-h", "help":
+			fmt.Print(tierdUsage)
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "tierd: unknown argument %q\n\n", os.Args[1])
+			fmt.Fprint(os.Stderr, tierdUsage)
+			os.Exit(2)
+		}
 	}
 
 	addr := os.Getenv("TIERD_ADDR")
@@ -57,56 +97,21 @@ func main() {
 		log.Fatalf("failed to run migrations: %v", err)
 	}
 
-	// Migrate sharing tables.
-	if err := store.MigrateShares(); err != nil {
-		log.Fatalf("failed to migrate sharing tables: %v", err)
-	}
-
-	// Migrate mdadm tier state into the unified control-plane schema.
-	if err := mdadmadapter.Migrate(store); err != nil {
-		log.Fatalf("failed to migrate mdadm tier state: %v", err)
-	}
-
-	// Migrate backup tables.
-	if err := store.MigrateBackups(); err != nil {
-		log.Fatalf("failed to migrate backup tables: %v", err)
-	}
-
-	// Migrate backup run tracking table.
-	if err := store.MigrateBackupRuns(); err != nil {
-		log.Fatalf("failed to migrate backup_runs table: %v", err)
-	}
-
 	// Any runs marked "running" from a previous tierd instance are now orphaned.
 	if err := store.MarkStaleRunsFailed(); err != nil {
 		log.Printf("warning: could not mark stale backup runs as failed: %v", err)
 	}
-
-	// Ensure the tierd system group exists.
-	users := sgauth.NewUserManager("tierd")
-	if err := users.EnsureGroup(); err != nil {
-		log.Printf("warning: could not ensure tierd group: %v", err)
+	if err := api.ReconcileSharingConfig(store); err != nil {
+		log.Printf("warning: could not reconcile sharing config: %v", err)
 	}
 
-	// Ensure required OS packages are present. This covers existing installs
-	// that predate a package being added to the required list, without needing
-	// the user to apply a full update first. Runs in the background so it does
-	// not delay startup.
-	go updater.EnsureSystemPackages()
-
-	// Heal stripe_cache_size on existing parity RAID arrays. The kernel
-	// default of 256 pages cripples small random write performance on
-	// RAID4/5/6.
-	go mdadm.EnsureStripeCacheSize(mdadm.DefaultStripeCachePages)
-
-	// Raise kernel networking and VM parameters for NAS throughput. Only
-	// writes values that are below the targets, so operator overrides above
-	// our defaults are preserved.
-	go tuning.ApplyNetworkTuning()
-
-	// Raise block device read-ahead for md arrays and member drives from the
-	// kernel default of 128 KB to 4 MB. Only raises — never lowers.
-	go tuning.ApplyBlockTuning()
+	// First-boot default-bond policy: a fresh appliance gets bond0
+	// over every physical Ethernet NIC in balance-alb mode, DHCPed.
+	// Once the bootstrap marker is set, this is a no-op so an
+	// operator's Break Bond / static-IP intent survives restarts.
+	if err := network.ApplyDefaultBondPolicy(store, defaultNetworkDir, defaultSysClassNet); err != nil {
+		log.Printf("warning: could not apply default bond policy: %v", err)
+	}
 
 	// Initialize SMART subsystem.
 	historyStore, err := smart.NewHistoryStore(store.DB())
@@ -160,10 +165,10 @@ func main() {
 		zfsAdapter,
 	)
 
-	// Boot-time adapter reconciliation: ensures FUSE namespaces and daemon
+	// Boot-time adapter reconciliation: ensures smoothfs-backed namespace
 	// processes exist for all healthy pools. Runs in the background so it
 	// does not delay HTTP readiness. After reconcile, open a per-pool meta
-	// store on each pool's fastest-tier backing mount so the FUSE handlers
+	// store on each pool's fastest-tier backing mount so the planner
 	// can record object placement without synchronous SQLite writes.
 	go func() {
 		if err := mdadmAdapter.Reconcile(); err != nil {
@@ -191,12 +196,42 @@ func main() {
 		s.Start()
 	}
 
+	// Optional pprof endpoint for live profiling. Off by default; set
+	// TIERD_PPROF_ADDR to bind (e.g. 127.0.0.1:6060). Intentionally
+	// separate from the API listener so it is never exposed through
+	// nginx and never shares auth/TLS surface with the control API.
+	// net/http/pprof registers its handlers on http.DefaultServeMux as
+	// a side-effect of import, so passing nil here wires them up.
+	if pprofAddr := os.Getenv("TIERD_PPROF_ADDR"); pprofAddr != "" {
+		go func() {
+			log.Printf("pprof listening on %s (/debug/pprof/)", pprofAddr)
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				log.Printf("pprof listener exited: %v", err)
+			}
+		}()
+	}
+
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      router,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
+	}
+
+	// smoothfs control plane (Phase 2). Treats "kernel module not loaded"
+	// as feature-off and continues without it.
+	smoothCtx, smoothCancel := context.WithCancel(context.Background())
+	smoothSvc, smoothErr := smoothfscontrol.NewService(smoothCtx, store.DB(), 4)
+	if smoothErr != nil {
+		log.Printf("smoothfs: not enabled (%v)", smoothErr)
+		smoothSvc = nil
+	} else {
+		go func() {
+			if err := smoothSvc.Run(smoothCtx); err != nil {
+				log.Printf("smoothfs: service ended: %v", err)
+			}
+		}()
 	}
 
 	// Graceful shutdown on SIGINT/SIGTERM.
@@ -233,12 +268,52 @@ func main() {
 	mdadmAdapter.CloseMetaStores()
 	zfsAdapter.CloseMetaStores()
 
+	// Cancel the control plane before closing the netlink sockets so
+	// runEvents exits on context cancellation instead of logging a shutdown
+	// race from a closed descriptor.
+	smoothCancel()
+	if smoothSvc != nil {
+		if err := smoothSvc.Close(); err != nil {
+			log.Printf("smoothfs: close: %v", err)
+		}
+	}
+
 	log.Println("stopped")
+}
+
+func runHostInit() {
+	log.Printf("tierd %s host init starting", version)
+
+	// Tear down /tmp/smoothnas-backup-* mounts left behind by a previous tierd
+	// killed mid-backup. `defer umount` in rsyncMount/runCP does not run on
+	// SIGKILL or crash.
+	backup.CleanupOrphanedMounts()
+
+	// Ensure the tierd system group exists before the API/auth layer comes up.
+	users := sgauth.NewUserManager("tierd")
+	if err := users.EnsureGroup(); err != nil {
+		log.Printf("warning: could not ensure tierd group: %v", err)
+	}
+
+	// Host-level remediation and tuning are boot-time concerns, not part of the
+	// long-lived control-plane process.
+	updater.EnsureSystemPackages()
+	if err := nfs.ApplyServerTuning(); err != nil {
+		log.Printf("warning: could not apply NFS tuning: %v", err)
+	}
+	mdadm.EnsureStripeCacheSize(mdadm.DefaultStripeCachePages)
+	tuning.ApplyNetworkTuning()
+	tuning.ApplyBlockTuning()
+	if err := nfs.ApplyServerTuning(); err != nil {
+		log.Printf("warning: could not apply NFS tuning: %v", err)
+	}
+
+	log.Printf("tierd %s host init complete", version)
 }
 
 // openPoolMetaStores resolves each tier pool's fastest (lowest-rank) tier
 // slot, waits for its backing mount to be ready, and opens a PoolMetaStore
-// under `.tierd-meta/`. Registered with the mdadm adapter so the FUSE hot
+// under `.tierd-meta/`. Registered with the mdadm adapter so the hot
 // path can enqueue placement records asynchronously.
 func openPoolMetaStores(store *db.Store, adapter *mdadmadapter.Adapter) error {
 	pools, err := store.ListTierInstances()
@@ -269,10 +344,15 @@ func openPoolMetaStores(store *db.Store, adapter *mdadmadapter.Adapter) error {
 		}
 		// Build the per-tier list for the meta store. Every assigned and
 		// mounted tier participates so cold metadata can spill from
-		// fastest down to slower tiers under capacity pressure.
+		// fastest down to slower tiers under capacity pressure — unless
+		// the pool was created with meta_on_fastest, in which case only
+		// the fastest tier's backing holds metadata.
 		var tierBackings []meta.TierBacking
 		for i := range slots {
 			if slots[i].State != "assigned" {
+				continue
+			}
+			if p.MetaOnFastest && slots[i].Rank != fastest.Rank {
 				continue
 			}
 			bm := tier.PerTierBackingMount(p.Name, slots[i].Name)
@@ -300,7 +380,7 @@ func openPoolMetaStores(store *db.Store, adapter *mdadmadapter.Adapter) error {
 
 		// Background reconcile: walk every tier's backing, prime the store
 		// with records for files that pre-exist it (from before this change,
-		// or placed outside of FUSE). Idempotent and preserves pin state.
+		// or placed outside of smoothfs). Idempotent and preserves pin state.
 		nsID, err := namespaceIDForPool(store, p.Name)
 		if err != nil || nsID == "" {
 			continue
@@ -325,7 +405,7 @@ func openPoolMetaStores(store *db.Store, adapter *mdadmadapter.Adapter) error {
 		go func(store *meta.PoolMetaStore, namespace string, srcs []meta.ReconcileSource) {
 			// First reconcile right at startup.
 			store.Reconcile(context.Background(), namespace, srcs)
-			// Then once an hour: catches files placed outside of FUSE and
+			// Then once an hour: catches files placed outside of smoothfs and
 			// sweeps ghost records left behind by dropped delete enqueues.
 			t := time.NewTicker(time.Hour)
 			defer t.Stop()
@@ -385,4 +465,3 @@ func namespaceIDForPool(store *db.Store, poolName string) (string, error) {
 	}
 	return "", nil
 }
-

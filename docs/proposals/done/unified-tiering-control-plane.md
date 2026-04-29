@@ -1,7 +1,6 @@
 # Proposal: Unified Tiering Control Plane
 
 **Status:** Done — design complete, split into work items
-**Date:** 2026-04-09
 **Depends on:** mdadm-complete-heat-engine
 **Clarifies:** mdadm-tiering-policy
 **Related to:** mdadm-tiering-infrastructure

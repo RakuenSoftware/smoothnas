@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
+import { useI18n } from '@rakuensoftware/smoothgui';
 import { usePreload } from '../../contexts/PreloadContext';
 import { api } from '../../api/api';
 import { extractError } from '../../utils/errors';
 import Spinner from '../../components/Spinner/Spinner';
 
 export default function Smart() {
+  const { t } = useI18n();
   const { alarmHistory, invalidate } = usePreload();
   const [loadingRules, setLoadingRules] = useState(true);
   const [error, setError] = useState('');
@@ -27,29 +29,29 @@ export default function Smart() {
     api.deleteAlarmRule(id).then(() => {
       invalidate('alarmHistory');
       loadRules();
-    }).catch(e => setError(extractError(e, 'Failed to delete alarm rule')));
+    }).catch(e => setError(extractError(e, t('smart.error.deleteRule'))));
   }
 
   return (
     <div className="page">
       <div className="page-header">
-        <h1>SMART</h1>
-        <p className="subtitle">Drive health monitoring and alarm rules</p>
-        <button className="refresh-btn" onClick={refresh}>Refresh</button>
+        <h1>{t('smart.title')}</h1>
+        <p className="subtitle">{t('smart.subtitle')}</p>
+        <button className="refresh-btn" onClick={refresh}>{t('common.refresh')}</button>
       </div>
 
       {error && <div className="error-msg">{error}</div>}
 
       <div className="section">
-        <h2>Alarm Rules</h2>
+        <h2>{t('smart.section.alarmRules')}</h2>
         <Spinner loading={loadingRules} />
         {!loadingRules && (
           alarmRules.length === 0 ? (
-            <div className="empty-state"><p>No alarm rules configured.</p></div>
+            <div className="empty-state"><p>{t('smart.empty.rules')}</p></div>
           ) : (
             <table className="data-table">
               <thead>
-                <tr><th>Attribute</th><th>Operator</th><th>Threshold</th><th>Severity</th><th>Actions</th></tr>
+                <tr><th>{t('dashboard.alerts.attribute')}</th><th>{t('smart.col.operator')}</th><th>{t('smart.col.threshold')}</th><th>{t('dashboard.alerts.severity')}</th><th>{t('arrays.col.actions')}</th></tr>
               </thead>
               <tbody>
                 {alarmRules.map((rule: any) => (
@@ -59,7 +61,7 @@ export default function Smart() {
                     <td>{rule.threshold}</td>
                     <td><span className={`badge ${rule.severity}`}>{rule.severity}</span></td>
                     <td className="action-cell">
-                      <button className="btn danger" onClick={() => deleteRule(rule.id)}>Delete</button>
+                      <button className="btn danger" onClick={() => deleteRule(rule.id)}>{t('common.delete')}</button>
                     </td>
                   </tr>
                 ))}
@@ -70,13 +72,13 @@ export default function Smart() {
       </div>
 
       <div className="section">
-        <h2>Alarm History</h2>
+        <h2>{t('smart.section.alarmHistory')}</h2>
         {alarmHistory.length === 0 ? (
-          <div className="empty-state"><p>No alarm events recorded.</p></div>
+          <div className="empty-state"><p>{t('smart.empty.history')}</p></div>
         ) : (
           <table className="data-table">
             <thead>
-              <tr><th>Time</th><th>Device</th><th>Attribute</th><th>Severity</th><th>Value</th></tr>
+              <tr><th>{t('dashboard.alerts.time')}</th><th>{t('dashboard.alerts.device')}</th><th>{t('dashboard.alerts.attribute')}</th><th>{t('dashboard.alerts.severity')}</th><th>{t('dashboard.alerts.value')}</th></tr>
             </thead>
             <tbody>
               {alarmHistory.map((event: any, i: number) => (

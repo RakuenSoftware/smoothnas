@@ -32,20 +32,20 @@ const defaultRunDir = "/run/tierd"
 
 // ExportedCapabilities returns TargetCapabilities for the managed ZFS backend.
 // Exported for use in tests.
-func ExportedCapabilities(fuseMode string) tiering.TargetCapabilities {
-	return zfsManagedCapabilities(fuseMode)
+func ExportedCapabilities() tiering.TargetCapabilities {
+	return zfsManagedCapabilities()
 }
 
 // zfsManagedCapabilities returns TargetCapabilities for the managed ZFS backend.
-func zfsManagedCapabilities(fuseMode string) tiering.TargetCapabilities {
+func zfsManagedCapabilities() tiering.TargetCapabilities {
 	return tiering.TargetCapabilities{
 		MovementGranularity: "file",
 		PinScope:            "object",
 		SupportsOnlineMove:  true,
 		SupportsRecall:      true,
 		RecallMode:          "synchronous",
-		SnapshotMode:        "none", // until proposal 05
-		FUSEMode:            fuseMode,
+		SnapshotMode:        "none",
+
 		SupportsChecksums:   true,
 		SupportsCompression: true,
 		SupportsWriteBias:   false,
@@ -84,14 +84,7 @@ const pollInterval = 5 * time.Second
 
 // Adapter implements tiering.TieringAdapter for the managed ZFS backend.
 type Adapter struct {
-	store      *db.Store
-	supervisor *DaemonSupervisor
-	server     *SocketServer
-
-	// mu protects namespaceDaemonState and fanotifyWatchers.
-	mu                   sync.Mutex
-	namespaceDaemonState map[string]string          // namespaceID → daemon_state
-	fanotifyWatchers     map[string]*FanotifyWatcher // namespaceID → watcher
+	store *db.Store
 
 	runDir string
 
@@ -105,27 +98,21 @@ type Adapter struct {
 	iostat                    IOStatProvider
 
 	// metaMu + metaStores mirror the mdadm adapter: per-pool meta store on
-	// the pool's fastest dataset. Populated by main.go at startup. ZFS
-	// doesn't have an equivalent high-volume CREATE hot path yet, so these
-	// are scaffolding — pin state and future heat tracking write here.
+	// the pool's fastest dataset. Populated by main.go at startup.
 	metaMu     sync.RWMutex
 	metaStores map[string]*meta.PoolMetaStore // poolName → store
 }
 
 // NewAdapter returns a new managed ZFS tiering adapter.
-// runDir is the directory for runtime state (sockets, etc.); defaults to /run/tierd.
+// runDir is the directory for runtime state; defaults to /run/tierd.
 func NewAdapter(store *db.Store, runDir string) *Adapter {
 	if runDir == "" {
 		runDir = defaultRunDir
 	}
-	supervisor := NewDaemonSupervisor()
 	concurrency := defaultMovementWorkerConcurrency
-	a := &Adapter{
+	return &Adapter{
 		store:                     store,
-		supervisor:                supervisor,
 		runDir:                    runDir,
-		namespaceDaemonState:      make(map[string]string),
-		fanotifyWatchers:          make(map[string]*FanotifyWatcher),
 		movementSem:               make(chan struct{}, concurrency),
 		movementWorkerConcurrency: concurrency,
 		recallTimeoutSeconds:      defaultRecallTimeoutSeconds,
@@ -133,8 +120,6 @@ func NewAdapter(store *db.Store, runDir string) *Adapter {
 		iostat:                    ExecIOStat{},
 		metaStores:                make(map[string]*meta.PoolMetaStore),
 	}
-	a.server = NewSocketServer(runDir, a)
-	return a
 }
 
 // SetMetaStore registers the per-pool metadata store opened at startup.
@@ -207,8 +192,8 @@ func runCmd(name string, args ...string) error {
 }
 
 // capabilitiesJSON serialises capabilities for storage in the DB.
-func capabilitiesJSON(fuseMode string) (string, error) {
-	caps := zfsManagedCapabilities(fuseMode)
+func capabilitiesJSON() (string, error) {
+	caps := zfsManagedCapabilities()
 	b, err := json.Marshal(caps)
 	if err != nil {
 		return "", err
@@ -230,10 +215,6 @@ func (a *Adapter) CreateTarget(spec tiering.TargetSpec) (*tiering.TargetState, e
 
 	datasetName := spec.Name
 	datasetPath := poolName + "/" + datasetName
-	fuseMode := "passthrough"
-	if fm, ok2 := spec.BackendDetails["fuse_mode"].(string); ok2 && fm != "" {
-		fuseMode = fm
-	}
 
 	// Create the dataset.
 	if err := runZFS("create", "-p", datasetPath); err != nil {
@@ -256,7 +237,7 @@ func (a *Adapter) CreateTarget(spec tiering.TargetSpec) (*tiering.TargetState, e
 
 	// Set ownership and permissions.
 	if err := runCmd("chown", "tierd:tierd", mountPoint); err != nil {
-		_ = runZFS("destroy", "-r", datasetPath)
+		_ = runZFS("destroy", "-rf", datasetPath)
 		return nil, &tiering.AdapterError{
 			Kind:    tiering.ErrPermanent,
 			Message: "chown dataset mount point",
@@ -264,7 +245,7 @@ func (a *Adapter) CreateTarget(spec tiering.TargetSpec) (*tiering.TargetState, e
 		}
 	}
 	if err := runCmd("chmod", "0700", mountPoint); err != nil {
-		_ = runZFS("destroy", "-r", datasetPath)
+		_ = runZFS("destroy", "-rf", datasetPath)
 		return nil, &tiering.AdapterError{
 			Kind:    tiering.ErrPermanent,
 			Message: "chmod dataset mount point",
@@ -272,9 +253,9 @@ func (a *Adapter) CreateTarget(spec tiering.TargetSpec) (*tiering.TargetState, e
 		}
 	}
 
-	capsJSON, err := capabilitiesJSON(fuseMode)
+	capsJSON, err := capabilitiesJSON()
 	if err != nil {
-		_ = runZFS("destroy", "-r", datasetPath)
+		_ = runZFS("destroy", "-rf", datasetPath)
 		return nil, &tiering.AdapterError{Kind: tiering.ErrPermanent, Message: "marshal capabilities", Cause: err}
 	}
 
@@ -297,7 +278,7 @@ func (a *Adapter) CreateTarget(spec tiering.TargetSpec) (*tiering.TargetState, e
 		BackingRef:       backingRefTarget(poolName, datasetName),
 	}
 	if err := a.store.CreateTierTarget(row); err != nil {
-		_ = runZFS("destroy", "-r", datasetPath)
+		_ = runZFS("destroy", "-rf", datasetPath)
 		return nil, &tiering.AdapterError{
 			Kind:    tiering.ErrTransient,
 			Message: "create tier target in DB",
@@ -310,11 +291,10 @@ func (a *Adapter) CreateTarget(spec tiering.TargetSpec) (*tiering.TargetState, e
 		PoolName:     poolName,
 		DatasetName:  datasetName,
 		DatasetPath:  datasetPath,
-		FUSEMode:     fuseMode,
 	}
 	if err := a.store.UpsertZFSManagedTarget(zfsRow); err != nil {
 		_ = a.store.DeleteTierTarget(row.ID)
-		_ = runZFS("destroy", "-r", datasetPath)
+		_ = runZFS("destroy", "-rf", datasetPath)
 		return nil, &tiering.AdapterError{
 			Kind:    tiering.ErrTransient,
 			Message: "upsert ZFS managed target in DB",
@@ -322,17 +302,15 @@ func (a *Adapter) CreateTarget(spec tiering.TargetSpec) (*tiering.TargetState, e
 		}
 	}
 
-	caps := zfsManagedCapabilities(fuseMode)
 	return &tiering.TargetState{
 		ID:           row.ID,
 		Name:         spec.Name,
 		Health:       "healthy",
-		Capabilities: caps,
+		Capabilities: zfsManagedCapabilities(),
 		BackendDetails: map[string]any{
 			"pool_name":    poolName,
 			"dataset_name": datasetName,
 			"dataset_path": datasetPath,
-			"fuse_mode":    fuseMode,
 		},
 	}, nil
 }
@@ -348,7 +326,7 @@ func (a *Adapter) DestroyTarget(targetID string) error {
 		}
 	}
 
-	if err := runZFS("destroy", "-r", zfsRow.DatasetPath); err != nil {
+	if err := runZFS("destroy", "-rf", zfsRow.DatasetPath); err != nil {
 		return &tiering.AdapterError{
 			Kind:    tiering.ErrPermanent,
 			Message: "destroy ZFS dataset",
@@ -393,19 +371,17 @@ func (a *Adapter) ListTargets() ([]tiering.TargetState, error) {
 			log.Printf("zfsmgd: ListTargets: get tier target %q: %v", zr.TierTargetID, err)
 			continue
 		}
-		caps := zfsManagedCapabilities(zr.FUSEMode)
 		out = append(out, tiering.TargetState{
 			ID:            ttRow.ID,
 			Name:          ttRow.Name,
 			Health:        ttRow.Health,
 			ActivityBand:  ttRow.ActivityBand,
 			ActivityTrend: ttRow.ActivityTrend,
-			Capabilities:  caps,
+			Capabilities:  zfsManagedCapabilities(),
 			BackendDetails: map[string]any{
 				"pool_name":    zr.PoolName,
 				"dataset_name": zr.DatasetName,
 				"dataset_path": zr.DatasetPath,
-				"fuse_mode":    zr.FUSEMode,
 			},
 		})
 	}
@@ -414,8 +390,9 @@ func (a *Adapter) ListTargets() ([]tiering.TargetState, error) {
 
 // ---- Namespace lifecycle -----------------------------------------------------
 
-// CreateNamespace creates the meta dataset, starts the socket server and FUSE
-// daemon, and registers the namespace in the DB.
+// CreateNamespace creates the meta dataset and registers the namespace in
+// the DB. Data-plane presentation is handled by the smoothfs kernel module
+// mounted separately.
 func (a *Adapter) CreateNamespace(spec tiering.NamespaceSpec) (*tiering.NamespaceState, error) {
 	poolName, ok := spec.BackendDetails["pool_name"].(string)
 	if !ok || poolName == "" {
@@ -423,10 +400,6 @@ func (a *Adapter) CreateNamespace(spec tiering.NamespaceSpec) (*tiering.Namespac
 			Kind:    tiering.ErrPermanent,
 			Message: "pool_name is required in BackendDetails",
 		}
-	}
-	fuseMode := "passthrough"
-	if fm, ok2 := spec.BackendDetails["fuse_mode"].(string); ok2 && fm != "" {
-		fuseMode = fm
 	}
 
 	// Validate PolicyTargetIDs: all backing datasets must share the same ZFS
@@ -452,7 +425,7 @@ func (a *Adapter) CreateNamespace(spec tiering.NamespaceSpec) (*tiering.Namespac
 	// Create exposed mount path.
 	if spec.ExposedPath != "" {
 		if err := os.MkdirAll(spec.ExposedPath, 0755); err != nil {
-			_ = runZFS("destroy", "-r", metaDataset)
+			_ = runZFS("destroy", "-rf", metaDataset)
 			return nil, &tiering.AdapterError{
 				Kind:    tiering.ErrPermanent,
 				Message: "create exposed mount path",
@@ -461,17 +434,7 @@ func (a *Adapter) CreateNamespace(spec tiering.NamespaceSpec) (*tiering.Namespac
 		}
 	}
 
-	// Ensure socket dir exists.
-	if err := os.MkdirAll(a.runDir, 0750); err != nil {
-		_ = runZFS("destroy", "-r", metaDataset)
-		return nil, &tiering.AdapterError{
-			Kind:    tiering.ErrPermanent,
-			Message: "create run dir",
-			Cause:   err,
-		}
-	}
-
-	// Persist to DB first (we need the namespace ID for the socket path).
+	// Persist to DB.
 	placementDomain := spec.PlacementDomain
 	if placementDomain == "" {
 		placementDomain = BackendKind
@@ -484,12 +447,12 @@ func (a *Adapter) CreateNamespace(spec tiering.NamespaceSpec) (*tiering.Namespac
 		NamespaceKind:   spec.NamespaceKind,
 		ExposedPath:     spec.ExposedPath,
 		PinState:        "none",
-		Health:          "starting",
+		Health:          "healthy",
 		PlacementState:  "unknown",
 		BackendRef:      backingRefNamespace(poolName, namespaceName),
 	}
 	if err := a.store.CreateManagedNamespace(nsRow); err != nil {
-		_ = runZFS("destroy", "-r", metaDataset)
+		_ = runZFS("destroy", "-rf", metaDataset)
 		return nil, &tiering.AdapterError{
 			Kind:    tiering.ErrTransient,
 			Message: "create managed namespace in DB",
@@ -499,95 +462,26 @@ func (a *Adapter) CreateNamespace(spec tiering.NamespaceSpec) (*tiering.Namespac
 
 	namespaceID := nsRow.ID
 
-	// Start socket server for this namespace.
-	socketPath, err := a.server.Start(namespaceID)
-	if err != nil {
-		_ = a.store.DeleteManagedNamespace(namespaceID)
-		_ = runZFS("destroy", "-r", metaDataset)
-		return nil, &tiering.AdapterError{
-			Kind:    tiering.ErrTransient,
-			Message: "start socket server",
-			Cause:   err,
-		}
-	}
-
 	// Detect whether all datasets share a single zpool for coordinated snapshots.
 	snapshotMode, snapshotPool := a.detectPoolMembership(namespaceID, poolName, placementDomain)
 
-	// Persist the ZFS managed namespace row.
 	zfsNsRow := &db.ZFSManagedNamespaceRow{
-		NamespaceID:           namespaceID,
-		PoolName:              poolName,
-		MetaDataset:           metaDataset,
-		SocketPath:            socketPath,
-		MountPath:             spec.ExposedPath,
-		DaemonState:           "starting",
-		FUSEMode:              fuseMode,
-		SnapshotMode:          snapshotMode,
-		SnapshotPoolName:      snapshotPool,
+		NamespaceID: namespaceID,
+		PoolName:    poolName,
+		MetaDataset: metaDataset,
+		MountPath:   spec.ExposedPath,
+
+		SnapshotMode:           snapshotMode,
+		SnapshotPoolName:       snapshotPool,
 		SnapshotQuiesceTimeout: snapshotQuiesceDefaultTimeout,
 	}
 	if err := a.store.UpsertZFSManagedNamespace(zfsNsRow); err != nil {
-		a.server.Stop(namespaceID)
 		_ = a.store.DeleteManagedNamespace(namespaceID)
-		_ = runZFS("destroy", "-r", metaDataset)
+		_ = runZFS("destroy", "-rf", metaDataset)
 		return nil, &tiering.AdapterError{
 			Kind:    tiering.ErrTransient,
 			Message: "upsert ZFS managed namespace in DB",
 			Cause:   err,
-		}
-	}
-
-	// Start the FUSE daemon.
-	if err := a.supervisor.Start(namespaceID, spec.ExposedPath, socketPath); err != nil {
-		a.server.Stop(namespaceID)
-		_ = a.store.DeleteZFSManagedNamespace(namespaceID)
-		_ = a.store.DeleteManagedNamespace(namespaceID)
-		_ = runZFS("destroy", "-r", metaDataset)
-		return nil, &tiering.AdapterError{
-			Kind:    tiering.ErrTransient,
-			Message: "start FUSE daemon",
-			Cause:   err,
-		}
-	}
-
-	pid := a.supervisor.ActivePID(namespaceID)
-	_ = a.store.SetZFSManagedNamespaceDaemonState(namespaceID, "running", pid)
-
-	a.mu.Lock()
-	a.namespaceDaemonState[namespaceID] = "running"
-	a.mu.Unlock()
-
-	// Set up crash supervision.
-	a.supervisor.Supervise(namespaceID, func() {
-		a.onDaemonCrash(namespaceID, spec.ExposedPath, socketPath)
-	})
-
-	// Start fanotify bypass detection on the backing mount path.
-	// We use the meta dataset's expected mount as the backing path.
-	// Bypass events from any process other than the daemon are reported.
-	if spec.ExposedPath != "" {
-		watcher, err := StartFanotifyWatch(spec.ExposedPath, pid, namespaceID, func() {
-			a.onBypassDetected(namespaceID)
-		})
-		if err != nil {
-			if err == ErrFanotifyUnavailable {
-				log.Printf("zfsmgd: fanotify unavailable for namespace %q: bypass detection disabled", namespaceID)
-				_ = a.store.UpsertDegradedState(&db.DegradedStateRow{
-					BackendKind: BackendKind,
-					ScopeKind:   "namespace",
-					ScopeID:     namespaceID,
-					Severity:    db.DegradedSeverityWarning,
-					Code:        "bypass_detection_unavailable",
-					Message:     fmt.Sprintf("fanotify unavailable for namespace %q", namespaceID),
-				})
-			} else {
-				log.Printf("zfsmgd: fanotify watch failed for namespace %q: %v", namespaceID, err)
-			}
-		} else {
-			a.mu.Lock()
-			a.fanotifyWatchers[namespaceID] = watcher
-			a.mu.Unlock()
 		}
 	}
 
@@ -599,45 +493,11 @@ func (a *Adapter) CreateNamespace(spec tiering.NamespaceSpec) (*tiering.Namespac
 		BackendDetails: map[string]any{
 			"pool_name":    poolName,
 			"meta_dataset": metaDataset,
-			"socket_path":  socketPath,
-			"fuse_mode":    fuseMode,
 		},
 	}, nil
 }
 
-// onDaemonCrash is called when a supervised daemon process exits unexpectedly.
-func (a *Adapter) onDaemonCrash(namespaceID, mountPath, socketPath string) {
-	log.Printf("zfsmgd: daemon for namespace %q crashed; attempting restart", namespaceID)
-
-	a.mu.Lock()
-	a.namespaceDaemonState[namespaceID] = "crashed"
-	a.mu.Unlock()
-
-	_ = a.store.SetZFSManagedNamespaceDaemonState(namespaceID, "crashed", 0)
-
-	if err := a.supervisor.Restart(namespaceID, mountPath, socketPath); err != nil {
-		log.Printf("zfsmgd: restart failed for namespace %q: %v", namespaceID, err)
-		a.mu.Lock()
-		a.namespaceDaemonState[namespaceID] = "stopped"
-		a.mu.Unlock()
-		_ = a.store.SetZFSManagedNamespaceDaemonState(namespaceID, "stopped", 0)
-		return
-	}
-
-	pid := a.supervisor.ActivePID(namespaceID)
-	_ = a.store.SetZFSManagedNamespaceDaemonState(namespaceID, "running", pid)
-
-	a.mu.Lock()
-	a.namespaceDaemonState[namespaceID] = "running"
-	a.mu.Unlock()
-
-	a.supervisor.Supervise(namespaceID, func() {
-		a.onDaemonCrash(namespaceID, mountPath, socketPath)
-	})
-}
-
-// DestroyNamespace stops the daemon, unmounts the FUSE mount, destroys the
-// meta dataset, and removes DB rows.
+// DestroyNamespace destroys the meta dataset and removes DB rows.
 func (a *Adapter) DestroyNamespace(namespaceID string) error {
 	zfsNs, err := a.store.GetZFSManagedNamespace(namespaceID)
 	if err != nil {
@@ -648,32 +508,8 @@ func (a *Adapter) DestroyNamespace(namespaceID string) error {
 		}
 	}
 
-	// Stop the daemon.
-	if err := a.supervisor.Stop(namespaceID); err != nil {
-		log.Printf("zfsmgd: stop daemon for namespace %q: %v", namespaceID, err)
-	}
-
-	// Stop the socket server.
-	a.server.Stop(namespaceID)
-
-	// Stop fanotify watcher if running.
-	a.mu.Lock()
-	watcher := a.fanotifyWatchers[namespaceID]
-	delete(a.fanotifyWatchers, namespaceID)
-	a.mu.Unlock()
-	if watcher != nil {
-		watcher.Stop()
-	}
-
-	// Unmount the FUSE mount.
-	if zfsNs.MountPath != "" {
-		if err := runCmd("fusermount3", "-u", zfsNs.MountPath); err != nil {
-			log.Printf("zfsmgd: fusermount3 -u %q: %v", zfsNs.MountPath, err)
-		}
-	}
-
 	// Destroy the meta dataset.
-	if err := runZFS("destroy", "-r", zfsNs.MetaDataset); err != nil {
+	if err := runZFS("destroy", "-rf", zfsNs.MetaDataset); err != nil {
 		return &tiering.AdapterError{
 			Kind:    tiering.ErrPermanent,
 			Message: "destroy meta dataset",
@@ -692,11 +528,6 @@ func (a *Adapter) DestroyNamespace(namespaceID string) error {
 			Cause:   err,
 		}
 	}
-
-	a.mu.Lock()
-	delete(a.namespaceDaemonState, namespaceID)
-	a.mu.Unlock()
-
 	return nil
 }
 
@@ -726,11 +557,7 @@ func (a *Adapter) ListNamespaces() ([]tiering.NamespaceState, error) {
 			BackendDetails: map[string]any{
 				"pool_name":    zn.PoolName,
 				"meta_dataset": zn.MetaDataset,
-				"socket_path":  zn.SocketPath,
 				"mount_path":   zn.MountPath,
-				"daemon_pid":   zn.DaemonPID,
-				"daemon_state": zn.DaemonState,
-				"fuse_mode":    zn.FUSEMode,
 			},
 		})
 	}
@@ -779,7 +606,8 @@ func (a *Adapter) GetCapabilities(targetID string) (tiering.TargetCapabilities, 
 			Cause:   err,
 		}
 	}
-	return zfsManagedCapabilities(zfsRow.FUSEMode), nil
+	_ = zfsRow
+	return zfsManagedCapabilities(), nil
 }
 
 // GetPolicy returns the fill/threshold policy for a tier target.
@@ -812,9 +640,8 @@ func (a *Adapter) SetPolicy(targetID string, policy tiering.TargetPolicy) error 
 
 // ---- Reconciliation and activity ---------------------------------------------
 
-// Reconcile checks all registered namespaces and restarts crashed daemons,
-// then re-emits degraded states. It also performs crash recovery for any
-// interrupted movement workers by scanning the movement_log table.
+// Reconcile performs crash recovery for any interrupted movement workers
+// by scanning the movement_log table, then re-emits degraded states.
 //
 // Per P04B: crash recovery runs before the adapter begins serving placement
 // requests or starting movement workers.
@@ -825,46 +652,6 @@ func (a *Adapter) Reconcile() error {
 			Kind:    tiering.ErrTransient,
 			Message: "movement log crash recovery",
 			Cause:   err,
-		}
-	}
-
-	zfsNs, err := a.store.ListZFSManagedNamespaces()
-	if err != nil {
-		return &tiering.AdapterError{
-			Kind:    tiering.ErrTransient,
-			Message: "list ZFS managed namespaces for reconcile",
-			Cause:   err,
-		}
-	}
-
-	for _, zn := range zfsNs {
-		pid := a.supervisor.ActivePID(zn.NamespaceID)
-		if pid == 0 {
-			// Daemon is not tracked — check stored state.
-			a.mu.Lock()
-			state := a.namespaceDaemonState[zn.NamespaceID]
-			a.mu.Unlock()
-
-			if state == "running" || state == "" {
-				// Expected running but it's not — treat as crashed.
-				log.Printf("zfsmgd: Reconcile: daemon for namespace %q not running; restarting", zn.NamespaceID)
-				if err := a.supervisor.Restart(zn.NamespaceID, zn.MountPath, zn.SocketPath); err != nil {
-					log.Printf("zfsmgd: Reconcile: restart failed for namespace %q: %v", zn.NamespaceID, err)
-					a.mu.Lock()
-					a.namespaceDaemonState[zn.NamespaceID] = "stopped"
-					a.mu.Unlock()
-					_ = a.store.SetZFSManagedNamespaceDaemonState(zn.NamespaceID, "stopped", 0)
-					continue
-				}
-				newPID := a.supervisor.ActivePID(zn.NamespaceID)
-				_ = a.store.SetZFSManagedNamespaceDaemonState(zn.NamespaceID, "running", newPID)
-				a.mu.Lock()
-				a.namespaceDaemonState[zn.NamespaceID] = "running"
-				a.mu.Unlock()
-				a.supervisor.Supervise(zn.NamespaceID, func() {
-					a.onDaemonCrash(zn.NamespaceID, zn.MountPath, zn.SocketPath)
-				})
-			}
 		}
 	}
 
@@ -885,27 +672,6 @@ func (a *Adapter) Reconcile() error {
 func (a *Adapter) syncDegradedStates() error {
 	if err := a.store.DeleteDegradedStatesByBackend(BackendKind); err != nil {
 		return fmt.Errorf("delete degraded states: %w", err)
-	}
-
-	// Emit namespace_unavailable for crashed/stopped namespaces.
-	zfsNs, err := a.store.ListZFSManagedNamespaces()
-	if err != nil {
-		return fmt.Errorf("list ZFS managed namespaces: %w", err)
-	}
-	for _, zn := range zfsNs {
-		a.mu.Lock()
-		state := a.namespaceDaemonState[zn.NamespaceID]
-		a.mu.Unlock()
-		if state == "crashed" || state == "stopped" {
-			_ = a.store.UpsertDegradedState(&db.DegradedStateRow{
-				BackendKind: BackendKind,
-				ScopeKind:   "namespace",
-				ScopeID:     zn.NamespaceID,
-				Severity:    db.DegradedSeverityCritical,
-				Code:        "namespace_unavailable",
-				Message:     fmt.Sprintf("FUSE daemon for namespace %q is %s", zn.NamespaceID, state),
-			})
-		}
 	}
 
 	// Emit movement_failed for failed jobs.
@@ -1637,223 +1403,6 @@ func (a *Adapter) GetDegradedState() ([]tiering.DegradedState, error) {
 		})
 	}
 	return out, nil
-}
-
-// ---- OpenHandler (satisfies SocketServer's OpenHandler interface) ------------
-
-// HandleOpen is called by the socket server when the FUSE daemon reports an
-// open() call on a managed file. It looks up the backing dataset and returns
-// an open fd and the backing inode number.
-// flags contains the POSIX O_ACCMODE flags (O_RDONLY, O_WRONLY, O_RDWR).
-func (a *Adapter) HandleOpen(namespaceID, objectKey string, flags uint32) (int, uint64, error) {
-	// Find which namespace this is.
-	zfsNs, err := a.store.GetZFSManagedNamespace(namespaceID)
-	if err != nil {
-		return -1, 0, syscall.EIO
-	}
-
-	// Strip leading slash from key for matching.
-	key := strings.TrimPrefix(objectKey, "/")
-
-	// Direct indexed lookup by (namespace_id, object_key).
-	matchedObj, err := a.store.GetManagedObjectByKey(namespaceID, key)
-	if err != nil {
-		return -1, 0, syscall.ENOENT
-	}
-
-	var ps tiering.PlacementSummary
-	if matchedObj.PlacementSummaryJSON != "" {
-		_ = json.Unmarshal([]byte(matchedObj.PlacementSummaryJSON), &ps)
-	}
-
-	currentTargetID := ps.CurrentTargetID
-	if currentTargetID == "" {
-		return -1, 0, syscall.EIO
-	}
-
-	// If the intended target differs from current (i.e. a recall is needed),
-	// perform synchronous recall first.
-	if ps.IntendedTargetID != "" && ps.IntendedTargetID != currentTargetID {
-		timeout := time.Duration(a.recallTimeoutSeconds) * time.Second
-		if err := a.recallSync(namespaceID, matchedObj, ps, zfsNs, timeout); err != nil {
-			log.Printf("zfsmgd: HandleOpen: synchronous recall for %q: %v", objectKey, err)
-			if isRecallTimeout(err) {
-				return -1, 0, syscall.EIO
-			}
-			// Continue with current placement for non-timeout errors.
-		} else {
-			// After recall, the object should be on the intended target.
-			currentTargetID = ps.IntendedTargetID
-		}
-	}
-
-	zfsTarget, err := a.store.GetZFSManagedTarget(currentTargetID)
-	if err != nil {
-		return -1, 0, syscall.EIO
-	}
-
-	// Use the flags from the FUSE daemon (O_RDONLY/O_WRONLY/O_RDWR).
-	openFlags := int(flags & syscall.O_ACCMODE)
-
-	filePath := filepath.Join(zfsTarget.DatasetPath, key)
-	fd, err := syscall.Open(filePath, openFlags, 0)
-	if err != nil {
-		return -1, 0, err
-	}
-
-	// Stat the fd to get the inode number.
-	var st syscall.Stat_t
-	if err := syscall.Fstat(fd, &st); err != nil {
-		_ = syscall.Close(fd)
-		return -1, 0, syscall.EIO
-	}
-
-	return fd, st.Ino, nil
-}
-
-// errRecallTimeout is returned by recallSync when the recall deadline expires.
-type errRecallTimeout struct{ namespaceID string }
-
-func (e *errRecallTimeout) Error() string {
-	return fmt.Sprintf("synchronous recall timed out for namespace %q", e.namespaceID)
-}
-
-// isRecallTimeout reports whether err is an errRecallTimeout.
-func isRecallTimeout(err error) bool {
-	_, ok := err.(*errRecallTimeout)
-	return ok
-}
-
-// recallSync performs a synchronous recall of an object from its current
-// location to its intended location. It sets recall_pending on the object
-// before starting so that any concurrent movement worker will abort.
-// If timeout > 0 and the recall does not complete in time, it returns
-// errRecallTimeout and emits a recall_timeout degraded state.
-func (a *Adapter) recallSync(namespaceID string, obj *db.ManagedObjectRow, ps tiering.PlacementSummary, _ *db.ZFSManagedNamespaceRow, timeout time.Duration) error {
-	// Set recall_pending so movement workers for this object abort.
-	_ = a.store.SetObjectRecallPending(obj.ID, true)
-	defer func() { _ = a.store.SetObjectRecallPending(obj.ID, false) }()
-
-	srcZFS, err := a.store.GetZFSManagedTarget(ps.CurrentTargetID)
-	if err != nil {
-		return fmt.Errorf("get source ZFS target: %w", err)
-	}
-	dstZFS, err := a.store.GetZFSManagedTarget(ps.IntendedTargetID)
-	if err != nil {
-		return fmt.Errorf("get dest ZFS target: %w", err)
-	}
-
-	srcPath := filepath.Join(srcZFS.DatasetPath, obj.ObjectKey)
-	dstPath := filepath.Join(dstZFS.DatasetPath, obj.ObjectKey)
-
-	type result struct{ err error }
-	done := make(chan result, 1)
-
-	go func() {
-		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
-			done <- result{fmt.Errorf("mkdir dst: %w", err)}
-			return
-		}
-		if err := runCmd("cp", "--reflink=auto", "-p", srcPath, dstPath); err != nil {
-			done <- result{fmt.Errorf("cp: %w", err)}
-			return
-		}
-		ps.CurrentTargetID = ps.IntendedTargetID
-		ps.State = "placed"
-		psBytes, _ := json.Marshal(ps)
-		if err := a.updateObjectPlacement(obj.ID, string(psBytes)); err != nil {
-			done <- result{fmt.Errorf("update placement: %w", err)}
-			return
-		}
-		_ = os.Remove(srcPath)
-		done <- result{}
-	}()
-
-	if timeout <= 0 {
-		res := <-done
-		return res.err
-	}
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case res := <-done:
-		return res.err
-	case <-timer.C:
-		// Recall timed out. The goroutine may still be running but will fail
-		// harmlessly (the dst file will be a partial copy).
-		_ = a.store.UpsertDegradedState(&db.DegradedStateRow{
-			BackendKind: BackendKind,
-			ScopeKind:   "namespace",
-			ScopeID:     namespaceID,
-			Severity:    db.DegradedSeverityWarning,
-			Code:        "recall_timeout",
-			Message:     fmt.Sprintf("synchronous recall for object %q exceeded %s", obj.ObjectKey, timeout),
-		})
-		return &errRecallTimeout{namespaceID: namespaceID}
-	}
-}
-
-// HandleRelease is called when an application releases a file descriptor.
-// inode is the backing inode of the released fd.
-func (a *Adapter) HandleRelease(namespaceID string, inode uint64) {
-	// no-op: placeholder for future use (e.g. eviction tracking)
-	_ = inode
-}
-
-// HandleBypass is called when the FUSE daemon's socket protocol signals a bypass.
-func (a *Adapter) HandleBypass(namespaceID string) {
-	a.onBypassDetected(namespaceID)
-}
-
-// onBypassDetected records a bypass_detected degraded state.
-func (a *Adapter) onBypassDetected(namespaceID string) {
-	log.Printf("zfsmgd: bypass detected for namespace %q", namespaceID)
-	_ = a.store.UpsertDegradedState(&db.DegradedStateRow{
-		BackendKind: BackendKind,
-		ScopeKind:   "namespace",
-		ScopeID:     namespaceID,
-		Severity:    db.DegradedSeverityWarning,
-		Code:        "bypass_detected",
-		Message:     fmt.Sprintf("direct access bypass detected in namespace %q", namespaceID),
-	})
-}
-
-// HandleFDPassFailed is called when the fd validation (inode check) fails on
-// the daemon side. We log and record a degraded state.
-func (a *Adapter) HandleFDPassFailed(namespaceID string, expectedInode uint64) {
-	log.Printf("zfsmgd: fd_pass_failed for namespace %q: expected inode %d", namespaceID, expectedInode)
-	_ = a.store.UpsertDegradedState(&db.DegradedStateRow{
-		BackendKind: BackendKind,
-		ScopeKind:   "namespace",
-		ScopeID:     namespaceID,
-		Severity:    db.DegradedSeverityWarning,
-		Code:        "fd_pass_failed",
-		Message:     fmt.Sprintf("fd inode mismatch for namespace %q (expected inode %d)", namespaceID, expectedInode),
-	})
-}
-
-// OnHealthFail is called when the health ping goroutine determines the daemon
-// is unresponsive. We restart the daemon.
-func (a *Adapter) OnHealthFail(namespaceID string) {
-	log.Printf("zfsmgd: OnHealthFail for namespace %q: restarting daemon", namespaceID)
-	_ = a.store.UpsertDegradedState(&db.DegradedStateRow{
-		BackendKind: BackendKind,
-		ScopeKind:   "namespace",
-		ScopeID:     namespaceID,
-		Severity:    db.DegradedSeverityCritical,
-		Code:        "namespace_unavailable",
-		Message:     fmt.Sprintf("health check failed for namespace %q; daemon restarting", namespaceID),
-	})
-
-	// Look up the stored mount/socket paths for restart.
-	zfsNs, err := a.store.GetZFSManagedNamespace(namespaceID)
-	if err != nil {
-		log.Printf("zfsmgd: OnHealthFail: get namespace %q: %v", namespaceID, err)
-		return
-	}
-
-	a.onDaemonCrash(namespaceID, zfsNs.MountPath, zfsNs.SocketPath)
 }
 
 // ---- Internal helpers --------------------------------------------------------

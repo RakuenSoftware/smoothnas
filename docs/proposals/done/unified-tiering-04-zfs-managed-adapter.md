@@ -1,7 +1,6 @@
 # Proposal: Unified Tiering — 04: Managed ZFS Adapter [SUPERSEDED]
 
 **Status:** Superseded
-**Date:** 2026-04-09
 **Superseded by:** unified-tiering-04a-fuse-daemon, unified-tiering-04b-zfs-managed-adapter
 
 This proposal has been split. Do not implement from this file.

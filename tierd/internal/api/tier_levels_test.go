@@ -44,9 +44,9 @@ func TestAddTierLevelCreatesNewSlot(t *testing.T) {
 	seedTierForLevels(t, h, "store")
 
 	w := postJSON(h, http.MethodPost, "/api/tiers/store/levels", map[string]any{
-		"level_name":        "HDD",
-		"rank":              3,
-		"target_fill_pct":   40,
+		"level_name":         "HDD",
+		"rank":               3,
+		"target_fill_pct":    40,
 		"full_threshold_pct": 90,
 	})
 	if w.Code != http.StatusCreated {
@@ -63,8 +63,8 @@ func TestAddTierLevelCreatesNewSlot(t *testing.T) {
 	if got["rank"] != float64(3) {
 		t.Errorf("rank = %v, want 3", got["rank"])
 	}
-	if got["target_fill_pct"] != float64(40) {
-		t.Errorf("target_fill_pct = %v, want 40", got["target_fill_pct"])
+	if got["target_fill_pct"] != float64(90) {
+		t.Errorf("target_fill_pct = %v, want 90", got["target_fill_pct"])
 	}
 	if got["full_threshold_pct"] != float64(90) {
 		t.Errorf("full_threshold_pct = %v, want 90", got["full_threshold_pct"])
@@ -104,11 +104,37 @@ func TestAddTierLevelDefaultsFillValues(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got["target_fill_pct"] != float64(50) {
-		t.Errorf("default target_fill_pct = %v, want 50", got["target_fill_pct"])
+	if got["target_fill_pct"] != float64(95) {
+		t.Errorf("default target_fill_pct = %v, want 95", got["target_fill_pct"])
 	}
 	if got["full_threshold_pct"] != float64(95) {
 		t.Errorf("default full_threshold_pct = %v, want 95", got["full_threshold_pct"])
+	}
+}
+
+func TestAddTierLevelSlowestUsesFullThresholdAsTargetFill(t *testing.T) {
+	h := newTestHandler(t)
+	seedTierForLevels(t, h, "store")
+
+	w := postJSON(h, http.MethodPost, "/api/tiers/store/levels", map[string]any{
+		"level_name":         "HDD",
+		"rank":               3,
+		"target_fill_pct":    40,
+		"full_threshold_pct": 90,
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST /api/tiers/store/levels: status %d, body %s", w.Code, w.Body.String())
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["target_fill_pct"] != float64(90) {
+		t.Errorf("slowest target_fill_pct = %v, want 90", got["target_fill_pct"])
+	}
+	if got["full_threshold_pct"] != float64(90) {
+		t.Errorf("slowest full_threshold_pct = %v, want 90", got["full_threshold_pct"])
 	}
 }
 
@@ -140,12 +166,18 @@ func TestAddTierLevelMissingNameReturns400(t *testing.T) {
 
 func TestAddTierLevelInvalidFillReturns400(t *testing.T) {
 	h := newTestHandler(t)
-	seedTierForLevels(t, h, "store")
+	if err := h.store.CreateTierPool("store", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 3},
+	}); err != nil {
+		t.Fatalf("create tier pool: %v", err)
+	}
+	listPoolPVs = func(vg string) ([]lvm.PVInfo, error) { return nil, nil }
 
 	w := postJSON(h, http.MethodPost, "/api/tiers/store/levels", map[string]any{
-		"level_name":        "HDD",
-		"rank":              5,
-		"target_fill_pct":   80,
+		"level_name":         "SSD",
+		"rank":               2,
+		"target_fill_pct":    80,
 		"full_threshold_pct": 70, // must be greater than target
 	})
 	if w.Code != http.StatusBadRequest {
@@ -219,12 +251,36 @@ func TestUpdateTierLevelValidatesTargetLessThanFull(t *testing.T) {
 	seedTierForLevels(t, h, "store")
 
 	// target=90 >= full=80 should be rejected.
-	w := postJSON(h, http.MethodPut, "/api/tiers/store/levels/SSD", map[string]any{
+	w := postJSON(h, http.MethodPut, "/api/tiers/store/levels/NVME", map[string]any{
 		"target_fill_pct":    90,
 		"full_threshold_pct": 80,
 	})
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("want 400 for target >= full, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestUpdateTierLevelSlowestUsesFullThresholdAsTargetFill(t *testing.T) {
+	h := newTestHandler(t)
+	seedTierForLevels(t, h, "store")
+
+	w := postJSON(h, http.MethodPut, "/api/tiers/store/levels/SSD", map[string]any{
+		"target_fill_pct":    40,
+		"full_threshold_pct": 88,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT /api/tiers/store/levels/SSD: status %d, body %s", w.Code, w.Body.String())
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["target_fill_pct"] != float64(88) {
+		t.Errorf("slowest target_fill_pct = %v, want 88", got["target_fill_pct"])
+	}
+	if got["full_threshold_pct"] != float64(88) {
+		t.Errorf("slowest full_threshold_pct = %v, want 88", got["full_threshold_pct"])
 	}
 }
 

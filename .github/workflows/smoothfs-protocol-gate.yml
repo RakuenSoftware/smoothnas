@@ -1,0 +1,41 @@
+name: smoothfs-protocol-gate
+
+on:
+  pull_request:
+    branches: [main, testing]
+  push:
+    branches: [main, testing]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  linux-protocol-gate:
+    name: protocol and mixed-client soak
+    runs-on: [self-hosted, smoothnas-protocol]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run SmoothFS protocol conformance gate
+        run: sudo -E bash scripts/smoothfs-protocol-gate.sh
+
+      - name: Run mixed NFS/SMB/local SmoothFS soak
+        run: sudo -E SMOOTHFS_SOAK_SECONDS=120 bash scripts/smoothfs-mixed-protocol-soak.sh
+
+  windows-smb-soak:
+    if: vars.SMOOTHNAS_WINDOWS_SMB_SERVER != '' && vars.SMOOTHNAS_WINDOWS_SMB_SHARE != ''
+    runs-on: [self-hosted, windows, smoothnas-protocol]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Windows SMB soak
+        shell: pwsh
+        run: >
+          ./scripts/smoothfs-windows-smb-soak.ps1
+          -Server '${{ vars.SMOOTHNAS_WINDOWS_SMB_SERVER }}'
+          -Share '${{ vars.SMOOTHNAS_WINDOWS_SMB_SHARE }}'

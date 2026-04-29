@@ -9,22 +9,35 @@ import (
 	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/cache"
+	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/disk"
 	"github.com/JBailes/SmoothNAS/tierd/internal/smart"
+	"github.com/JBailes/SmoothNAS/tierd/internal/spindown"
 )
+
+const diskSpindownConfigPrefix = "disk.spindown."
+
+var diskPowerObserver = spindown.NewPowerObserver()
+
+type diskPowerResponse struct {
+	disk.PowerStatus
+	spindown.PowerSummary
+}
 
 // DisksHandler handles /api/disks* endpoints.
 type DisksHandler struct {
 	history    *smart.HistoryStore
 	alarms     *smart.AlarmStore
 	disksCache *cache.Entry[[]disk.Disk]
+	store      *db.Store
 }
 
-func NewDisksHandler(history *smart.HistoryStore, alarms *smart.AlarmStore) *DisksHandler {
+func NewDisksHandler(store *db.Store, history *smart.HistoryStore, alarms *smart.AlarmStore) *DisksHandler {
 	return &DisksHandler{
 		history:    history,
 		alarms:     alarms,
 		disksCache: cache.New[[]disk.Disk](30 * time.Second),
+		store:      store,
 	}
 }
 
@@ -49,6 +62,111 @@ func (h *DisksHandler) GetSMART(w http.ResponseWriter, r *http.Request, devicePa
 		return
 	}
 	json.NewEncoder(w).Encode(data)
+}
+
+func (h *DisksHandler) GetPower(w http.ResponseWriter, r *http.Request, devicePath string) {
+	d, ok, err := h.diskByPath(devicePath)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !ok {
+		jsonErrorCoded(w, "disk not found", http.StatusNotFound, "disks.not_found")
+		return
+	}
+	timer := h.configuredSpindownMinutes(d.Name)
+	status := disk.PowerStatusFor(d, timer)
+	json.NewEncoder(w).Encode(powerResponse(devicePath, status, "operator poll"))
+}
+
+func (h *DisksHandler) SetSpindown(w http.ResponseWriter, r *http.Request, devicePath string) {
+	var req struct {
+		Enabled     bool `json:"enabled"`
+		IdleMinutes int  `json:"idle_minutes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonInvalidRequestBody(w)
+		return
+	}
+	d, ok, err := h.diskByPath(devicePath)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !ok {
+		jsonErrorCoded(w, "disk not found", http.StatusNotFound, "disks.not_found")
+		return
+	}
+	status := disk.PowerStatusFor(d, h.configuredSpindownMinutes(d.Name))
+	if req.Enabled {
+		if !status.Eligible {
+			jsonError(w, "disk is not spindown eligible: "+status.IneligibleWhy, http.StatusBadRequest)
+			return
+		}
+		if req.IdleMinutes <= 0 {
+			jsonErrorCoded(w, "idle_minutes is required when enabled", http.StatusBadRequest, "disks.idle_minutes_required")
+			return
+		}
+		if err := disk.DisableAPM(devicePath); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := disk.SetSpindownTimer(devicePath, req.IdleMinutes); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if h.store != nil {
+			if err := h.store.SetConfig(spindownConfigKey(d.Name), strconv.Itoa(req.IdleMinutes)); err != nil {
+				serverError(w, err)
+				return
+			}
+		}
+		status = disk.PowerStatusFor(d, req.IdleMinutes)
+		json.NewEncoder(w).Encode(powerResponse(devicePath, status, "spindown timer enabled"))
+		return
+	}
+	if err := disk.SetSpindownTimer(devicePath, 0); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if h.store != nil {
+		if err := h.store.SetConfig(spindownConfigKey(d.Name), "0"); err != nil {
+			serverError(w, err)
+			return
+		}
+	}
+	status = disk.PowerStatusFor(d, 0)
+	json.NewEncoder(w).Encode(powerResponse(devicePath, status, "spindown timer disabled"))
+}
+
+func (h *DisksHandler) StandbyDisk(w http.ResponseWriter, r *http.Request, devicePath string) {
+	d, ok, err := h.diskByPath(devicePath)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !ok {
+		jsonErrorCoded(w, "disk not found", http.StatusNotFound, "disks.not_found")
+		return
+	}
+	status := disk.PowerStatusFor(d, h.configuredSpindownMinutes(d.Name))
+	if !status.Eligible {
+		jsonError(w, "disk is not spindown eligible: "+status.IneligibleWhy, http.StatusBadRequest)
+		return
+	}
+	if err := disk.StandbyNow(devicePath); err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	diskPowerObserver.RecordEvent(devicePath, status.State, "standby", "manual standby")
+	json.NewEncoder(w).Encode(powerResponse(devicePath, disk.PowerStatusFor(d, h.configuredSpindownMinutes(d.Name)), "manual standby"))
+}
+
+func powerResponse(devicePath string, status disk.PowerStatus, reason string) diskPowerResponse {
+	return diskPowerResponse{
+		PowerStatus:  status,
+		PowerSummary: diskPowerObserver.Observe(devicePath, status.State, reason),
+	}
 }
 
 // GetSMARTHistory handles GET /api/disks/{id}/smart/history.
@@ -88,7 +206,7 @@ func (h *DisksHandler) StartSMARTTest(w http.ResponseWriter, r *http.Request, de
 		Type string `json:"type"` // "short" or "long"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 	if req.Type == "" {
@@ -128,7 +246,8 @@ func (h *DisksHandler) IdentifyDisk(w http.ResponseWriter, r *http.Request, devi
 
 // WipeDisk handles POST /api/disks/{id}/wipe.
 func (h *DisksHandler) WipeDisk(w http.ResponseWriter, r *http.Request, devicePath string) {
-	// Safety: refuse to wipe OS disks or assigned disks.
+	// Safety: refuse to wipe OS disks. Everything else is eligible because
+	// wipe is the operator escape hatch for stale ZFS/mdadm/LVM signatures.
 	disks, err := h.disksCache.GetOrFetch(disk.List)
 	if err != nil {
 		serverError(w, err)
@@ -136,8 +255,8 @@ func (h *DisksHandler) WipeDisk(w http.ResponseWriter, r *http.Request, devicePa
 	}
 	for _, d := range disks {
 		if d.Path == devicePath {
-			if d.Assignment != "unassigned" {
-				jsonError(w, "cannot wipe disk: currently assigned as "+d.Assignment, http.StatusBadRequest)
+			if d.Assignment == "os" {
+				jsonErrorCoded(w, "cannot wipe OS disk", http.StatusBadRequest, "disks.cannot_wipe_os")
 				return
 			}
 			break
@@ -178,12 +297,12 @@ func (h *DisksHandler) ListAlarmRules(w http.ResponseWriter, r *http.Request) {
 func (h *DisksHandler) CreateAlarmRule(w http.ResponseWriter, r *http.Request) {
 	var rule smart.AlarmRule
 	if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 
 	if rule.AttributeID == 0 || rule.AttributeName == "" {
-		http.Error(w, `{"error":"attribute_id and attribute_name required"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "attribute_id and attribute_name required", http.StatusBadRequest, "disks.smart_attr_fields_required")
 		return
 	}
 
@@ -202,13 +321,13 @@ func (h *DisksHandler) CreateAlarmRule(w http.ResponseWriter, r *http.Request) {
 func (h *DisksHandler) UpdateAlarmRule(w http.ResponseWriter, r *http.Request, idStr string) {
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		http.Error(w, `{"error":"invalid alarm id"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "invalid alarm id", http.StatusBadRequest, "disks.invalid_alarm_id")
 		return
 	}
 
 	var rule smart.AlarmRule
 	if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		jsonInvalidRequestBody(w)
 		return
 	}
 
@@ -224,7 +343,7 @@ func (h *DisksHandler) UpdateAlarmRule(w http.ResponseWriter, r *http.Request, i
 func (h *DisksHandler) DeleteAlarmRule(w http.ResponseWriter, r *http.Request, idStr string) {
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		http.Error(w, `{"error":"invalid alarm id"}`, http.StatusBadRequest)
+		jsonErrorCoded(w, "invalid alarm id", http.StatusBadRequest, "disks.invalid_alarm_id")
 		return
 	}
 
@@ -274,7 +393,7 @@ func (h *DisksHandler) Route(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			h.ListDisks(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 		return
 	}
@@ -291,7 +410,7 @@ func (h *DisksHandler) Route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+	jsonNotFound(w)
 }
 
 func (h *DisksHandler) routeDisk(w http.ResponseWriter, r *http.Request) {
@@ -312,13 +431,28 @@ func (h *DisksHandler) routeDisk(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			h.GetSMART(w, r, devicePath)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
+		}
+	case "power":
+		switch r.Method {
+		case http.MethodGet:
+			h.GetPower(w, r, devicePath)
+		case http.MethodPut:
+			h.SetSpindown(w, r, devicePath)
+		default:
+			jsonMethodNotAllowed(w)
+		}
+	case "standby":
+		if r.Method == http.MethodPost {
+			h.StandbyDisk(w, r, devicePath)
+		} else {
+			jsonMethodNotAllowed(w)
 		}
 	case "smart/history":
 		if r.Method == http.MethodGet {
 			h.GetSMARTHistory(w, r, devicePath)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "smart/test":
 		switch r.Method {
@@ -327,23 +461,55 @@ func (h *DisksHandler) routeDisk(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPost:
 			h.StartSMARTTest(w, r, devicePath)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "identify":
 		if r.Method == http.MethodPost {
 			h.IdentifyDisk(w, r, devicePath)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	case "wipe":
 		if r.Method == http.MethodPost {
 			h.WipeDisk(w, r, devicePath)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 	default:
-		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		jsonNotFound(w)
 	}
+}
+
+func (h *DisksHandler) diskByPath(devicePath string) (disk.Disk, bool, error) {
+	disks, err := h.disksCache.GetOrFetch(disk.List)
+	if err != nil {
+		return disk.Disk{}, false, err
+	}
+	for _, d := range disks {
+		if d.Path == devicePath {
+			return d, true, nil
+		}
+	}
+	return disk.Disk{}, false, nil
+}
+
+func (h *DisksHandler) configuredSpindownMinutes(diskName string) int {
+	if h.store == nil {
+		return 0
+	}
+	val, err := h.store.GetConfig(spindownConfigKey(diskName))
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(val)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+func spindownConfigKey(diskName string) string {
+	return diskSpindownConfigPrefix + diskName + ".idle_minutes"
 }
 
 func (h *DisksHandler) routeAlarms(w http.ResponseWriter, r *http.Request) {
@@ -357,7 +523,7 @@ func (h *DisksHandler) routeAlarms(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPost:
 			h.CreateAlarmRule(w, r)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 		return
 	}
@@ -367,7 +533,7 @@ func (h *DisksHandler) routeAlarms(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			h.ListAlarmEvents(w, r)
 		} else {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 		return
 	}
@@ -381,10 +547,10 @@ func (h *DisksHandler) routeAlarms(w http.ResponseWriter, r *http.Request) {
 		case http.MethodDelete:
 			h.DeleteAlarmRule(w, r, idStr)
 		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			jsonMethodNotAllowed(w)
 		}
 		return
 	}
 
-	http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+	jsonNotFound(w)
 }

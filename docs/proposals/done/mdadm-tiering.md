@@ -1,7 +1,6 @@
 # Proposal: mdadm Storage Tiering
 
 **Status:** Pending
-**Date:** 2026-04-07
 
 ---
 

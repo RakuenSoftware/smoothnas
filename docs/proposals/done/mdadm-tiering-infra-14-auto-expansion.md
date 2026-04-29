@@ -1,7 +1,6 @@
 # Proposal: mdadm Tiering Infrastructure — Auto-Expansion
 
 **Status:** Pending
-**Date:** 2026-04-09
 **Part of:** mdadm-tiering-infrastructure (Step 14 of 14)
 **Depends on:** mdadm-tiering-infra-12-pv-allocation, mdadm-tiering-infra-13-reconciliation
 

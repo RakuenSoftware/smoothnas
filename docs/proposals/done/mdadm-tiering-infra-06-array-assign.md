@@ -1,7 +1,6 @@
 # Proposal: mdadm Tiering Infrastructure — PUT /api/tiers/{name}/tiers/{tier_name} (Array Assignment)
 
 **Status:** Done
-**Date:** 2026-04-09
 **Part of:** mdadm-tiering-infrastructure (Step 6 of 14)
 **Depends on:** mdadm-tiering-infra-05-pool-create, mdadm-tiering-infra-02-pv-tags, mdadm-tiering-infra-12-pv-allocation
 

@@ -48,7 +48,7 @@ func insertMinimalTargetAndNamespace(t *testing.T, store *db.Store, poolName, da
 		PoolName:     poolName,
 		DatasetName:  "fast",
 		DatasetPath:  datasetPath,
-		FUSEMode:     "passthrough",
+		
 	}
 	if err := store.UpsertZFSManagedTarget(zfsTargetRow); err != nil {
 		t.Fatalf("UpsertZFSManagedTarget: %v", err)
@@ -172,7 +172,7 @@ func TestReconcileCopyInProgressPartialDestFile(t *testing.T) {
 	}
 	if err := store.UpsertZFSManagedTarget(&db.ZFSManagedTargetRow{
 		TierTargetID: srcTargetRow.ID, PoolName: "pool", DatasetName: "fast",
-		DatasetPath: srcDir, FUSEMode: "passthrough",
+		DatasetPath: srcDir,
 	}); err != nil {
 		t.Fatalf("upsert src zfs target: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestReconcileCopyInProgressPartialDestFile(t *testing.T) {
 	}
 	if err := store.UpsertZFSManagedTarget(&db.ZFSManagedTargetRow{
 		TierTargetID: dstTargetRow.ID, PoolName: "pool", DatasetName: "warm",
-		DatasetPath: dstDir, FUSEMode: "passthrough",
+		DatasetPath: dstDir,
 	}); err != nil {
 		t.Fatalf("upsert dst zfs target: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestReconcileCopyComplete(t *testing.T) {
 	}
 	if err := store.UpsertZFSManagedTarget(&db.ZFSManagedTargetRow{
 		TierTargetID: srcTargetRow.ID, PoolName: "pool2", DatasetName: "fast",
-		DatasetPath: srcDir, FUSEMode: "passthrough",
+		DatasetPath: srcDir,
 	}); err != nil {
 		t.Fatalf("upsert src zfs: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestReconcileCopyComplete(t *testing.T) {
 	}
 	if err := store.UpsertZFSManagedTarget(&db.ZFSManagedTargetRow{
 		TierTargetID: dstTargetRow.ID, PoolName: "pool2", DatasetName: "warm",
-		DatasetPath: dstDir, FUSEMode: "passthrough",
+		DatasetPath: dstDir,
 	}); err != nil {
 		t.Fatalf("upsert dst zfs: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestReconcileSwitched(t *testing.T) {
 	}
 	if err := store.UpsertZFSManagedTarget(&db.ZFSManagedTargetRow{
 		TierTargetID: srcTargetRow.ID, PoolName: "pool3", DatasetName: "fast",
-		DatasetPath: srcDir, FUSEMode: "passthrough",
+		DatasetPath: srcDir,
 	}); err != nil {
 		t.Fatalf("upsert src zfs: %v", err)
 	}
@@ -361,7 +361,7 @@ func TestReconcileSwitched(t *testing.T) {
 	}
 	if err := store.UpsertZFSManagedTarget(&db.ZFSManagedTargetRow{
 		TierTargetID: dstTargetRow.ID, PoolName: "pool3", DatasetName: "warm",
-		DatasetPath: dstDir, FUSEMode: "passthrough",
+		DatasetPath: dstDir,
 	}); err != nil {
 		t.Fatalf("upsert dst zfs: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestCreateNamespaceCrossPoolRejected(t *testing.T) {
 	}
 	if err := store.UpsertZFSManagedTarget(&db.ZFSManagedTargetRow{
 		TierTargetID: t1.ID, PoolName: "poolA", DatasetName: "fast",
-		DatasetPath: "/poolA/fast", FUSEMode: "passthrough",
+		DatasetPath: "/poolA/fast",
 	}); err != nil {
 		t.Fatalf("UpsertZFSManagedTarget t1: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestCreateNamespaceCrossPoolRejected(t *testing.T) {
 	}
 	if err := store.UpsertZFSManagedTarget(&db.ZFSManagedTargetRow{
 		TierTargetID: t2.ID, PoolName: "poolB", DatasetName: "warm",
-		DatasetPath: "/poolB/warm", FUSEMode: "passthrough",
+		DatasetPath: "/poolB/warm",
 	}); err != nil {
 		t.Fatalf("UpsertZFSManagedTarget t2: %v", err)
 	}
@@ -518,7 +518,7 @@ func TestCreateNamespaceRankGapRejected(t *testing.T) {
 		}
 		if err := store.UpsertZFSManagedTarget(&db.ZFSManagedTargetRow{
 			TierTargetID: row.ID, PoolName: "pool", DatasetName: name,
-			DatasetPath: "/pool/" + name, FUSEMode: "passthrough",
+			DatasetPath: "/pool/" + name,
 		}); err != nil {
 			t.Fatalf("UpsertZFSManagedTarget %s: %v", name, err)
 		}
@@ -558,7 +558,7 @@ func TestCreateNamespaceContiguousRanksAccepted(t *testing.T) {
 		}
 		if err := store.UpsertZFSManagedTarget(&db.ZFSManagedTargetRow{
 			TierTargetID: row.ID, PoolName: "samepool", DatasetName: name,
-			DatasetPath: "/samepool/" + name, FUSEMode: "passthrough",
+			DatasetPath: "/samepool/" + name,
 		}); err != nil {
 			t.Fatalf("UpsertZFSManagedTarget %s: %v", name, err)
 		}

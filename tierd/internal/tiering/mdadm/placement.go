@@ -9,12 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
+	diskpkg "github.com/JBailes/SmoothNAS/tierd/internal/disk"
+	mdadmraid "github.com/JBailes/SmoothNAS/tierd/internal/mdadm"
+	"github.com/JBailes/SmoothNAS/tierd/internal/spindown"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tiering/meta"
+	"github.com/JBailes/SmoothNAS/tierd/internal/zfs"
 )
 
 // placementInterval is how often the planner runs per pool. Short enough
@@ -45,7 +48,6 @@ const sizeBucketStep = 16
 // sizeBucketBaseBytes is the ceiling for the fastest-tier bucket. Files
 // under this size never drop below the fastest tier on size alone.
 const sizeBucketBaseBytes int64 = 1 << 20 // 1 MB
-
 
 // StartPlacementPlanner launches a per-pool goroutine that walks tier
 // backings on a periodic interval, looks up each file's meta record, and
@@ -91,12 +93,12 @@ func (a *Adapter) decayAllHeat() {
 
 	for pool, s := range stores {
 		halved := 0
-		_ = s.Iterate(func(inode uint64, rec meta.Record) error {
+		_ = s.IterateAll(func(tierRank int, inode uint64, rec meta.Record) error {
 			if rec.HeatCounter == 0 {
 				return nil
 			}
 			rec.HeatCounter /= 2
-			s.PutBlocking(inode, rec)
+			s.PutBlocking(inode, tierRank, rec)
 			halved++
 			return nil
 		})
@@ -105,7 +107,7 @@ func (a *Adapter) decayAllHeat() {
 }
 
 func (a *Adapter) runPlacementCycle(ctx context.Context) {
-	nss, err := a.store.ListMdadmManagedNamespaces()
+	nss, err := a.listManagedNamespaces()
 	if err != nil {
 		log.Printf("placement: list namespaces: %v", err)
 		return
@@ -127,15 +129,22 @@ type rankedPoolTarget struct {
 	fullThresholdPct int
 }
 
+func effectiveTargetFillPct(rank, targetFillPct, fullThresholdPct, slowestRank int) int {
+	if rank == slowestRank && fullThresholdPct > 0 {
+		return fullThresholdPct
+	}
+	return targetFillPct
+}
+
 // candidate captures the planner's view of one file: where it currently
 // lives, how big it is, and what the user's pin state says.
 type candidate struct {
-	rel      string
-	size     int64
-	inode    uint64
-	curRank  int
-	curTarg  db.MdadmManagedTargetRow
-	pin      meta.PinState
+	rel     string
+	size    int64
+	inode   uint64
+	curRank int
+	curTarg db.MdadmManagedTargetRow
+	pin     meta.PinState
 }
 
 // tierCapacity tracks usage bookkeeping during the planning pass: current
@@ -143,11 +152,31 @@ type candidate struct {
 // caps in bytes, so the bin-packer can account for admissions without
 // re-stat'ing.
 type tierCapacity struct {
-	totalBytes int64
-	usedBytes  int64 // updated by planner as it places files
-	targetCap  int64 // target_fill_pct of totalBytes
-	fullCap    int64 // full_threshold_pct of totalBytes
-	target     db.MdadmManagedTargetRow
+	totalBytes          int64
+	usedBytes           int64 // updated by planner as it places files
+	initialUsed         int64 // usedBytes at the start of this cycle, before bin-packing
+	targetCap           int64 // target_fill_pct of totalBytes
+	fullCap             int64 // full_threshold_pct of totalBytes
+	balanceToTargetFill bool
+	target              db.MdadmManagedTargetRow
+}
+
+// admissionCap returns the effective cap this tier should enforce during
+// the current planning cycle. Normal tiers admit up to fullCap — the
+// planner only demotes once a tier has actually crossed its hard cap.
+// A tier that starts the cycle already above fullCap enters "drain mode":
+// its effective cap falls back to targetCap so the bin-packer keeps
+// spilling files out until usage drops below the soft cap. During
+// spindown-active maintenance, every tier balances directly to targetCap
+// so HDD standby starts with the SSD tier at target_fill_pct.
+func (c *tierCapacity) admissionCap() int64 {
+	if c.balanceToTargetFill {
+		return c.targetCap
+	}
+	if c.initialUsed > c.fullCap {
+		return c.targetCap
+	}
+	return c.fullCap
 }
 
 // planPoolPlacement gathers every file in a pool, runs a size-aware
@@ -162,20 +191,52 @@ type tierCapacity struct {
 // If a tier has no room below target_fill, the packer falls through to
 // full_threshold as a hard cap; files that don't fit anywhere stay put.
 func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNamespaceRow) {
+	maintenanceMode, ok := a.poolReadyForSmoothNASMaintenance(ns.PoolName)
+	if !ok {
+		return
+	}
+	trackTargetBalance := maintenanceMode == placementMaintenanceSpindownActive
+	balanceStatus := spindown.TargetBalanceStatus{}
+	if trackTargetBalance {
+		now := time.Now().UTC().Format(time.RFC3339)
+		balanceStatus = spindown.TargetBalanceStatus{
+			Active:    true,
+			StartedAt: now,
+			CheckedAt: now,
+			Reason:    "target-balance placement running",
+		}
+		_ = spindown.StoreTargetBalanceStatus(a.store, ns.PoolName, balanceStatus)
+		defer func() {
+			if ctx.Err() != nil && balanceStatus.Reason == "target-balance placement running" {
+				balanceStatus.Reason = "target-balance placement canceled"
+			}
+			if balanceStatus.Reason == "target-balance placement running" {
+				balanceStatus.Reason = "target-balance placement complete"
+			}
+			now := time.Now().UTC().Format(time.RFC3339)
+			balanceStatus.Active = false
+			balanceStatus.FinishedAt = now
+			balanceStatus.CheckedAt = now
+			_ = spindown.StoreTargetBalanceStatus(a.store, ns.PoolName, balanceStatus)
+		}()
+	}
 	// Three idle gates — all must pass. If any of them reports activity
 	// the planner skips the cycle entirely. This keeps 50k-file walks,
 	// meta-store reads, and potential migrations out of the way of
 	// anything actively touching the pool.
 	if !a.poolIdleForPlacement(ns.NamespaceID) {
+		balanceStatus.Reason = "target-balance placement deferred; pool is not idle"
 		return
 	}
 
 	ranked := a.poolRankedTargets(ns.PoolName)
 	if len(ranked) < 2 {
+		balanceStatus.Reason = "target-balance placement skipped; pool has fewer than two tiers"
 		return
 	}
 	store := a.metaStoreFor(ns.PoolName)
 	if store == nil {
+		balanceStatus.Reason = "target-balance placement skipped; metadata store is unavailable"
 		return
 	}
 
@@ -185,6 +246,7 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 		var st syscall.Statfs_t
 		if err := syscall.Statfs(rt.target.MountPath, &st); err != nil {
 			log.Printf("placement: statfs %s: %v", rt.target.MountPath, err)
+			balanceStatus.Reason = "target-balance placement skipped; tier capacity unavailable"
 			return
 		}
 		total := int64(st.Blocks) * int64(st.Bsize)
@@ -194,22 +256,29 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 			// fullThresholdPct is authoritative for the hard cap; target_fill
 			// is looked up separately by poolRankedTargets.
 		}
-		if rt.targetFillPct > 0 {
-			targetPct = int64(rt.targetFillPct)
+		effectiveTargetPct := effectiveTargetFillPct(
+			rt.rank, rt.targetFillPct, rt.fullThresholdPct, ranked[len(ranked)-1].rank,
+		)
+		if effectiveTargetPct > 0 {
+			targetPct = int64(effectiveTargetPct)
 		}
 		caps[rt.rank] = &tierCapacity{
-			totalBytes: total,
-			usedBytes:  used,
-			targetCap:  total * targetPct / 100,
-			fullCap:    total * int64(max1(rt.fullThresholdPct, 95)) / 100,
-			target:     rt.target,
+			totalBytes:          total,
+			usedBytes:           used,
+			initialUsed:         used,
+			targetCap:           total * targetPct / 100,
+			fullCap:             total * int64(max1(rt.fullThresholdPct, 95)) / 100,
+			balanceToTargetFill: maintenanceMode == placementMaintenanceSpindownActive,
+			target:              rt.target,
 		}
 	}
 
 	// Walk every tier and collect candidates. We'll sort+pack below.
 	var cands []candidate
+	now := time.Now()
 	for _, rt := range ranked {
 		if ctx.Err() != nil {
+			balanceStatus.Reason = "target-balance placement canceled"
 			return
 		}
 		_ = filepath.WalkDir(rt.target.MountPath, func(path string, d fs.DirEntry, err error) error {
@@ -230,6 +299,9 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 			if err != nil {
 				return nil
 			}
+			if now.Sub(info.ModTime()) < placementQuiescentPeriod {
+				return nil
+			}
 			st, ok := info.Sys().(*syscall.Stat_t)
 			if !ok {
 				return nil
@@ -238,7 +310,7 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 			if err != nil {
 				return nil
 			}
-			rec, _, _ := store.Get(st.Ino)
+			rec, _, _ := store.Get(st.Ino, rt.rank)
 			cands = append(cands, candidate{
 				rel:     rel,
 				size:    info.Size(),
@@ -305,15 +377,23 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 	// stay; remaining moves are dropped and retried next cycle.
 	moved := 0
 	skipped := 0
+	planned := 0
 	const idleRecheckEvery = 8
 	for i, c := range cands {
 		if ctx.Err() != nil {
+			balanceStatus.Reason = "target-balance placement canceled"
 			break
 		}
 		if i > 0 && i%idleRecheckEvery == 0 {
 			if !a.poolIdleForPlacement(ns.NamespaceID) {
 				log.Printf("placement: pool %s aborting mid-cycle after %d moves (activity resumed)",
 					ns.PoolName, moved)
+				balanceStatus.Reason = "target-balance placement paused; pool activity resumed"
+				balanceStatus.CandidateCount = len(cands)
+				balanceStatus.PlannedMoves = planned
+				balanceStatus.PendingMoves = max1(planned-moved, 0)
+				balanceStatus.Moved = moved
+				balanceStatus.Skipped = skipped
 				return
 			}
 		}
@@ -321,77 +401,176 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 		if !ok || want == c.curRank {
 			continue
 		}
+		planned++
 		dest := caps[want]
 		if dest == nil {
 			skipped++
 			continue
 		}
-		if err := a.moveForPlacement(ns, c.rel, c.curTarg, dest.target, want); err != nil {
+		if err := a.moveForPlacement(ns, c.rel, c.curTarg, dest.target, c.curRank, want); err != nil {
 			log.Printf("placement: move %s %s→rank%d: %v",
 				c.rel, c.curTarg.TierName, want, err)
 			continue
 		}
 		moved++
 	}
+	balanceStatus.CandidateCount = len(cands)
+	balanceStatus.PlannedMoves = planned
+	balanceStatus.PendingMoves = max1(planned-moved, 0)
+	balanceStatus.Moved = moved
+	balanceStatus.Skipped = skipped
+	switch {
+	case balanceStatus.PendingMoves > 0:
+		balanceStatus.Reason = "target-balance placement has pending moves"
+	case planned == 0:
+		balanceStatus.CandidateExhausted = true
+		balanceStatus.Reason = "target-balance placement exhausted candidates"
+	}
 	if len(cands) > 0 {
 		log.Printf("placement: pool %s scanned=%d moved=%d skipped=%d",
 			ns.PoolName, len(cands), moved, skipped)
 	}
 
-	// Meta store eviction: per-tier capacity check. If a tier has zero
-	// headroom under target_fill, push the coldest non-pinned-hot meta
-	// records to the next slower tier. Bounded batch size per cycle so
-	// a heavily-overloaded fastest tier converges over a few cycles
-	// rather than spending a full pass on a single eviction.
-	a.evictColdMeta(ns.PoolName, caps, ranked)
+	// Meta records always live on the same tier as their data file, so
+	// no separate meta-eviction step is needed; moveForPlacement updates
+	// the meta as part of every successful data move.
 }
 
-// evictColdMeta moves meta records from any tier that is over its
-// target_fill threshold down to the next slower tier. Called at the end
-// of a placement cycle; the planner already bin-packed user data, so the
-// remaining headroom calculation is up to date. Skips evictions when no
-// tier has capacity to receive (slowest tier full).
-func (a *Adapter) evictColdMeta(poolName string, caps map[int]*tierCapacity, ranked []rankedPoolTarget) {
-	const maxPerEvict = 4096
+type placementMaintenanceMode int
 
-	store := a.metaStoreFor(poolName)
-	if store == nil || store.TierCount() < 2 {
-		return
+const (
+	placementMaintenanceNormal placementMaintenanceMode = iota
+	placementMaintenanceSpindownActive
+)
+
+func (a *Adapter) poolReadyForSmoothNASMaintenance(poolName string) (placementMaintenanceMode, bool) {
+	enabled, err := spindown.Enabled(a.store, spindown.PoolEnabledKey(poolName))
+	if err != nil || !enabled {
+		return placementMaintenanceNormal, err == nil
 	}
-	for i, rt := range ranked {
-		if i >= store.TierCount()-1 {
-			break // slowest tier — nowhere to evict to
-		}
-		c := caps[rt.rank]
-		if c == nil {
-			continue
-		}
-		if c.usedBytes <= c.targetCap {
-			continue
-		}
-		moved, err := store.EvictColdest(i, maxPerEvict)
+	devices, err := a.poolBackingDevices(poolName)
+	if err != nil {
+		log.Printf("placement: pool %s spindown backing lookup: %v", poolName, err)
+		return placementMaintenanceNormal, false
+	}
+	if len(devices) == 0 {
+		decision, _, err := spindown.DecisionFor(a.store, spindown.PoolEnabledKey(poolName), spindown.PoolWindowsKey(poolName), time.Now())
 		if err != nil {
-			log.Printf("placement: pool %s meta evict tier %s: %v", poolName, rt.target.TierName, err)
-			continue
+			log.Printf("placement: pool %s spindown policy: %v", poolName, err)
+			return placementMaintenanceNormal, false
 		}
-		if moved > 0 {
-			log.Printf("placement: pool %s meta evict tier %s → next: %d records",
-				poolName, rt.target.TierName, moved)
+		if !decision.Allowed {
+			log.Printf("placement: pool %s deferred outside active window; next_active_at=%s", poolName, decision.NextActiveAt)
+		}
+		if decision.Allowed {
+			return placementMaintenanceSpindownActive, true
+		}
+		return placementMaintenanceNormal, false
+	}
+	blocked, reason := backingDevicesStandbyBlocked(devices)
+	if blocked {
+		log.Printf("placement: pool %s deferred: %s", poolName, reason)
+		return placementMaintenanceNormal, false
+	}
+	return placementMaintenanceSpindownActive, true
+}
+
+func (a *Adapter) poolBackingDevices(poolName string) ([]string, error) {
+	slots, err := a.store.ListTierSlots(poolName)
+	if err != nil {
+		return nil, err
+	}
+	mdadmMembers := map[string][]string{}
+	if arrays, err := mdadmraid.List(); err == nil {
+		for _, array := range arrays {
+			mdadmMembers[array.Path] = append([]string(nil), array.MemberDisks...)
 		}
 	}
+	seen := map[string]bool{}
+	var devices []string
+	add := func(path string) {
+		if path == "" || seen[path] {
+			return
+		}
+		seen[path] = true
+		devices = append(devices, path)
+	}
+	for _, slot := range slots {
+		if slot.State == db.TierSlotStateEmpty {
+			continue
+		}
+		if slot.BackingKind == "zfs" {
+			for _, dev := range zfs.MemberDevices(slot.BackingRef) {
+				add(dev)
+			}
+			continue
+		}
+		if slot.PVDevice == nil {
+			continue
+		}
+		if members := mdadmMembers[*slot.PVDevice]; len(members) > 0 {
+			for _, dev := range members {
+				add(dev)
+			}
+		} else {
+			add(*slot.PVDevice)
+		}
+	}
+	return devices, nil
+}
+
+func backingDevicesStandbyBlocked(devices []string) (bool, string) {
+	disks, err := diskpkg.List()
+	if err != nil {
+		return true, "could not list disks to confirm backing HDDs are already active"
+	}
+	rotational := make(map[string]bool, len(disks))
+	for _, d := range disks {
+		rotational[diskpkg.BaseDiskPath(d.Path)] = d.Rotational
+	}
+	for _, device := range devices {
+		base := diskpkg.BaseDiskPath(device)
+		isRotational, known := rotational[base]
+		if !known {
+			return true, "could not confirm backing disks are already active"
+		}
+		if !isRotational {
+			continue
+		}
+		state, err := diskpkg.QueryPowerState(base)
+		if err != nil {
+			return true, "could not confirm backing HDDs are already active"
+		}
+		if state == "standby" || state == "sleeping" {
+			return true, "backing HDD is in standby; waiting for external activity"
+		}
+	}
+	return false, ""
 }
 
 // admitWithFallback finds the highest-ranking tier (fastest) at or slower
-// than preferredRank whose remaining budget (targetCap - usedBytes) can
-// absorb size. Falls through to fullCap if no tier has room under target.
+// than preferredRank whose remaining budget (cap - usedBytes) can absorb
+// size. Two passes:
+//
+//	Pass A — each tier's admissionCap() is honoured. For tiers that did
+//	  not start the cycle over full_threshold_pct that is fullCap, so
+//	  files are allowed to fill the fastest tier all the way up to the
+//	  hard cap before spilling; for tiers already over full_threshold_pct
+//	  it collapses to targetCap so the tier drains back to its soft cap
+//	  before re-accepting new placements.
+//	Pass B — fall back to fullCap everywhere. Only reached when Pass A
+//	  refuses every tier from preferred downward; this keeps oversized
+//	  or mid-drain tiers from stranding a file when another tier still
+//	  has hard-cap room.
+//
 // Returns the rank of the tier that accepted the file, or the preferred
 // rank if no admission succeeded (in which case the caller just leaves
 // the file where it is — assignments[] becomes a no-op compared to its
 // current rank).
 func admitWithFallback(caps map[int]*tierCapacity, ranked []rankedPoolTarget, preferredRank int, size int64) int {
-	// Pass A: try each tier from preferred (inclusive) to slowest, honour
-	// target_fill_pct as a soft cap. "Preferred" is usually fastest, so
-	// the scan walks ranks ascending (fastest → slowest) from there.
+	// Pass A: honour each tier's admissionCap (fullCap normally, targetCap
+	// when the tier is draining). "Preferred" is usually fastest, so the
+	// scan walks ranks ascending (fastest → slowest) from there.
 	for _, rt := range ranked {
 		if rt.rank < preferredRank {
 			continue
@@ -400,13 +579,13 @@ func admitWithFallback(caps map[int]*tierCapacity, ranked []rankedPoolTarget, pr
 		if c == nil {
 			continue
 		}
-		if c.usedBytes+size <= c.targetCap {
+		if c.usedBytes+size <= c.admissionCap() {
 			c.usedBytes += size
 			return rt.rank
 		}
 	}
-	// Pass B: target_fill exceeded everywhere from preferred downward.
-	// Accept at full_threshold.
+	// Pass B: admission cap exceeded everywhere from preferred downward.
+	// Accept at full_threshold so we don't strand the file.
 	for _, rt := range ranked {
 		if rt.rank < preferredRank {
 			continue
@@ -423,23 +602,11 @@ func admitWithFallback(caps map[int]*tierCapacity, ranked []rankedPoolTarget, pr
 	return preferredRank
 }
 
-// poolIdleForPlacement gates the planner on three signals:
-//
-//  1. No FUSE OPENs on this namespace for at least placementQuiescentPeriod.
-//  2. Zero active opens right now (rsync mid-file, user mid-edit, etc).
-//  3. No running backup_runs in the DB — backups often use passthrough
-//     writes that bypass HandleOpen after the initial open, so a very
-//     large file could age the activity stamp past the quiescent window
-//     even while writes are ongoing. Consulting backup_runs catches that.
-//
-// Any "active" signal aborts this cycle; the next cycle re-checks.
+// poolIdleForPlacement gates the planner on the absence of running
+// backup_runs. Live I/O signalling now comes from the smoothfs kernel
+// module's netlink events; per-namespace open counters are no longer
+// tracked by this adapter.
 func (a *Adapter) poolIdleForPlacement(namespaceID string) bool {
-	if idle := a.namespaceIdleFor(namespaceID); idle < placementQuiescentPeriod {
-		return false
-	}
-	if atomic.LoadInt64(a.nsOpenCounter(namespaceID)) > 0 {
-		return false
-	}
 	runs, err := a.store.ListActiveBackupRuns()
 	if err == nil && len(runs) > 0 {
 		return false
@@ -506,7 +673,7 @@ func idealRank(pin meta.PinState, sizeBytes int64, fastestRank, slowestRank int)
 // ascending (fastest first), each annotated with its full-threshold so
 // the capacity gate can be applied without an extra DB round-trip.
 func (a *Adapter) poolRankedTargets(poolName string) []rankedPoolTarget {
-	targets, err := a.store.ListMdadmManagedTargets()
+	targets, err := a.listManagedTargets()
 	if err != nil {
 		log.Printf("placement: list targets: %v", err)
 		return nil
@@ -516,7 +683,7 @@ func (a *Adapter) poolRankedTargets(poolName string) []rankedPoolTarget {
 		if targets[i].PoolName != poolName {
 			continue
 		}
-		tt, err := a.store.GetTierTargetByBackingRef(
+		tt, err := a.getTierTargetByBackingRef(
 			backingRefTarget(targets[i].PoolName, targets[i].TierName), BackendKind)
 		if err != nil {
 			continue
@@ -529,16 +696,26 @@ func (a *Adapter) poolRankedTargets(poolName string) []rankedPoolTarget {
 		})
 	}
 	sort.Slice(ranked, func(i, j int) bool { return ranked[i].rank < ranked[j].rank })
+	if len(ranked) > 0 {
+		slowestRank := ranked[len(ranked)-1].rank
+		for i := range ranked {
+			ranked[i].targetFillPct = effectiveTargetFillPct(
+				ranked[i].rank, ranked[i].targetFillPct, ranked[i].fullThresholdPct, slowestRank,
+			)
+		}
+	}
 	return ranked
 }
 
-
 // moveForPlacement copies a file from source tier to dest tier, updates
-// the meta record, and unlinks the source. Bails out if the namespace has
-// active opens (next planner cycle will retry).
-func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, src, dst db.MdadmManagedTargetRow, destRank int) error {
-	if atomic.LoadInt64(a.nsOpenCounter(ns.NamespaceID)) > 0 {
-		return fmt.Errorf("namespace has active opens; deferring")
+// the meta record (which now lives on the destination tier instead of
+// the source), and unlinks the source.
+func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, src, dst db.MdadmManagedTargetRow, srcRank, destRank int) error {
+	if !a.targetMountReady(src) {
+		return fmt.Errorf("source tier %s is not mounted", src.TierName)
+	}
+	if !a.targetMountReady(dst) {
+		return fmt.Errorf("destination tier %s is not mounted", dst.TierName)
 	}
 
 	srcPath := filepath.Join(src.MountPath, rel)
@@ -554,6 +731,16 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 	if err != nil {
 		return fmt.Errorf("stat src: %w", err)
 	}
+	srcSt, _ := srcInfo.Sys().(*syscall.Stat_t)
+
+	// Read the source-tier meta record now (before any disk mutation) so
+	// we can preserve pin state and heat counter on the destination.
+	store := a.metaStoreFor(ns.PoolName)
+	var srcRec meta.Record
+	var hadSrcRec bool
+	if store != nil && srcSt != nil {
+		srcRec, hadSrcRec, _ = store.Get(srcSt.Ino, srcRank)
+	}
 
 	if err := copyFileContents(srcPath, tmpPath, srcInfo.Mode()); err != nil {
 		_ = os.Remove(tmpPath)
@@ -563,13 +750,6 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 	// Preserve mtime so subsequent rsyncs don't re-transfer this file.
 	if err := os.Chtimes(tmpPath, srcInfo.ModTime(), srcInfo.ModTime()); err != nil {
 		log.Printf("placement: chtimes %s: %v", tmpPath, err)
-	}
-
-	// Re-check active opens immediately before the swap — if someone
-	// opened during the copy, back out.
-	if atomic.LoadInt64(a.nsOpenCounter(ns.NamespaceID)) > 0 {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("active open raced migration; reverting")
 	}
 
 	if err := os.Rename(tmpPath, dstPath); err != nil {
@@ -584,23 +764,30 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 		log.Printf("placement: unlink src %s after move: %v", srcPath, err)
 	}
 
-	// Update meta record: new tier, reset LastAccessNS to now (a move is
-	// observable activity), preserve pin state + heat counter.
-	store := a.metaStoreFor(ns.PoolName)
+	// Move the meta record from src tier to dest tier. The dest file has
+	// its own inode (different filesystem) so we read it post-rename.
 	if store != nil {
 		dstStat, err := os.Stat(dstPath)
 		if err == nil {
 			if dstSt, ok := dstStat.Sys().(*syscall.Stat_t); ok {
-				rec, _, _ := store.Get(dstSt.Ino)
-				if rec.Version == 0 {
-					rec = meta.Record{
-						Version:     meta.RecordVersion,
-						NamespaceID: meta.NamespaceID(ns.NamespaceID),
-					}
+				rec := meta.Record{
+					Version:     meta.RecordVersion,
+					NamespaceID: meta.NamespaceID(ns.NamespaceID),
+				}
+				if hadSrcRec {
+					rec.PinState = srcRec.PinState
+					rec.HeatCounter = srcRec.HeatCounter
 				}
 				rec.TierIdx = uint8(destRank)
 				rec.LastAccessNS = uint64(time.Now().UnixNano())
-				store.PutBlocking(dstSt.Ino, rec)
+				store.PutBlocking(dstSt.Ino, destRank, rec)
+			}
+		}
+		// Clean up the src-tier record. The dst inode is different, so
+		// the new dest write doesn't supersede it.
+		if srcSt != nil {
+			if err := store.Delete(srcSt.Ino, srcRank); err != nil {
+				log.Printf("placement: delete src meta tier=%d inode=%d: %v", srcRank, srcSt.Ino, err)
 			}
 		}
 	}

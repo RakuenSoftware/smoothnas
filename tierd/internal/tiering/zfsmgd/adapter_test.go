@@ -286,7 +286,7 @@ func TestReconcileEmpty(t *testing.T) {
 // ---- Capabilities fields ----------------------------------------------------
 
 func TestCapabilitiesFields(t *testing.T) {
-	caps := zfsmgdadapter.ExportedCapabilities("passthrough")
+	caps := zfsmgdadapter.ExportedCapabilities()
 	if caps.MovementGranularity != "file" {
 		t.Errorf("MovementGranularity = %q, want file", caps.MovementGranularity)
 	}
@@ -294,10 +294,10 @@ func TestCapabilitiesFields(t *testing.T) {
 		t.Errorf("RecallMode = %q, want synchronous", caps.RecallMode)
 	}
 	if caps.SnapshotMode != "none" {
-		t.Errorf("SnapshotMode = %q, want none (until proposal 05)", caps.SnapshotMode)
+		t.Errorf("SnapshotMode = %q, want none", caps.SnapshotMode)
 	}
-	if caps.FUSEMode != "passthrough" {
-		t.Errorf("FUSEMode = %q, want passthrough", caps.FUSEMode)
+	if caps.SupportsChecksums != true {
+		t.Errorf("SupportsChecksums = false, want true")
 	}
 	if !caps.SupportsChecksums {
 		t.Error("SupportsChecksums should be true")
@@ -313,9 +313,3 @@ func TestCapabilitiesFields(t *testing.T) {
 	}
 }
 
-func TestCapabilitiesFallbackMode(t *testing.T) {
-	caps := zfsmgdadapter.ExportedCapabilities("fallback")
-	if caps.FUSEMode != "fallback" {
-		t.Errorf("FUSEMode = %q, want fallback", caps.FUSEMode)
-	}
-}

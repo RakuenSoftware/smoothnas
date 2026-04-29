@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { useI18n } from '@rakuensoftware/smoothgui';
 import './Terminal.scss';
 
 export default function Terminal() {
+  const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -49,6 +51,7 @@ export default function Terminal() {
       wsRef.current?.close();
       term.dispose();
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function connect(term: XTerm, fit: FitAddon) {
@@ -64,10 +67,10 @@ export default function Terminal() {
     ws.onmessage = (event) => term.write(event.data);
     ws.onclose = () => {
       setConnected(false);
-      term.write('\r\n\x1b[90m--- session ended ---\x1b[0m\r\n');
+      term.write(`\r\n\x1b[90m--- ${t('terminal.sessionEnded')} ---\x1b[0m\r\n`);
     };
     ws.onerror = () => {
-      setError('WebSocket connection failed');
+      setError(t('terminal.wsFailed'));
       setConnected(false);
     };
 
@@ -96,10 +99,10 @@ export default function Terminal() {
   return (
     <div className="terminal-page">
       <div className="terminal-header">
-        <h1>Terminal</h1>
+        <h1>{t('terminal.title')}</h1>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <span className={`badge ${connected ? 'online' : 'inactive'}`}>{connected ? 'Connected' : 'Disconnected'}</span>
-          {!connected && <button className="btn secondary" onClick={reconnect}>Reconnect</button>}
+          <span className={`badge ${connected ? 'online' : 'inactive'}`}>{connected ? t('terminal.connected') : t('terminal.disconnected')}</span>
+          {!connected && <button className="btn secondary" onClick={reconnect}>{t('terminal.reconnect')}</button>}
         </div>
       </div>
       {error && <div className="error-msg" style={{ marginBottom: 8 }}>{error}</div>}

@@ -216,6 +216,19 @@ func HasL2ARCInLayout(layout string) bool {
 	return false
 }
 
+// HasSpecialVdevInLayout reports whether the vdev layout string contains a
+// special allocation class vdev. Raw ZFS pools need this for the spindown
+// metadata-on-SSD invariant.
+func HasSpecialVdevInLayout(layout string) bool {
+	for _, line := range strings.Split(layout, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "special" {
+			return true
+		}
+	}
+	return false
+}
+
 // HasChecksumErrorsInLayout reports whether any device in the vdev layout
 // has a non-zero checksum error count. The layout lines look like:
 //
