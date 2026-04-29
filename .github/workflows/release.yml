@@ -35,7 +35,7 @@ jobs:
           fetch-depth: 0
 
       - name: Require SmoothFS protocol gate on stable releases
-        if: github.ref_name == 'main'
+        if: github.ref_name == 'main' && vars.SMOOTHNAS_PROTOCOL_GATE_ENABLED == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -176,8 +176,8 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get install -y \
-            bc bison flex libelf-dev libssl-dev libncurses-dev pahole \
-            rsync debhelper kmod fakeroot
+            build-essential bc bison flex libelf-dev libssl-dev libncurses-dev \
+            libdw-dev pahole rsync debhelper kmod fakeroot
           git clone --filter=blob:none https://github.com/RakuenSoftware/smoothkernel deps/smoothkernel-src
           cd deps/smoothkernel-src
           git checkout "${{ steps.smoothkernel_ref.outputs.sha }}"
