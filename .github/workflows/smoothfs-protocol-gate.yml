@@ -15,6 +15,12 @@ permissions:
 jobs:
   linux-protocol-gate:
     name: protocol and mixed-client soak
+    # Requires a self-hosted Linux runner labelled `smoothnas-protocol`
+    # (mounts SmoothFS, loads kernel modules, runs as root). The repo
+    # variable SMOOTHNAS_PROTOCOL_GATE_ENABLED gates this job so it
+    # cleanly skips when no such runner exists instead of queuing
+    # indefinitely. Set the variable to "true" once the runner is wired up.
+    if: vars.SMOOTHNAS_PROTOCOL_GATE_ENABLED == 'true'
     runs-on: [self-hosted, smoothnas-protocol]
     timeout-minutes: 90
     steps:
