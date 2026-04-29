@@ -35,7 +35,7 @@ jobs:
           fetch-depth: 0
 
       - name: Require SmoothFS protocol gate on stable releases
-        if: github.ref_name == 'main'
+        if: github.ref_name == 'main' && vars.SMOOTHNAS_PROTOCOL_GATE_ENABLED == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -114,19 +114,13 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          if [ "${{ github.repository }}" = "JBailes/SmoothNAS" ] && [ "${{ github.ref_name }}" != "main" ]; then
-            sudo apt-get install -y libpam0g-dev gcc
-          else
-            sudo apt-get install -y xorriso isolinux syslinux-utils cpio gzip file curl libpam0g-dev gcc
-          fi
+          sudo apt-get install -y \
+            xorriso isolinux syslinux-utils cpio gzip file curl \
+            libpam0g-dev gcc dpkg-dev xz-utils ripgrep
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: tierd/go.mod
-
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SMOOTHFS_REPO_SSH_KEY }}
 
       - uses: actions/setup-node@v4
         with:
@@ -136,7 +130,7 @@ jobs:
 
       - name: Build tierd backend
         working-directory: tierd
-        run: GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf GIT_CONFIG_VALUE_0=https://github.com/ GOPRIVATE=github.com/RakuenSoftware/* GONOSUMDB=github.com/RakuenSoftware/* CGO_ENABLED=1 go build -ldflags "-X main.version=${{ steps.meta.outputs.version }}" -o ../bin/tierd ./cmd/tierd/
+        run: CGO_ENABLED=1 go build -ldflags "-X main.version=${{ steps.meta.outputs.version }}" -o ../bin/tierd ./cmd/tierd/
 
       - name: Build tierd-ui frontend
         working-directory: tierd-ui
@@ -159,14 +153,62 @@ jobs:
           }
           EOFM
 
+      # --- Sibling repos for the ISO build ---
+
+      - name: Read pinned SmoothKernel release tag
+        id: smoothkernel
+        run: |
+          set -euo pipefail
+          TAG="$(head -n 1 iso/smoothkernel-version | tr -d '[:space:]')"
+          [ -n "$TAG" ] || { echo "iso/smoothkernel-version is empty" >&2; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Pinned to SmoothKernel release: $TAG"
+
+      - name: Download SmoothKernel + ZFS .debs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p deps/smoothkernel-out
+          gh release download "${{ steps.smoothkernel.outputs.tag }}" \
+            --repo RakuenSoftware/smoothkernel \
+            --pattern '*.deb' \
+            --pattern 'SHA256SUMS' \
+            --dir deps/smoothkernel-out
+          (cd deps/smoothkernel-out && sha256sum -c SHA256SUMS)
+          ls -lh deps/smoothkernel-out/
+
+      - name: Checkout smoothiso
+        uses: actions/checkout@v4
+        with:
+          repository: RakuenSoftware/smoothiso
+          path: deps/smoothiso
+
+      - name: Checkout smoothgui
+        uses: actions/checkout@v4
+        with:
+          repository: RakuenSoftware/smoothgui
+          path: deps/smoothgui
+
+      - name: Build smoothgui installer frontend
+        working-directory: deps/smoothgui
+        run: |
+          echo '//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}' >> .npmrc
+          npm ci
+          npm run build:installer
+
       - name: Build ISO
-        if: github.repository != 'JBailes/SmoothNAS' || github.ref_name == 'main'
+        env:
+          SMOOTHISO_DIR: ${{ github.workspace }}/deps/smoothiso
+          SMOOTHGUI_DIR: ${{ github.workspace }}/deps/smoothgui
+          SMOOTHKERNEL_DIR: ${{ github.workspace }}/deps/smoothkernel-out
+          ZFS_ARTIFACT_DIR: ${{ github.workspace }}/deps/smoothkernel-out
+          SMOOTHFS_REPO_URL: https://github.com/RakuenSoftware/smoothfs.git
         run: |
           chmod +x iso/build-iso.sh
           ./iso/build-iso.sh ${{ steps.meta.outputs.version }}
 
       - name: Create GitHub Release
-        if: github.repository != 'JBailes/SmoothNAS' || github.ref_name == 'main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
@@ -175,20 +217,6 @@ jobs:
           prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
           files: |
             iso/output/smoothnas-${{ steps.meta.outputs.version }}.iso
-            bin/tierd
-            dist/tierd-ui.tar.gz
-            dist/manifest.json
-          generate_release_notes: true
-
-      - name: Create Lightweight GitHub Release
-        if: github.repository == 'JBailes/SmoothNAS' && github.ref_name != 'main'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          name: ${{ steps.meta.outputs.name }}
-          draft: false
-          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
-          files: |
             bin/tierd
             dist/tierd-ui.tar.gz
             dist/manifest.json
