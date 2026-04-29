@@ -14,10 +14,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SMOOTHFS_REPO_SSH_KEY }}
-
       - uses: actions/setup-go@v5
         with:
           go-version-file: tierd/go.mod
@@ -27,16 +23,12 @@ jobs:
 
       - name: Run go vet
         working-directory: tierd
-        run: GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf GIT_CONFIG_VALUE_0=https://github.com/ GOPRIVATE=github.com/RakuenSoftware/* GONOSUMDB=github.com/RakuenSoftware/* CGO_ENABLED=1 go vet ./...
+        run: CGO_ENABLED=1 go vet ./...
 
   build-backend:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SMOOTHFS_REPO_SSH_KEY }}
 
       - uses: actions/setup-go@v5
         with:
@@ -47,16 +39,12 @@ jobs:
 
       - name: Build
         working-directory: tierd
-        run: GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf GIT_CONFIG_VALUE_0=https://github.com/ GOPRIVATE=github.com/RakuenSoftware/* GONOSUMDB=github.com/RakuenSoftware/* CGO_ENABLED=1 go build -o ../bin/tierd ./cmd/tierd/
+        run: CGO_ENABLED=1 go build -o ../bin/tierd ./cmd/tierd/
 
   test-backend:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SMOOTHFS_REPO_SSH_KEY }}
 
       - uses: actions/setup-go@v5
         with:
@@ -67,7 +55,7 @@ jobs:
 
       - name: Run Go tests
         working-directory: tierd
-        run: GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.git@github.com:.insteadOf GIT_CONFIG_VALUE_0=https://github.com/ GOPRIVATE=github.com/RakuenSoftware/* GONOSUMDB=github.com/RakuenSoftware/* CGO_ENABLED=1 go test ./... -count=1
+        run: CGO_ENABLED=1 go test ./... -count=1
 
   build-frontend:
     runs-on: ubuntu-24.04
