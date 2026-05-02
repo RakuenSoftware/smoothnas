@@ -127,17 +127,17 @@ resolve_appliance_artifacts() {
 
     ZFS_PACKAGE_FILES=()
     local pkg pattern_suffix
-    # zfs-dkms / zfs-initramfs are Architecture: all; everything else is
-    # arch-specific and ships in both _amd64 and _arm64 flavours from the
-    # SmoothKernel release.
+    # All OpenZFS .debs are filename-tagged with the arch in the
+    # SmoothKernel release, even arch-all ones (zfs-dkms, zfs-initramfs);
+    # we just pick the per-arch filename for each.
     for entry in \
         "libnvpair3_*:${DEB_ARCH}" \
         "libuutil3_*:${DEB_ARCH}" \
         "libzfs7_*:${DEB_ARCH}" \
         "libzpool7_*:${DEB_ARCH}" \
         "zfs_*:${DEB_ARCH}" \
-        "zfs-dkms_*:all" \
-        "zfs-initramfs_*:all"; do
+        "zfs-dkms_*:${DEB_ARCH}" \
+        "zfs-initramfs_*:${DEB_ARCH}"; do
         local prefix="${entry%:*}"
         pattern_suffix="${entry##*:}"
         pkg=$(pick_artifact "${ZFS_ARTIFACT_DIR}/${prefix}_${pattern_suffix}.deb") || {
