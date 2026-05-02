@@ -143,9 +143,16 @@ jobs:
 
       - name: Install system dependencies
         run: |
+          set -euo pipefail
           sudo apt-get update
+          # isolinux + syslinux-utils are BIOS-only x86 tools and are not
+          # in the arm64 Ubuntu archive; only the amd64 leg needs them.
+          bios_pkgs=""
+          if [ "${{ matrix.deb_arch }}" = "amd64" ]; then
+            bios_pkgs="isolinux syslinux-utils"
+          fi
           sudo apt-get install -y \
-            xorriso isolinux syslinux-utils cpio gzip file curl \
+            xorriso $bios_pkgs cpio gzip file curl \
             libpam0g-dev gcc dpkg-dev xz-utils ripgrep
 
       - uses: actions/setup-go@v5
