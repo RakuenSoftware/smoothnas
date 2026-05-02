@@ -16,6 +16,8 @@ all: build
 build: build-backend build-frontend
 
 VERSION ?= $(shell date -u +%Y.%m%d.%H%M)-$(shell git rev-parse --short HEAD)
+DEB_ARCH ?= $(shell dpkg --print-architecture 2>/dev/null || echo amd64)
+export DEB_ARCH
 
 build-backend:
 	cd tierd && CGO_ENABLED=1 go build -ldflags "-X main.version=$(VERSION)" -o ../bin/tierd ./cmd/tierd/
