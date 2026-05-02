@@ -26,7 +26,7 @@ DEBIAN_MIRROR="${DEBIAN_MIRROR:-http://deb.debian.org/debian}"
 CACHE_DIR="${PROJECT_DIR}/iso/cache"
 WORK_DIR="${PROJECT_DIR}/iso/work"
 OUTPUT_DIR="${PROJECT_DIR}/iso/output"
-ISO_FILE="${OUTPUT_DIR}/smoothnas-${VERSION}.iso"
+ISO_FILE="${OUTPUT_DIR}/smoothnas-${VERSION}-${DEB_ARCH}.iso"
 HOOKS_DIR="${SCRIPT_DIR}/hooks"
 SMOOTHISO_DIR="${SMOOTHISO_DIR:-${PROJECT_DIR}/../smoothiso}"
 SMOOTHGUI_DIR="${SMOOTHGUI_DIR:-${PROJECT_DIR}/../smoothgui}"
@@ -42,8 +42,15 @@ DEFAULT_SMOOTHKERNEL_DIR="${PROJECT_DIR}/../smoothkernel/out"
 SMOOTHKERNEL_DIR="${SMOOTHKERNEL_DIR:-$DEFAULT_SMOOTHKERNEL_DIR}"
 ZFS_ARTIFACT_DIR="${ZFS_ARTIFACT_DIR:-$SMOOTHKERNEL_DIR}"
 SMOOTHFS_REPO_URL="${SMOOTHFS_REPO_URL:-git@github.com:RakuenSoftware/smoothfs.git}"
-SMOOTHFS_REPO_REF="${SMOOTHFS_REPO_REF:-6382817fd1a561b6d4c39421d954a65f27a18087}"
+SMOOTHFS_REPO_REF="${SMOOTHFS_REPO_REF:-8b8347230447a115e0d12ed2993e89938ef03752}"
 SMOOTHFS_SRC_DIR="${SMOOTHFS_SRC_DIR:-}"
+# Debian architecture for the produced ISO. SmoothKernel publishes per-arch
+# artifacts in a single GitHub release; pick the matching set here.
+DEB_ARCH="${DEB_ARCH:-amd64}"
+case "$DEB_ARCH" in
+    amd64|arm64) ;;
+    *) echo "ERROR: unsupported DEB_ARCH '${DEB_ARCH}' (expected amd64 or arm64)" >&2; exit 1 ;;
+esac
 SMOOTHFS_FETCH_DIR="${CACHE_DIR}/smoothfs-src"
 SMOOTHFS_SOURCE_DIR=""
 
@@ -105,31 +112,36 @@ prepare_smoothfs_source() {
 }
 
 resolve_appliance_artifacts() {
-    KERNEL_IMAGE_DEB=$(pick_artifact "${SMOOTHKERNEL_DIR}/linux-image-*-smoothkernel_*.deb" "-dbg_") || {
-        echo "ERROR: SmoothKernel image package not found under ${SMOOTHKERNEL_DIR}."
+    KERNEL_IMAGE_DEB=$(pick_artifact "${SMOOTHKERNEL_DIR}/linux-image-*-smoothkernel_*_${DEB_ARCH}.deb" "-dbg_") || {
+        echo "ERROR: SmoothKernel image package for ${DEB_ARCH} not found under ${SMOOTHKERNEL_DIR}."
         exit 1
     }
-    KERNEL_HEADERS_DEB=$(pick_artifact "${SMOOTHKERNEL_DIR}/linux-headers-*-smoothkernel_*.deb") || {
-        echo "ERROR: SmoothKernel headers package not found under ${SMOOTHKERNEL_DIR}."
+    KERNEL_HEADERS_DEB=$(pick_artifact "${SMOOTHKERNEL_DIR}/linux-headers-*-smoothkernel_*_${DEB_ARCH}.deb") || {
+        echo "ERROR: SmoothKernel headers package for ${DEB_ARCH} not found under ${SMOOTHKERNEL_DIR}."
         exit 1
     }
-    KERNEL_LIBC_DEB=$(pick_artifact "${SMOOTHKERNEL_DIR}/linux-libc-dev_*.deb") || {
-        echo "ERROR: SmoothKernel linux-libc-dev package not found under ${SMOOTHKERNEL_DIR}."
+    KERNEL_LIBC_DEB=$(pick_artifact "${SMOOTHKERNEL_DIR}/linux-libc-dev_*_${DEB_ARCH}.deb") || {
+        echo "ERROR: SmoothKernel linux-libc-dev package for ${DEB_ARCH} not found under ${SMOOTHKERNEL_DIR}."
         exit 1
     }
 
     ZFS_PACKAGE_FILES=()
-    local pkg
-    for pattern in \
-        "libnvpair3_*.deb" \
-        "libuutil3_*.deb" \
-        "libzfs7_*.deb" \
-        "libzpool7_*.deb" \
-        "zfs_*.deb" \
-        "zfs-dkms_*.deb" \
-        "zfs-initramfs_*.deb"; do
-        pkg=$(pick_artifact "${ZFS_ARTIFACT_DIR}/${pattern}") || {
-            echo "ERROR: Required OpenZFS artifact ${pattern} not found under ${ZFS_ARTIFACT_DIR}."
+    local pkg pattern_suffix
+    # All OpenZFS .debs are filename-tagged with the arch in the
+    # SmoothKernel release, even arch-all ones (zfs-dkms, zfs-initramfs);
+    # we just pick the per-arch filename for each.
+    for entry in \
+        "libnvpair3_*:${DEB_ARCH}" \
+        "libuutil3_*:${DEB_ARCH}" \
+        "libzfs7_*:${DEB_ARCH}" \
+        "libzpool7_*:${DEB_ARCH}" \
+        "zfs_*:${DEB_ARCH}" \
+        "zfs-dkms_*:${DEB_ARCH}" \
+        "zfs-initramfs_*:${DEB_ARCH}"; do
+        local prefix="${entry%:*}"
+        pattern_suffix="${entry##*:}"
+        pkg=$(pick_artifact "${ZFS_ARTIFACT_DIR}/${prefix}_${pattern_suffix}.deb") || {
+            echo "ERROR: Required OpenZFS artifact ${prefix}_${pattern_suffix}.deb not found under ${ZFS_ARTIFACT_DIR}."
             exit 1
         }
         ZFS_PACKAGE_FILES+=("$pkg")
@@ -215,6 +227,7 @@ prepare_smoothnas_payload() {
         zfs_package_names+=("$(dpkg-deb -f "$pkg_name" Package)")
     done
     cat > "${payload_dir}/package-manifest" <<EOF
+SMOOTHNAS_DEB_ARCH=${DEB_ARCH}
 SMOOTHKERNEL_IMAGE_PACKAGE=$(dpkg-deb -f "$KERNEL_IMAGE_DEB" Package)
 SMOOTHKERNEL_HEADERS_PACKAGE=$(dpkg-deb -f "$KERNEL_HEADERS_DEB" Package)
 SMOOTHKERNEL_LIBC_PACKAGE=$(dpkg-deb -f "$KERNEL_LIBC_DEB" Package)
@@ -241,6 +254,13 @@ main() {
     build_smoothgui_frontend
 
     if [ ! -f "${PROJECT_DIR}/bin/tierd" ]; then
+        local host_arch
+        host_arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+        if [ "$host_arch" != "$DEB_ARCH" ]; then
+            echo "ERROR: bin/tierd missing and host arch ${host_arch} != target ${DEB_ARCH}." >&2
+            echo "       Pre-build the backend on a ${DEB_ARCH} host (CGO requires native toolchain)." >&2
+            exit 1
+        fi
         echo "  bin/tierd not found, building backend..."
         (cd "${PROJECT_DIR}/tierd" && CGO_ENABLED=1 go build -o ../bin/tierd ./cmd/tierd/) || {
             echo "ERROR: backend build failed."
@@ -277,6 +297,7 @@ main() {
         SMOOTHGUI_XORG_STARTUP_TIMEOUT="${SMOOTHGUI_XORG_STARTUP_TIMEOUT:-12}" \
         SMOOTHNAS_PAYLOAD_DIR="$payload_dir" \
         INSTALLER_KERNEL_PACKAGES="" \
+        ARCH="$DEB_ARCH" \
         PRODUCT_NAME="SmoothNAS" \
         PRODUCT_ID="smoothnas" \
         PRODUCT_HOSTNAME="smoothnas" \
