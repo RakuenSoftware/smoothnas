@@ -41,6 +41,11 @@ SMOOTHGUI_FRONTEND_BIND="${SMOOTHGUI_FRONTEND_BIND:-127.0.0.1}"
 DEFAULT_SMOOTHKERNEL_DIR="${PROJECT_DIR}/../smoothkernel/out"
 SMOOTHKERNEL_DIR="${SMOOTHKERNEL_DIR:-$DEFAULT_SMOOTHKERNEL_DIR}"
 ZFS_ARTIFACT_DIR="${ZFS_ARTIFACT_DIR:-$SMOOTHKERNEL_DIR}"
+# GitHub repo that publishes SmoothKernel releases. Used to construct the
+# per-deb download URLs embedded in the installer payload manifest, so
+# packages.sh can fetch them at install time instead of bundling them in the
+# initrd (which would bloat it past GRUB's heap limit).
+SMOOTHKERNEL_GITHUB_REPO="${SMOOTHKERNEL_GITHUB_REPO:-RakuenSoftware/smoothkernel}"
 SMOOTHFS_REPO_URL="${SMOOTHFS_REPO_URL:-git@github.com:RakuenSoftware/smoothfs.git}"
 SMOOTHFS_REPO_REF="${SMOOTHFS_REPO_REF:-8b8347230447a115e0d12ed2993e89938ef03752}"
 SMOOTHFS_SRC_DIR="${SMOOTHFS_SRC_DIR:-}"
@@ -210,20 +215,15 @@ prepare_smoothnas_payload() {
 
     cp -a "$SMOOTHFS_SOURCE_DIR" "${payload_dir}/smoothfs-src"
 
-    mkdir -p "${payload_dir}/repo/pool"
-    cp "$KERNEL_IMAGE_DEB" "$KERNEL_HEADERS_DEB" "$KERNEL_LIBC_DEB" "$payload_dir/repo/pool/"
-    for pkg in "${ZFS_PACKAGE_FILES[@]}"; do
-        cp "$pkg" "${payload_dir}/repo/pool/"
-    done
-    (
-        cd "${payload_dir}/repo"
-        dpkg-scanpackages pool /dev/null > Packages
-        gzip -9c Packages > Packages.gz
-    )
+    local smoothkernel_tag
+    smoothkernel_tag=$(tr -d '[:space:]' < "$SCRIPT_DIR/smoothkernel-version")
+    local smoothkernel_base_url="https://github.com/${SMOOTHKERNEL_GITHUB_REPO}/releases/download/${smoothkernel_tag}"
 
+    local zfs_filenames=()
     local zfs_package_names=()
     local pkg_name=""
     for pkg_name in "${ZFS_PACKAGE_FILES[@]}"; do
+        zfs_filenames+=("$(basename "$pkg_name")")
         zfs_package_names+=("$(dpkg-deb -f "$pkg_name" Package)")
     done
     cat > "${payload_dir}/package-manifest" <<EOF
@@ -232,6 +232,11 @@ SMOOTHKERNEL_IMAGE_PACKAGE=$(dpkg-deb -f "$KERNEL_IMAGE_DEB" Package)
 SMOOTHKERNEL_HEADERS_PACKAGE=$(dpkg-deb -f "$KERNEL_HEADERS_DEB" Package)
 SMOOTHKERNEL_LIBC_PACKAGE=$(dpkg-deb -f "$KERNEL_LIBC_DEB" Package)
 SMOOTHKERNEL_ZFS_PACKAGES="${zfs_package_names[*]}"
+SMOOTHKERNEL_RELEASE_BASE_URL=${smoothkernel_base_url}
+SMOOTHKERNEL_IMAGE_FILENAME=$(basename "$KERNEL_IMAGE_DEB")
+SMOOTHKERNEL_HEADERS_FILENAME=$(basename "$KERNEL_HEADERS_DEB")
+SMOOTHKERNEL_LIBC_FILENAME=$(basename "$KERNEL_LIBC_DEB")
+SMOOTHKERNEL_ZFS_FILENAMES="${zfs_filenames[*]}"
 SMOOTHFS_VERSION=${SMOOTHFS_VERSION}
 SMOOTHFS_REPO_URL=${SMOOTHFS_REPO_URL}
 SMOOTHFS_REPO_REF=${SMOOTHFS_REPO_REF}
@@ -296,8 +301,8 @@ main() {
         SMOOTHGUI_ALLOW_XVFB="${SMOOTHGUI_ALLOW_XVFB:-0}" \
         SMOOTHGUI_XORG_STARTUP_TIMEOUT="${SMOOTHGUI_XORG_STARTUP_TIMEOUT:-12}" \
         SMOOTHNAS_PAYLOAD_DIR="$payload_dir" \
-        INSTALLER_KERNEL_DEB="$KERNEL_IMAGE_DEB" \
         INSTALLER_KERNEL_PACKAGES="" \
+        INSTALLER_BROWSER_DEFERRED=1 \
         ARCH="$DEB_ARCH" \
         PRODUCT_NAME="SmoothNAS" \
         PRODUCT_ID="smoothnas" \
