@@ -303,7 +303,7 @@ main() {
         SMOOTHNAS_PAYLOAD_DIR="$payload_dir" \
         INSTALLER_KERNEL_DEB="$KERNEL_IMAGE_DEB" \
         INSTALLER_KERNEL_PACKAGES="" \
-        INSTALLER_KERNEL_MODULES_FILTER="kernel/drivers/gpu kernel/drivers/video kernel/drivers/iommu" \
+        INSTALLER_KERNEL_MODULES_FILTER="kernel/drivers/gpu kernel/drivers/video kernel/drivers/iommu kernel/drivers/net kernel/net/core kernel/drivers/scsi kernel/drivers/block kernel/drivers/md kernel/drivers/ata" \
         INSTALLER_GPU_FIRMWARE_PKGS="firmware-amd-graphics" \
         ARCH="$DEB_ARCH" \
         PRODUCT_NAME="SmoothNAS" \
