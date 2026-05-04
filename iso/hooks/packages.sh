@@ -6,17 +6,70 @@
 if [ ! -f /smoothnas/package-manifest ]; then
     die "Missing /smoothnas/package-manifest in installer payload"
 fi
-if [ ! -d /smoothnas/repo ]; then
-    die "Missing /smoothnas/repo in installer payload"
-fi
 if [ ! -f /smoothnas/smoothfs-src/dkms.conf ]; then
     die "Missing /smoothnas/smoothfs-src in installer payload"
 fi
 
-# Stage the local apt repo, smoothfs DKMS source, and protocol tests onto disk.
-mkdir -p "$TARGET/opt/smoothnas"
-rm -rf "$TARGET/opt/smoothnas/repo" "$TARGET/opt/smoothnas/smoothfs-src"
-cp -a /smoothnas/repo "$TARGET/opt/smoothnas/repo"
+# shellcheck disable=SC1091
+. /smoothnas/package-manifest
+
+if [ -z "${SMOOTHKERNEL_IMAGE_PACKAGE:-}" ] || \
+   [ -z "${SMOOTHKERNEL_HEADERS_PACKAGE:-}" ] || \
+   [ -z "${SMOOTHKERNEL_LIBC_PACKAGE:-}" ] || \
+   [ -z "${SMOOTHKERNEL_ZFS_PACKAGES:-}" ] || \
+   [ -z "${SMOOTHKERNEL_RELEASE_BASE_URL:-}" ] || \
+   [ -z "${SMOOTHKERNEL_IMAGE_FILENAME:-}" ] || \
+   [ -z "${SMOOTHKERNEL_HEADERS_FILENAME:-}" ] || \
+   [ -z "${SMOOTHKERNEL_LIBC_FILENAME:-}" ] || \
+   [ -z "${SMOOTHKERNEL_ZFS_FILENAMES:-}" ] || \
+   [ -z "${SMOOTHFS_VERSION:-}" ]; then
+    die "SmoothNAS package manifest is incomplete"
+fi
+
+# Download SmoothKernel and OpenZFS packages from GitHub releases and build a
+# local apt repo on disk. Keeping the debs out of the initrd prevents it from
+# exceeding GRUB's heap limit (~200 MB compressed).
+ui_status "Installing packages" "Downloading SmoothKernel and OpenZFS packages." 3 6
+echo "  Fetching packages from ${SMOOTHKERNEL_RELEASE_BASE_URL}..."
+
+mkdir -p "$TARGET/opt/smoothnas/repo/pool"
+
+_download_pkg() {
+    local filename="$1"
+    echo "  Downloading ${filename}..."
+    wget -q -O "$TARGET/opt/smoothnas/repo/pool/${filename}" \
+        "${SMOOTHKERNEL_RELEASE_BASE_URL}/${filename}" || \
+        die "Failed to download ${filename}"
+}
+
+_download_pkg "$SMOOTHKERNEL_IMAGE_FILENAME"
+_download_pkg "$SMOOTHKERNEL_HEADERS_FILENAME"
+_download_pkg "$SMOOTHKERNEL_LIBC_FILENAME"
+for _zfs_pkg in $SMOOTHKERNEL_ZFS_FILENAMES; do
+    _download_pkg "$_zfs_pkg"
+done
+
+echo "  Generating apt Packages index..."
+(
+    cd "$TARGET/opt/smoothnas/repo"
+    : > Packages
+    for _deb in pool/*.deb; do
+        _ctrl=$(mktemp -d)
+        dpkg-deb -e "$_deb" "$_ctrl"
+        {
+            cat "$_ctrl/control"
+            printf 'Filename: %s\nSize: %s\nSHA256: %s\n\n' \
+                "$_deb" \
+                "$(wc -c < "$_deb")" \
+                "$(sha256sum "$_deb" | cut -d' ' -f1)"
+        } >> Packages
+        rm -rf "$_ctrl"
+    done
+    gzip -9c Packages > Packages.gz
+)
+
+# Stage smoothfs DKMS source, protocol tests, and manifest onto disk.
+rm -rf "$TARGET/opt/smoothnas/smoothfs-src"
 cp -a /smoothnas/smoothfs-src "$TARGET/opt/smoothnas/smoothfs-src"
 cp /smoothnas/package-manifest "$TARGET/opt/smoothnas/package-manifest"
 
@@ -30,17 +83,6 @@ fi
 cat > "$TARGET/etc/apt/sources.list.d/smoothnas-local.list" << 'SOURCES'
 deb [trusted=yes] file:/opt/smoothnas/repo ./
 SOURCES
-
-# shellcheck disable=SC1091
-. /smoothnas/package-manifest
-
-if [ -z "${SMOOTHKERNEL_IMAGE_PACKAGE:-}" ] || \
-   [ -z "${SMOOTHKERNEL_HEADERS_PACKAGE:-}" ] || \
-   [ -z "${SMOOTHKERNEL_LIBC_PACKAGE:-}" ] || \
-   [ -z "${SMOOTHKERNEL_ZFS_PACKAGES:-}" ] || \
-   [ -z "${SMOOTHFS_VERSION:-}" ]; then
-    die "SmoothNAS package manifest is incomplete"
-fi
 
 ui_status "Installing packages" "Refreshing apt indexes (SmoothNAS local repo)." 3 6
 chroot "$TARGET" apt-get update -qq
