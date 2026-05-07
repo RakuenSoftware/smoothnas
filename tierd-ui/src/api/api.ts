@@ -323,6 +323,8 @@ export const api = {
   getPlugin: (name: string) => apiFetch<any>('GET', `/plugins/${name}`),
   preflightPlugin: (req: { manifest: string; tierAssignments?: { default?: string; perVolume?: Record<string, string> } }) =>
     apiFetch<any>('POST', '/plugins/preflight', req),
+  parsePlugin: (req: { manifest: string }) =>
+    apiFetch<{ manifest: any }>('POST', '/plugins/parse', req),
   installPlugin: (req: { manifest: string; tierAssignments?: { default?: string; perVolume?: Record<string, string> } }) =>
     apiFetch<any>('POST', '/plugins/install', req),
   uninstallPlugin: (name: string) => apiFetch<void>('DELETE', `/plugins/${name}`),

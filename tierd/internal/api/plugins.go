@@ -77,6 +77,12 @@ func (h *PluginsHandler) Route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.preflight(w, r)
+	case path == "/parse":
+		if r.Method != http.MethodPost {
+			jsonMethodNotAllowed(w)
+			return
+		}
+		h.parse(w, r)
 	case path == "/install":
 		if r.Method != http.MethodPost {
 			jsonMethodNotAllowed(w)
@@ -241,6 +247,37 @@ func (h *PluginsHandler) detail(w http.ResponseWriter, _ *http.Request, name str
 		Config:    rec.Config,
 		Manifest:  rec.Plugin.ManifestYAML,
 	})
+}
+
+// parseRequest is the body of POST /api/plugins/parse. Used by the
+// install wizard's preview step — it gets back the parsed Manifest
+// (volumes, ports, config, profiles, etc.) so it can render the
+// later wizard steps (tier picker, config form) without duplicating
+// YAML parsing client-side.
+type parseRequest struct {
+	Manifest string `json:"manifest"`
+}
+
+func (h *PluginsHandler) parse(w http.ResponseWriter, r *http.Request) {
+	var req parseRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonInvalidRequestBody(w)
+		return
+	}
+	if req.Manifest == "" {
+		jsonErrorCoded(w, "manifest is required", http.StatusBadRequest, "plugins.manifest_missing")
+		return
+	}
+	m, err := plugin.ParseManifest([]byte(req.Manifest))
+	if err != nil {
+		jsonErrorCoded(w, err.Error(), http.StatusBadRequest, "plugins.manifest_parse")
+		return
+	}
+	if err := plugin.ValidateManifest(m); err != nil {
+		jsonErrorCoded(w, err.Error(), http.StatusBadRequest, "plugins.manifest_invalid")
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"manifest": m})
 }
 
 // preflightRequest is the body of POST /api/plugins/preflight.
