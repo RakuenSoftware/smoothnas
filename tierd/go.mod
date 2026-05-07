@@ -12,6 +12,7 @@ require (
 	github.com/pressly/goose/v3 v3.27.0
 	go.etcd.io/bbolt v1.4.3
 	golang.org/x/sys v0.42.0
+	gopkg.in/yaml.v3 v3.0.1
 	nhooyr.io/websocket v1.8.17
 )
 
