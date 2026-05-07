@@ -172,6 +172,17 @@ func (i *Installer) InstallWithOptions(yamlBytes []byte, opts InstallOptions) (*
 		return nil, fmt.Errorf("store raw manifest: %w", err)
 	}
 
+	// Phase 07: when the manifest opts into bearer-injected auth,
+	// generate the per-plugin token now so the nginx route written
+	// by Lifecycle.Start (phase 04) has a token to inject. The
+	// token rides as the Authorization header on every proxied
+	// request to the plugin.
+	if m.UI != nil && m.UI.Embed.Auth == AuthBearerInjected {
+		if _, err := i.store.IssueBearerToken(m.Metadata.Name); err != nil {
+			return nil, fmt.Errorf("issue bearer token: %w", err)
+		}
+	}
+
 	return i.store.Get(m.Metadata.Name)
 }
 

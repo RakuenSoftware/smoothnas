@@ -1329,6 +1329,16 @@ const en: LanguageTranslations = {
   'plugins.detail.col.bridge': 'bridge IP',
   'plugins.detail.col.yes': 'yes',
   'plugins.detail.col.no': 'no',
+
+  // --- Iframe embed (phase 07) ---
+  'plugins.embed.heading': '{name}',
+  'plugins.embed.manage': 'Manage',
+  'plugins.embed.notRunning.title': 'Plugin is not running',
+  'plugins.embed.notRunning.body': 'Materialise and start the plugin from the Manage page, then come back.',
+  'plugins.embed.noUI.title': 'No UI to embed',
+  'plugins.embed.noUI.body': 'This plugin’s manifest does not declare ui.embed. There is no UI to render here.',
+  'plugins.embed.loading': 'Loading plugin UI…',
+  'plugins.embed.openInTab': 'Open in new tab',
 };
 
 export default en;

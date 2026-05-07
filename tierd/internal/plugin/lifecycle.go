@@ -412,6 +412,12 @@ func (l *Lifecycle) captureBridgeIP(ctx context.Context, containerID string) (st
 // instance's bridge IP only — load balancing is a future enhancement
 // and the proposal explicitly defers it. Operators wanting LB across
 // runners should run plugin-side load balancing (e.g. socat).
+//
+// Phase 07: when the manifest declared ui.embed.auth=bearer-injected,
+// every ProxyRoute carries the per-plugin bearer token so nginx
+// injects an Authorization: Bearer <token> header on each proxied
+// request — the embedded plugin sees an authenticated request from
+// the SmoothNAS side without doing its own login flow.
 func (l *Lifecycle) buildPluginRoute(rec *PluginRecord) (PluginRoute, error) {
 	if len(rec.Instances) == 0 {
 		return PluginRoute{}, fmt.Errorf("no instances")
@@ -419,6 +425,20 @@ func (l *Lifecycle) buildPluginRoute(rec *PluginRecord) (PluginRoute, error) {
 	upstreamIP := rec.Instances[0].BridgeIP
 	if upstreamIP == "" {
 		return PluginRoute{}, fmt.Errorf("instance 1 has no bridge IP")
+	}
+
+	// Pull the per-plugin bearer token so the route can inject the
+	// Authorization header. Empty token == auth=none plugin or
+	// pre-phase-07 install; ProxyRoute.AuthBearer left empty in
+	// either case. Nil store (pure-function unit tests of route
+	// building) skips the lookup entirely.
+	var token string
+	if l.store != nil {
+		t, err := l.store.GetBearerToken(rec.Plugin.Name)
+		if err != nil {
+			return PluginRoute{}, fmt.Errorf("get bearer token: %w", err)
+		}
+		token = t
 	}
 
 	route := PluginRoute{
@@ -440,6 +460,7 @@ func (l *Lifecycle) buildPluginRoute(rec *PluginRecord) (PluginRoute, error) {
 		route.Routes = append(route.Routes, ProxyRoute{
 			LocationPath: locationPath,
 			UpstreamURL:  fmt.Sprintf("http://%s:%d/", upstreamIP, p.ContainerPort),
+			AuthBearer:   token,
 		})
 	}
 	return route, nil
@@ -546,6 +567,25 @@ func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 // DB in sync with the runtime, so this is fast and consistent.
 func (l *Lifecycle) Status(ctx context.Context, name string) (*PluginRecord, error) {
 	return l.store.Get(name)
+}
+
+// ApplyRouteFor re-renders and applies the nginx route for one
+// plugin. Used by the token-rotation flow (phase 07) so a freshly-
+// issued bearer token takes effect without a full restart. No-op
+// when no Proxy is wired.
+func (l *Lifecycle) ApplyRouteFor(ctx context.Context, name string) error {
+	if l.proxy == nil {
+		return nil
+	}
+	rec, err := l.store.Get(name)
+	if err != nil {
+		return err
+	}
+	route, err := l.buildPluginRoute(rec)
+	if err != nil {
+		return fmt.Errorf("build route: %w", err)
+	}
+	return l.proxy.Apply(ctx, route)
 }
 
 // StreamContainerLogs opens a follow-mode logs stream from the

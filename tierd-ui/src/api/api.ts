@@ -334,6 +334,8 @@ export const api = {
   restartPlugin: (name: string) => apiFetch<any>('POST', `/plugins/${name}/restart`, {}),
   updatePluginConfig: (name: string, config: Record<string, string>) =>
     apiFetch<any>('PUT', `/plugins/${name}/config`, { config }),
+  rotatePluginToken: (name: string) =>
+    apiFetch<{ name: string; token: string }>('POST', `/plugins/${name}/rotate-token`, {}),
 
   // --- Plugin profiles (phase 05) ---
   listPluginProfiles: () => apiFetch<{ profiles: any[] }>('GET', '/plugin-profiles'),

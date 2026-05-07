@@ -38,6 +38,7 @@ import Backups from './pages/Backups/Backups';
 import Plugins from './pages/Plugins/Plugins';
 import PluginInstall from './pages/Plugins/PluginInstall';
 import PluginDetail from './pages/Plugins/PluginDetail';
+import PluginEmbed from './pages/Plugins/PluginEmbed';
 
 function ProtectedLayout() {
   const { loggedIn } = useAuth();
@@ -155,6 +156,7 @@ export default function App() {
               <Route path="/plugins" element={<Plugins />} />
               <Route path="/plugins/install" element={<PluginInstall />} />
               <Route path="/plugins/manage/:name" element={<PluginDetail />} />
+              <Route path="/plugins/:name" element={<PluginEmbed />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="*" element={<Navigate to="/dashboard" replace />} />
             </Route>

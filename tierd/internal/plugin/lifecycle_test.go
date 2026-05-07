@@ -578,6 +578,81 @@ func TestLifecycle_Materialise_NoCatalogSkipsResolution(t *testing.T) {
 	}
 }
 
+func TestLifecycle_Start_BearerTokenReachesProxyRoute(t *testing.T) {
+	lc, rt, store := installFixture(t, "llama.yaml")
+	if _, err := store.db.Exec(
+		`UPDATE plugin_volume_paths SET host_path = '/mnt/m' WHERE plugin_name = 'llama-cpp'`,
+	); err != nil {
+		t.Fatalf("fake tier: %v", err)
+	}
+	// llama.yaml declares ui.embed.auth=bearer-injected — issue the
+	// token here the way Installer would in production. (The test
+	// installFixture skips Installer's token issuance because it
+	// uses Store.Insert directly.)
+	if _, err := store.IssueBearerToken("llama-cpp"); err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	expectedToken, _ := store.GetBearerToken("llama-cpp")
+
+	if err := lc.Materialise(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	rt.bridgeIP = "10.66.0.42"
+	pxy := &fakeProxyManager{}
+	lc.SetProxy(pxy)
+
+	if err := lc.Start(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if len(pxy.applyCalls) != 1 {
+		t.Fatalf("apply calls = %d", len(pxy.applyCalls))
+	}
+	route := pxy.applyCalls[0]
+	if len(route.Routes) != 1 {
+		t.Fatalf("routes = %d", len(route.Routes))
+	}
+	if route.Routes[0].AuthBearer != expectedToken {
+		t.Errorf("AuthBearer = %q, want %q", route.Routes[0].AuthBearer, expectedToken)
+	}
+}
+
+func TestLifecycle_ApplyRouteFor_RewritesRouteWithLatestToken(t *testing.T) {
+	lc, rt, store := installFixture(t, "llama.yaml")
+	if _, err := store.db.Exec(
+		`UPDATE plugin_volume_paths SET host_path = '/mnt/m' WHERE plugin_name = 'llama-cpp'`,
+	); err != nil {
+		t.Fatalf("fake tier: %v", err)
+	}
+	if _, err := store.IssueBearerToken("llama-cpp"); err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	if err := lc.Materialise(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	rt.bridgeIP = "10.66.0.42"
+	pxy := &fakeProxyManager{}
+	lc.SetProxy(pxy)
+	if err := lc.Start(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// Rotate the token and re-apply.
+	rotated, err := store.IssueBearerToken("llama-cpp")
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if err := lc.ApplyRouteFor(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("apply route: %v", err)
+	}
+	if len(pxy.applyCalls) != 2 {
+		t.Fatalf("apply calls = %d, want 2 (Start + ApplyRouteFor)", len(pxy.applyCalls))
+	}
+	if pxy.applyCalls[1].Routes[0].AuthBearer != rotated {
+		t.Errorf("re-applied route token = %q, want %q",
+			pxy.applyCalls[1].Routes[0].AuthBearer, rotated)
+	}
+}
+
 func TestLifecycle_Materialise_EnsuresPluginBridge(t *testing.T) {
 	lc, _, store := installFixture(t, "llama.yaml")
 	if _, err := store.db.Exec(

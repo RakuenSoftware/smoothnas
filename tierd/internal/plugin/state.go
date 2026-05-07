@@ -1,7 +1,9 @@
 package plugin
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -389,6 +391,75 @@ func (s *Store) Delete(name string) error {
 		return ErrPluginNotFound
 	}
 	return nil
+}
+
+// GetBearerToken returns the per-plugin bearer token issued for the
+// nginx auth-injection flow (phase 07). Returns empty string + nil
+// when the plugin has no token (auth=none plugins, plugins
+// installed before phase 07).
+func (s *Store) GetBearerToken(name string) (string, error) {
+	var token string
+	err := s.db.QueryRow(
+		`SELECT bearer_token FROM plugin_secrets WHERE plugin_name = ?`,
+		name,
+	).Scan(&token)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get bearer token: %w", err)
+	}
+	return token, nil
+}
+
+// IssueBearerToken generates a new 256-bit token, persists it,
+// and returns the value. Idempotent insert — called from Installer
+// after every install when the manifest declares
+// ui.embed.auth=bearer-injected. Calling twice for the same plugin
+// is allowed and rotates the token.
+func (s *Store) IssueBearerToken(name string) (string, error) {
+	// Verify plugin exists first so a typo doesn't insert an orphan
+	// (the FK would catch it but the error would be ugly).
+	if _, err := s.getPluginRow(name); err != nil {
+		return "", err
+	}
+	token, err := newBearerToken()
+	if err != nil {
+		return "", err
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO plugin_secrets (plugin_name, bearer_token)
+		 VALUES (?, ?)
+		 ON CONFLICT(plugin_name) DO UPDATE SET
+		   bearer_token = excluded.bearer_token,
+		   issued_at    = datetime('now')`,
+		name, token,
+	)
+	if err != nil {
+		return "", fmt.Errorf("upsert plugin_secrets: %w", err)
+	}
+	return token, nil
+}
+
+// DeleteBearerToken removes the per-plugin token row. Normally
+// unnecessary because the plugins-row FK cascades on uninstall;
+// exposed for the rare "operator wants to drop bearer auth without
+// uninstalling" path.
+func (s *Store) DeleteBearerToken(name string) error {
+	_, err := s.db.Exec(`DELETE FROM plugin_secrets WHERE plugin_name = ?`, name)
+	return err
+}
+
+// newBearerToken returns 32 random bytes as a hex string. 64 chars,
+// 256 bits of entropy — same shape Docker / k8s use for similar
+// tokens. crypto/rand panics never on Linux + /dev/urandom; bubble
+// the error up regardless to satisfy the spec.
+func newBearerToken() (string, error) {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("generate bearer token: %w", err)
+	}
+	return hex.EncodeToString(buf[:]), nil
 }
 
 // TierConsumers returns the names of every installed plugin that

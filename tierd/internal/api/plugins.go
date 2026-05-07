@@ -121,6 +121,12 @@ func (h *PluginsHandler) routeNamed(w http.ResponseWriter, r *http.Request, rest
 			return
 		}
 		h.lifecycleVerb(w, r, name, verb)
+	case "rotate-token":
+		if r.Method != http.MethodPost {
+			jsonMethodNotAllowed(w)
+			return
+		}
+		h.rotateToken(w, r, name)
 	case "config":
 		if r.Method != http.MethodPut {
 			jsonMethodNotAllowed(w)
@@ -470,6 +476,49 @@ func (h *PluginsHandler) updateConfig(w http.ResponseWriter, r *http.Request, na
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"name":          name,
 		"restartNeeded": true,
+	})
+}
+
+// rotateToken issues a new bearer token for a plugin and re-applies
+// the nginx route so the new value takes effect immediately. Returns
+// the new token to the operator (one-time-only — tierd does not
+// expose it again on subsequent reads).
+//
+// Returns 503 when no Lifecycle is wired (re-applying the route
+// requires the runtime client because it captures the bridge IP);
+// 404 when the plugin doesn't exist; 200 with the new token on
+// success.
+func (h *PluginsHandler) rotateToken(w http.ResponseWriter, r *http.Request, name string) {
+	if h.lifecycle == nil {
+		jsonErrorCoded(w, "runtime not configured", http.StatusServiceUnavailable, "plugins.runtime_unavailable")
+		return
+	}
+	if _, err := h.store.Get(name); err != nil {
+		if errors.Is(err, plugin.ErrPluginNotFound) {
+			jsonErrorCoded(w, "plugin not found", http.StatusNotFound, "plugins.not_found")
+			return
+		}
+		serverError(w, err)
+		return
+	}
+	token, err := h.store.IssueBearerToken(name)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	// Re-apply the nginx route so the new token is in the live
+	// proxy config. ApplyRouteFor hides the buildPluginRoute +
+	// proxy.Apply round-trip behind one method on Lifecycle.
+	if err := h.lifecycle.ApplyRouteFor(r.Context(), name); err != nil {
+		// Token is already issued; the operator needs to know the
+		// route reload failed so they can investigate.
+		jsonErrorCoded(w, fmt.Sprintf("token rotated but nginx reload failed: %v", err),
+			http.StatusBadGateway, "plugins.proxy_reload_failed")
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"name":  name,
+		"token": token,
 	})
 }
 
