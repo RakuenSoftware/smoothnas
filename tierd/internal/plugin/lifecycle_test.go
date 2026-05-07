@@ -523,6 +523,61 @@ func TestLifecycle_Demolish_CallsProxyRemoveBeforeContainers(t *testing.T) {
 	}
 }
 
+func TestLifecycle_Materialise_ResolvesAndPersistsProfiles(t *testing.T) {
+	lc, _, store := installFixture(t, "llama.yaml")
+	if _, err := store.db.Exec(
+		`UPDATE plugin_volume_paths SET host_path = '/mnt/m' WHERE plugin_name = 'llama-cpp'`,
+	); err != nil {
+		t.Fatalf("fake tier: %v", err)
+	}
+	cat, err := NewCatalog("")
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	lc.SetCatalog(cat)
+
+	if err := lc.Materialise(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	rec, _ := store.Get("llama-cpp")
+	// llama.yaml declares profiles: [gpu-nvidia, default-limits].
+	// default-limits should not be duplicated; resolution preserves
+	// manifest order (default-limits already at end).
+	if len(rec.Plugin.ResolvedProfiles) == 0 {
+		t.Errorf("ResolvedProfiles should be populated; got %v", rec.Plugin.ResolvedProfiles)
+	}
+	hasGPU, hasLimits := false, false
+	for _, p := range rec.Plugin.ResolvedProfiles {
+		if p == "gpu-nvidia" {
+			hasGPU = true
+		}
+		if p == "default-limits" {
+			hasLimits = true
+		}
+	}
+	if !hasGPU || !hasLimits {
+		t.Errorf("ResolvedProfiles should contain gpu-nvidia + default-limits, got %v",
+			rec.Plugin.ResolvedProfiles)
+	}
+}
+
+func TestLifecycle_Materialise_NoCatalogSkipsResolution(t *testing.T) {
+	lc, _, store := installFixture(t, "llama.yaml")
+	if _, err := store.db.Exec(
+		`UPDATE plugin_volume_paths SET host_path = '/mnt/m' WHERE plugin_name = 'llama-cpp'`,
+	); err != nil {
+		t.Fatalf("fake tier: %v", err)
+	}
+	// No SetCatalog call.
+	if err := lc.Materialise(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	rec, _ := store.Get("llama-cpp")
+	if len(rec.Plugin.ResolvedProfiles) != 0 {
+		t.Errorf("expected empty ResolvedProfiles without catalog; got %v", rec.Plugin.ResolvedProfiles)
+	}
+}
+
 func TestLifecycle_Materialise_EnsuresPluginBridge(t *testing.T) {
 	lc, _, store := installFixture(t, "llama.yaml")
 	if _, err := store.db.Exec(

@@ -38,6 +38,13 @@ func NewRouterFull(store *db.Store, version string, startTime time.Time, history
 	// any plugin volumes pointing at it.
 	pluginStore := plugin.NewStore(store)
 	arraysHandler.SetPluginTierConsumers(pluginStore.TierConsumers)
+
+	// Plugin profile catalog — phase 05.
+	pluginCatalog, catalogErr := plugin.NewCatalog(plugin.DefaultOperatorProfilesDir)
+	if catalogErr != nil {
+		log.Printf("plugin profile catalog: %v (built-ins still loaded)", catalogErr)
+	}
+	pluginProfilesHandler := NewProfileHandler(pluginCatalog)
 	zfsHandler := NewZFSHandler(store)
 	userPrefsHandler := NewUserPrefsHandler(store)
 	sharingHandler := NewSharingHandler(store)
@@ -173,6 +180,8 @@ func NewRouterFull(store *db.Store, version string, startTime time.Time, history
 			smoothfsHandler.Route(w, r)
 		case strings.HasPrefix(path, "/api/backup/"):
 			backupHandler.Route(w, r)
+		case strings.HasPrefix(path, "/api/plugin-profiles"):
+			pluginProfilesHandler.Route(w, r)
 		default:
 			jsonNotFound(w)
 		}

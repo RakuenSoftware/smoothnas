@@ -27,6 +27,9 @@ type HostConfig struct {
 	NetworkMode   string           `json:"NetworkMode,omitempty"`   // "smoothnas-plugins" once phase 04 lands
 	RestartPolicy RestartPolicy    `json:"RestartPolicy"`
 	Devices       []DeviceMapping  `json:"Devices,omitempty"`       // populated by phase 05 (profiles)
+	CapAdd        []string         `json:"CapAdd,omitempty"`        // capabilities a profile can grant
+	PidsLimit     int64            `json:"PidsLimit,omitempty"`     // 0 = unlimited; profiles can cap
+	OomScoreAdj   int              `json:"OomScoreAdj,omitempty"`   // -1000..1000; default-limits sets 100
 	PortBindings  map[string][]PortBinding `json:"PortBindings,omitempty"` // empty for v1; phase 09 may populate
 }
 
