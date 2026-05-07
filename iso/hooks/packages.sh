@@ -53,18 +53,17 @@ for _zfs_pkg in $SMOOTHKERNEL_ZFS_FILENAMES; do
 done
 
 echo "  Generating apt Packages index..."
-# Run inside the chroot so dpkg-deb has full compression support
-# (the d-i installer's dpkg-deb hangs on zstd-compressed trixie debs).
-# Use `dpkg-deb --field` to print all control fields straight to
-# stdout instead of the extract-to-temp-dir + cat dance — that earlier
-# form silently produced an empty index when dpkg-deb wrote files in a
-# different layout than the consumer expected.
+# Run inside the chroot so dpkg-deb supports zstd-compressed debs.
+# In the early-stage chroot `dpkg-deb` resolves to busybox, which
+# accepts only short flags and writes control files to <dir>/DEBIAN
+# under -e. Use `-f` (Print control fields) — supported by both
+# busybox and GNU dpkg-deb — to stream control content to stdout.
 chroot "$TARGET" sh -eu -c '
     cd /opt/smoothnas/repo
     : > Packages
     for _deb in pool/*.deb; do
         {
-            dpkg-deb --field "$_deb"
+            dpkg-deb -f "$_deb"
             printf "Filename: %s\nSize: %s\nSHA256: %s\n\n" \
                 "$_deb" \
                 "$(wc -c < "$_deb")" \
