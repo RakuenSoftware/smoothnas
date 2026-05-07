@@ -423,6 +423,45 @@ func (s *Store) TierConsumers(poolName string) ([]string, error) {
 	return out, rows.Err()
 }
 
+// RawDB returns the underlying db.Store. The api layer needs it to
+// satisfy the TierProvider interface for phase 03 preflight without
+// a second DB connection.
+func (s *Store) RawDB() *db.Store { return s.store }
+
+// ReplaceConfig wipes every existing plugin_config row for the
+// named plugin and inserts the supplied key→value map in one
+// transaction. Returns ErrPluginNotFound when the plugin does not
+// exist (cascades from the SELECT before the DELETE so a typo
+// doesn't silently no-op).
+func (s *Store) ReplaceConfig(name string, cfg map[string]string) error {
+	// Verify plugin exists first so a typo doesn't quietly return ok.
+	if _, err := s.getPluginRow(name); err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.Exec(`DELETE FROM plugin_config WHERE plugin_name = ?`, name); err != nil {
+		return fmt.Errorf("delete plugin_config: %w", err)
+	}
+	for k, v := range cfg {
+		if _, err := tx.Exec(
+			`INSERT INTO plugin_config (plugin_name, key, value) VALUES (?, ?, ?)`,
+			name, k, v,
+		); err != nil {
+			return fmt.Errorf("insert plugin_config[%s]: %w", k, err)
+		}
+	}
+	if _, err := tx.Exec(
+		`UPDATE plugins SET updated_at = datetime('now') WHERE name = ?`, name,
+	); err != nil {
+		return fmt.Errorf("touch plugin row: %w", err)
+	}
+	return tx.Commit()
+}
+
 // SetResolvedProfiles records the merged-profile-name list applied
 // at install/materialise time. Stored as a JSON array so a future
 // tierd doesn't have to re-resolve against a possibly-changed

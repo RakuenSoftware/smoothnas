@@ -548,6 +548,16 @@ func (l *Lifecycle) Status(ctx context.Context, name string) (*PluginRecord, err
 	return l.store.Get(name)
 }
 
+// StreamContainerLogs opens a follow-mode logs stream from the
+// runtime daemon for the given container. The api layer wraps the
+// returned reader as Server-Sent Events for the UI's logs view.
+// Caller is responsible for closing the returned reader.
+func (l *Lifecycle) StreamContainerLogs(ctx context.Context, containerID string) (io.ReadCloser, error) {
+	return l.rt.StreamLogs(ctx, containerID, runtime.LogsOptions{
+		Follow: true, Stdout: true, Stderr: true, Tail: "200",
+	})
+}
+
 // setInstanceState is a thin wrapper that swallows DB errors after
 // logging — lifecycle code already returns on the underlying
 // runtime error; failing to update the DB on top of that is worth
