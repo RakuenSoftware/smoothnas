@@ -153,7 +153,7 @@ jobs:
           fi
           sudo apt-get install -y \
             xorriso $bios_pkgs cpio gzip file curl \
-            gcc dpkg-dev xz-utils ripgrep
+            libpam0g-dev gcc dpkg-dev xz-utils ripgrep
 
       - uses: actions/setup-go@v5
         with:
