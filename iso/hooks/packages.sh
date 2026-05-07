@@ -52,13 +52,21 @@ for _zfs_pkg in $SMOOTHKERNEL_ZFS_FILENAMES; do
     _download_pkg "$_zfs_pkg"
 done
 
+# Ensure decompressors needed to extract control.tar.* are present in
+# the chroot. xz-utils ships with debootstrap's required set; zstd is
+# pulled in via apt below. (busybox in this chroot does not provide
+# zstdcat as an applet, so we use the zstd binary directly.)
+DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get install -y -qq \
+    zstd xz-utils 2>/dev/null || true
+
 echo "  Generating apt Packages index..."
 # A .deb is an ar archive of debian-binary, control.tar.<comp>,
 # data.tar.<comp>. Extract control.tar directly via ar+tar to sidestep
 # the chroot's busybox dpkg-deb (which doesn't accept long flags, prints
 # empty for short -f, and writes -e to <dir>/DEBIAN). busybox tar does
-# NOT auto-detect compression, so pipe through the matching decompressor
-# (zstdcat / xzcat / gunzip — all busybox applets in trixie).
+# NOT auto-detect compression, so pipe through the matching decompressor.
+# Use `zstd -dc` / `xz -dc` / `gunzip -c` (zstdcat is not always present
+# as a busybox applet).
 chroot "$TARGET" sh -eu -c '
     cd /opt/smoothnas/repo
     : > Packages
@@ -74,8 +82,8 @@ chroot "$TARGET" sh -eu -c '
             exit 1
         fi
         case "$_ctrl_archive" in
-            *.zst) zstdcat "$_ctrl_archive"   | tar -xf - -C "$_tmp" ;;
-            *.xz)  xzcat   "$_ctrl_archive"   | tar -xf - -C "$_tmp" ;;
+            *.zst) zstd -dc "$_ctrl_archive"  | tar -xf - -C "$_tmp" ;;
+            *.xz)  xz -dc "$_ctrl_archive"    | tar -xf - -C "$_tmp" ;;
             *.gz)  gunzip -c "$_ctrl_archive" | tar -xf - -C "$_tmp" ;;
             *)     tar -xf "$_ctrl_archive" -C "$_tmp" ;;
         esac
