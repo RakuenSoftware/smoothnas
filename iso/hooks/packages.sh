@@ -53,23 +53,27 @@ for _zfs_pkg in $SMOOTHKERNEL_ZFS_FILENAMES; do
 done
 
 echo "  Generating apt Packages index..."
-(
-    cd "$TARGET/opt/smoothnas/repo"
+# Run inside the chroot: the d-i installer's dpkg-deb cannot decompress
+# zstd-compressed debs (trixie uses zstd by default) and hangs on the
+# first one, leaving Packages truncated. The target's dpkg-deb has full
+# compression support and is already installed by smoothiso.
+chroot "$TARGET" sh -c '
+    cd /opt/smoothnas/repo
     : > Packages
     for _deb in pool/*.deb; do
         _ctrl=$(mktemp -d)
         dpkg-deb -e "$_deb" "$_ctrl"
         {
             cat "$_ctrl/control"
-            printf 'Filename: %s\nSize: %s\nSHA256: %s\n\n' \
+            printf "Filename: %s\nSize: %s\nSHA256: %s\n\n" \
                 "$_deb" \
                 "$(wc -c < "$_deb")" \
-                "$(sha256sum "$_deb" | cut -d' ' -f1)"
+                "$(sha256sum "$_deb" | cut -d" " -f1)"
         } >> Packages
         rm -rf "$_ctrl"
     done
     gzip -9c Packages > Packages.gz
-)
+' || die "Failed to generate apt Packages index"
 
 # Stage smoothfs DKMS source, protocol tests, and manifest onto disk.
 rm -rf "$TARGET/opt/smoothnas/smoothfs-src"
