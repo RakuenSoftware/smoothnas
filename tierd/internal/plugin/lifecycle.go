@@ -33,6 +33,18 @@ type RuntimeClient interface {
 
 	StreamLogs(ctx context.Context, id string, opts runtime.LogsOptions) (io.ReadCloser, error)
 	SubscribeEvents(ctx context.Context) (<-chan runtime.Event, <-chan error, error)
+
+	// Phase 04: bridge network management.
+	EnsurePluginBridge(ctx context.Context) (string, error)
+	InspectContainerBridgeIP(ctx context.Context, id string) (string, error)
+}
+
+// ProxyManager is the subset of *Proxy the lifecycle uses. Defined
+// as an interface so lifecycle tests can pass a recording fake
+// instead of touching /etc/nginx.
+type ProxyManager interface {
+	Apply(ctx context.Context, route PluginRoute) error
+	Remove(ctx context.Context, pluginName string) error
 }
 
 // Default container stop timeout (seconds). The runtime SIGTERMs and
@@ -46,6 +58,10 @@ const DefaultStopTimeoutSeconds = 10
 type Lifecycle struct {
 	store *Store
 	rt    RuntimeClient
+	// proxy is optional: when nil (legacy / test setups), Lifecycle
+	// skips nginx route generation. Production wires *Proxy via
+	// SetProxy at startup.
+	proxy ProxyManager
 }
 
 // NewLifecycle constructs a Lifecycle around an existing Store and a
@@ -53,6 +69,14 @@ type Lifecycle struct {
 // fake.
 func NewLifecycle(s *Store, rt RuntimeClient) *Lifecycle {
 	return &Lifecycle{store: s, rt: rt}
+}
+
+// SetProxy attaches the nginx route manager. With a Proxy attached,
+// Start writes the per-plugin route after capturing the bridge IP
+// and Demolish removes it on uninstall. Pass nil to disable nginx
+// integration (tests, environments without nginx).
+func (l *Lifecycle) SetProxy(p ProxyManager) {
+	l.proxy = p
 }
 
 // Materialise pulls the image (and runs the lxc-distro setup flow if
@@ -72,6 +96,12 @@ func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 	manifest, err := ParseManifest([]byte(rec.Plugin.ManifestYAML))
 	if err != nil {
 		return fmt.Errorf("re-parse stored manifest: %w", err)
+	}
+
+	// Phase 04: ensure the smoothnas-plugins bridge exists before
+	// container creation. Idempotent; safe to call every Materialise.
+	if _, err := l.rt.EnsurePluginBridge(ctx); err != nil {
+		return fmt.Errorf("ensure plugin bridge: %w", err)
 	}
 
 	imageRef, err := l.materialiseImage(ctx, &rec.Plugin, manifest)
@@ -271,9 +301,11 @@ func splitImageTag(ref string) (string, string) {
 	return ref, ""
 }
 
-// Start brings every instance of a plugin to the running state.
-// Materialise must have been called first; Start returns an error
-// if any instance has no container_id recorded.
+// Start brings every instance of a plugin to the running state,
+// captures each instance's bridge IP, and (when a Proxy is wired)
+// writes the per-plugin nginx route. Materialise must have been
+// called first; Start returns an error if any instance has no
+// container_id recorded.
 func (l *Lifecycle) Start(ctx context.Context, name string) error {
 	rec, err := l.store.Get(name)
 	if err != nil {
@@ -288,9 +320,98 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 			_ = l.setInstanceState(name, inst.Instance, StateFailed, err.Error())
 			return fmt.Errorf("start instance %d: %w", inst.Instance, err)
 		}
+		// Capture the bridge IP. The container is on the bridge
+		// from create time, but the IPAM-assigned address only
+		// becomes visible once the container's network namespace
+		// is up — which is post-start. Retry briefly to handle the
+		// brief window where the daemon is still wiring it.
+		if ip, err := l.captureBridgeIP(ctx, inst.ContainerID); err != nil {
+			_ = l.setInstanceState(name, inst.Instance, StateFailed, fmt.Sprintf("bridge IP: %v", err))
+			return fmt.Errorf("capture bridge IP for instance %d: %w", inst.Instance, err)
+		} else if ip != "" {
+			_ = l.store.SetInstanceBridgeIP(name, inst.Instance, ip)
+		}
 		_ = l.setInstanceState(name, inst.Instance, StateRunning, "")
 	}
+
+	// Re-fetch so the route picks up the freshly-written bridge IPs.
+	if l.proxy != nil {
+		updated, err := l.store.Get(name)
+		if err != nil {
+			return err
+		}
+		route, err := l.buildPluginRoute(updated)
+		if err != nil {
+			return fmt.Errorf("build nginx route: %w", err)
+		}
+		if err := l.proxy.Apply(ctx, route); err != nil {
+			return fmt.Errorf("apply nginx route: %w", err)
+		}
+	}
 	return nil
+}
+
+// captureBridgeIP polls InspectContainerBridgeIP up to 10 times
+// (~1 s) waiting for IPAM to populate the address. This window is
+// usually <100ms but can stretch on a busy daemon.
+func (l *Lifecycle) captureBridgeIP(ctx context.Context, containerID string) (string, error) {
+	for attempt := 0; attempt < 10; attempt++ {
+		ip, err := l.rt.InspectContainerBridgeIP(ctx, containerID)
+		if err == nil {
+			return ip, nil
+		}
+		if !errors.Is(err, runtime.ErrBridgeIPNotReady) {
+			return "", err
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return "", fmt.Errorf("bridge IP not assigned after 10 retries")
+}
+
+// buildPluginRoute renders the plugin record into a PluginRoute the
+// Proxy can apply. Multiple exposed ports per plugin produce
+// multiple ProxyRoute entries — first port (declaration order) gets
+// /plugins/<name>/, additional ports get /plugins/<name>/<port-name>/.
+//
+// For multi-instance plugins (count > 1), v1 routes to the first
+// instance's bridge IP only — load balancing is a future enhancement
+// and the proposal explicitly defers it. Operators wanting LB across
+// runners should run plugin-side load balancing (e.g. socat).
+func (l *Lifecycle) buildPluginRoute(rec *PluginRecord) (PluginRoute, error) {
+	if len(rec.Instances) == 0 {
+		return PluginRoute{}, fmt.Errorf("no instances")
+	}
+	upstreamIP := rec.Instances[0].BridgeIP
+	if upstreamIP == "" {
+		return PluginRoute{}, fmt.Errorf("instance 1 has no bridge IP")
+	}
+
+	route := PluginRoute{
+		PluginName: rec.Plugin.Name,
+		Version:    rec.Plugin.Version,
+	}
+	first := true
+	for _, p := range rec.Ports {
+		if !p.Expose {
+			continue
+		}
+		var locationPath string
+		if first {
+			locationPath = "/plugins/" + rec.Plugin.Name + "/"
+			first = false
+		} else {
+			locationPath = "/plugins/" + rec.Plugin.Name + "/" + p.Name + "/"
+		}
+		route.Routes = append(route.Routes, ProxyRoute{
+			LocationPath: locationPath,
+			UpstreamURL:  fmt.Sprintf("http://%s:%d/", upstreamIP, p.ContainerPort),
+		})
+	}
+	return route, nil
 }
 
 // Stop signals every running instance, waiting up to
@@ -338,8 +459,9 @@ func (l *Lifecycle) Restart(ctx context.Context, name string) error {
 }
 
 // Demolish stops, removes, and drops the cached image for every
-// instance. Used by Uninstall. Idempotent — gone-already containers
-// or images do not error.
+// instance, and (when a Proxy is wired) removes the per-plugin
+// nginx route. Used by Uninstall. Idempotent — gone-already
+// containers, images, and nginx confs do not error.
 func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 	rec, err := l.store.Get(name)
 	if err != nil {
@@ -347,6 +469,16 @@ func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 			return nil
 		}
 		return err
+	}
+
+	// Remove the nginx route first, before the containers it points
+	// at go away. nginx will return 502 to any in-flight request
+	// either way; removing the route first means a fresh request
+	// gets a clean 404 from SmoothNAS rather than 502.
+	if l.proxy != nil {
+		if err := l.proxy.Remove(ctx, name); err != nil {
+			return fmt.Errorf("remove nginx route: %w", err)
+		}
 	}
 
 	for _, inst := range rec.Instances {
