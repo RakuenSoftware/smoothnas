@@ -1333,6 +1333,19 @@ func (h *ArraysHandler) tierConsumers(poolName string) ([]string, error) {
 		}
 	}
 
+	// Plugin-system consumers (phase 03 of the plugin proposal).
+	// Wired via SetPluginTierConsumers; a no-op default keeps this
+	// safe before the server has called the setter.
+	if h.pluginTierConsumers != nil {
+		plugins, err := h.pluginTierConsumers(poolName)
+		if err != nil {
+			return nil, fmt.Errorf("list plugin consumers: %w", err)
+		}
+		for _, p := range plugins {
+			consumers = append(consumers, "plugin:"+p)
+		}
+	}
+
 	return consumers, nil
 }
 

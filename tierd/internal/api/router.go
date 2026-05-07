@@ -11,6 +11,7 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/health"
 	"github.com/JBailes/SmoothNAS/tierd/internal/monitor"
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
 	"github.com/JBailes/SmoothNAS/tierd/internal/smart"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tiering"
 	"github.com/JBailes/SmoothNAS/tierd/internal/updater"
@@ -32,6 +33,11 @@ func NewRouterFull(store *db.Store, version string, startTime time.Time, history
 	disksHandler := NewDisksHandler(store, historyStore, alarmStore)
 	arraysHandler := NewArraysHandler(store)
 	arraysHandler.ResumeDestroyingPools()
+	// Plugin tier consumers — phase 03 of the plugin proposal.
+	// Tier-deletion preflight refuses to destroy a pool that has
+	// any plugin volumes pointing at it.
+	pluginStore := plugin.NewStore(store)
+	arraysHandler.SetPluginTierConsumers(pluginStore.TierConsumers)
 	zfsHandler := NewZFSHandler(store)
 	userPrefsHandler := NewUserPrefsHandler(store)
 	sharingHandler := NewSharingHandler(store)

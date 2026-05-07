@@ -59,10 +59,14 @@ Subcommands (iscsi):
                                                     names a smoothfs-backed path.
 
 Subcommands (plugin):
-  install   <manifest.yaml>                       Parse and validate the manifest, record the plugin
-                                                    in tierd's database, and create flat-volume
-                                                    directories. Phase 1 — does not create or run
-                                                    any container; that lands in phase 02.
+  install   [--tier <pool>] [--volume-tier <vol>=<pool> ...] <manifest.yaml>
+                                                  Parse + validate the manifest, run tier-bound
+                                                    preflight, create the flat- and tier-bound
+                                                    volume directories, record the plugin in
+                                                    tierd's database. --tier sets the default
+                                                    tier pool for tier-bound volumes; per-volume
+                                                    overrides via --volume-tier (repeatable).
+                                                    Materialise/start happens in a separate verb.
   list                                            List installed plugins.
   show      <name>                                Print full per-instance state, volumes, ports,
                                                     and config for one plugin.
@@ -153,6 +157,99 @@ func openPluginLifecycle() (*plugin.Lifecycle, *db.Store, error) {
 	return plugin.NewLifecycle(plugin.NewStore(store), rt), store, nil
 }
 
+// volumeTierFlags is a flag.Value implementation that captures
+// repeated --volume-tier flags into a map of (volume name → tier
+// pool name). The CLI uses this for plugins where different volumes
+// land on different tiers.
+type volumeTierFlags map[string]string
+
+func (f *volumeTierFlags) String() string { return "" }
+func (f *volumeTierFlags) Set(v string) error {
+	i := -1
+	for j, c := range v {
+		if c == '=' {
+			i = j
+			break
+		}
+	}
+	if i <= 0 || i == len(v)-1 {
+		return fmt.Errorf("--volume-tier must be <volume>=<tier> (got %q)", v)
+	}
+	if *f == nil {
+		*f = volumeTierFlags{}
+	}
+	(*f)[v[:i]] = v[i+1:]
+	return nil
+}
+
+// pluginInstall handles `tierd-cli plugin install`. The flag set is
+// local to this verb so the CLI's other subcommands stay free of
+// install-only flags.
+func pluginInstall(args []string) {
+	fs := flag.NewFlagSet("plugin install", flag.ContinueOnError)
+	defaultTier := fs.String("tier", "", "default tier pool for tier-bound volumes (override per-volume with --volume-tier)")
+	var perVol volumeTierFlags
+	fs.Var(&perVol, "volume-tier", "per-volume tier override, repeatable: --volume-tier models=media")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) != 1 {
+		fmt.Fprintln(os.Stderr, "tierd-cli plugin install [--tier <pool>] [--volume-tier <vol>=<pool> ...] <manifest.yaml>")
+		os.Exit(2)
+	}
+	yamlBytes, err := os.ReadFile(rest[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read manifest: %v\n", err)
+		os.Exit(1)
+	}
+
+	inst, store, err := openPluginInstallerWithTiers()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	rec, err := inst.InstallWithOptions(yamlBytes, plugin.InstallOptions{
+		Tiers: plugin.TierAssignments{
+			Default:   *defaultTier,
+			PerVolume: map[string]string(perVol),
+		},
+	})
+	if err != nil {
+		// PreflightError surfaces per-volume detail; let it print as-is
+		// since its Error() already lists the offending volumes.
+		fmt.Fprintf(os.Stderr, "install: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("installed %s@%s (%s, %d instance%s)\n",
+		rec.Plugin.Name, rec.Plugin.Version, rec.Plugin.ArtifactType,
+		rec.Plugin.InstanceCount, plural(rec.Plugin.InstanceCount))
+}
+
+// openPluginInstallerWithTiers opens the tierd database and returns
+// an Installer with the TierProvider wired so tier-bound preflight
+// runs. The Demolisher is intentionally NOT attached here — install
+// doesn't need to talk to the runtime daemon.
+func openPluginInstallerWithTiers() (*plugin.Installer, *db.Store, error) {
+	dbPath := os.Getenv("TIERD_DB")
+	if dbPath == "" {
+		dbPath = "/var/lib/tierd/tierd.db"
+	}
+	store, err := db.Open(dbPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open db at %s: %w", dbPath, err)
+	}
+	if err := store.Migrate(); err != nil {
+		store.Close()
+		return nil, nil, fmt.Errorf("migrate: %w", err)
+	}
+	inst := plugin.NewInstaller(plugin.NewStore(store))
+	inst.SetTierProvider(store, plugin.StatAvail)
+	return inst, store, nil
+}
+
 // openPluginInstallerWithRuntime is the install/uninstall variant
 // that also wires a Lifecycle as the Demolisher. With this on, the
 // CLI's `plugin uninstall` will stop and remove containers + drop
@@ -192,29 +289,7 @@ func pluginCmd(args []string) {
 
 	switch sub {
 	case "install":
-		if len(rest) != 1 {
-			fmt.Fprintln(os.Stderr, "tierd-cli plugin install <manifest.yaml>")
-			os.Exit(2)
-		}
-		yamlBytes, err := os.ReadFile(rest[0])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "read manifest: %v\n", err)
-			os.Exit(1)
-		}
-		inst, store, err := openPluginInstaller()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%v\n", err)
-			os.Exit(1)
-		}
-		defer store.Close()
-		rec, err := inst.Install(yamlBytes)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "install: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("installed %s@%s (%s, %d instance%s)\n",
-			rec.Plugin.Name, rec.Plugin.Version, rec.Plugin.ArtifactType,
-			rec.Plugin.InstanceCount, plural(rec.Plugin.InstanceCount))
+		pluginInstall(rest)
 
 	case "list":
 		_, store, err := openPluginInstaller()
