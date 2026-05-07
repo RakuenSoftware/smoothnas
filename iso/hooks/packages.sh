@@ -37,7 +37,7 @@ mkdir -p "$TARGET/opt/smoothnas/repo/pool"
 _download_pkg() {
     local filename="$1"
     echo "  Downloading ${filename}..."
-    wget -q -O "$TARGET/opt/smoothnas/repo/pool/${filename}" \
+    curl -fsSL -o "$TARGET/opt/smoothnas/repo/pool/${filename}" \
         "${SMOOTHKERNEL_RELEASE_BASE_URL}/${filename}" || \
         die "Failed to download ${filename}"
 }
