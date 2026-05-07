@@ -199,23 +199,9 @@ jobs:
           repository: RakuenSoftware/smoothiso
           path: deps/smoothiso
 
-      - name: Checkout smoothgui
-        uses: actions/checkout@v4
-        with:
-          repository: RakuenSoftware/smoothgui
-          path: deps/smoothgui
-
-      - name: Build smoothgui installer frontend
-        working-directory: deps/smoothgui
-        run: |
-          echo '//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}' >> .npmrc
-          npm ci
-          npm run build:installer
-
       - name: Build ISO
         env:
           SMOOTHISO_DIR: ${{ github.workspace }}/deps/smoothiso
-          SMOOTHGUI_DIR: ${{ github.workspace }}/deps/smoothgui
           SMOOTHKERNEL_DIR: ${{ github.workspace }}/deps/smoothkernel-out
           ZFS_ARTIFACT_DIR: ${{ github.workspace }}/deps/smoothkernel-out
           SMOOTHFS_REPO_URL: https://github.com/RakuenSoftware/smoothfs.git
