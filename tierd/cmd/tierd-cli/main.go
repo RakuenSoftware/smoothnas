@@ -35,6 +35,7 @@ Usage:
   tierd-cli smoothfs <subcommand> --pool <uuid> [args...]
   tierd-cli iscsi    <subcommand> [args...]
   tierd-cli plugin   <subcommand> [args...]
+  tierd-cli profile  <subcommand> [args...]
 
 Subcommands (smoothfs):
   create-pool  --name <n> --tiers <a:b:c> [--uuid <u>] [--mount-base <path>]
@@ -84,6 +85,14 @@ Subcommands (plugin):
 
 Plugin commands honour the TIERD_DB env var (default /var/lib/tierd/tierd.db).
 
+Subcommands (profile):
+  list                                            List built-in + operator profiles. Operator
+                                                    profiles live in /etc/smoothnas/plugin-profiles.d/.
+  show     <name>                                 Print one profile's resolved fields.
+  validate <path-to-yaml>                         Parse + validate an operator profile YAML
+                                                    without installing it. Useful for editor
+                                                    save-hooks.
+
 The promote/demote subcommands send a MOVE_PLAN; tierd's worker pool
 runs copy/verify/cutover/cleanup. Use 'inspect' to follow progress.
 `)
@@ -104,9 +113,99 @@ func main() {
 		iscsiCmd(args[1:])
 	case "plugin":
 		pluginCmd(args[1:])
+	case "profile":
+		profileCmd(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "tierd-cli: unknown command %q\n", args[0])
 		usage()
+		os.Exit(2)
+	}
+}
+
+// profileCmd handles `tierd-cli profile <subcommand>`. Catalog is
+// loaded fresh per invocation; tierd's own profile lifetime is
+// bounded by the long-running daemon, the CLI just reads.
+func profileCmd(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "tierd-cli profile: subcommand required (list | show <name> | validate <path>)")
+		os.Exit(2)
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "list":
+		cat, err := plugin.NewCatalog(plugin.DefaultOperatorProfilesDir)
+		if err != nil {
+			// Operator-profile errors are non-fatal — still print
+			// the catalog we did load, but warn so the operator can
+			// fix the bad file.
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		}
+		profiles := cat.List()
+		if len(profiles) == 0 {
+			fmt.Println("no profiles in catalog")
+			return
+		}
+		fmt.Printf("%-20s %-10s %s\n", "NAME", "SOURCE", "DESCRIPTION")
+		for _, p := range profiles {
+			desc := strings.SplitN(strings.TrimSpace(p.Metadata.Description), "\n", 2)[0]
+			fmt.Printf("%-20s %-10s %s\n", p.Metadata.Name, p.Source, desc)
+		}
+	case "show":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "tierd-cli profile show <name>")
+			os.Exit(2)
+		}
+		cat, _ := plugin.NewCatalog(plugin.DefaultOperatorProfilesDir)
+		p, ok := cat.Get(rest[0])
+		if !ok {
+			fmt.Fprintf(os.Stderr, "profile %q not in catalog\n", rest[0])
+			os.Exit(1)
+		}
+		fmt.Printf("name:        %s\n", p.Metadata.Name)
+		fmt.Printf("source:      %s\n", p.Source)
+		fmt.Printf("description: %s\n", strings.TrimSpace(p.Metadata.Description))
+		if len(p.Container.HostConfig.Devices) > 0 {
+			fmt.Println("devices:")
+			for _, d := range p.Container.HostConfig.Devices {
+				fmt.Printf("  %s (%s)\n", d.Path, d.CgroupPermissions)
+			}
+		}
+		if len(p.LXC.RawConfig) > 0 {
+			fmt.Println("lxc.rawConfig:")
+			for _, r := range p.LXC.RawConfig {
+				fmt.Printf("  %s\n", r)
+			}
+		}
+		if len(p.Preflight.HostHas) > 0 {
+			fmt.Println("preflight.hostHas:")
+			for _, c := range p.Preflight.HostHas {
+				fmt.Printf("  %s (%s)\n", c.Path, c.Requirement)
+			}
+		}
+		if p.Container.HostConfig.PidsLimit != 0 {
+			fmt.Printf("pidsLimit:   %d\n", p.Container.HostConfig.PidsLimit)
+		}
+		if p.Container.HostConfig.OomScoreAdj != nil {
+			fmt.Printf("oomScoreAdj: %d\n", *p.Container.HostConfig.OomScoreAdj)
+		}
+	case "validate":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "tierd-cli profile validate <path-to-yaml>")
+			os.Exit(2)
+		}
+		data, err := os.ReadFile(rest[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read: %v\n", err)
+			os.Exit(1)
+		}
+		if _, err := plugin.ParseProfile(data); err != nil {
+			fmt.Fprintf(os.Stderr, "invalid: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("ok: %s\n", rest[0])
+	default:
+		fmt.Fprintf(os.Stderr, "tierd-cli profile: unknown subcommand %q\n", sub)
 		os.Exit(2)
 	}
 }
@@ -157,6 +256,15 @@ func openPluginLifecycle() (*plugin.Lifecycle, *db.Store, error) {
 	rt := runtime.NewClient(sock)
 	lc := plugin.NewLifecycle(plugin.NewStore(store), rt)
 	lc.SetProxy(plugin.NewProxy())
+	cat, err := plugin.NewCatalog(plugin.DefaultOperatorProfilesDir)
+	if err != nil {
+		// Operator-profile errors are surfaced but don't block —
+		// CLI lifecycle still works with the built-ins.
+		fmt.Fprintf(os.Stderr, "warning: profile catalog: %v\n", err)
+	}
+	if cat != nil {
+		lc.SetCatalog(cat)
+	}
 	return lc, store, nil
 }
 
@@ -278,6 +386,9 @@ func openPluginInstallerWithRuntime() (*plugin.Installer, *db.Store, error) {
 	rt := runtime.NewClient(sock)
 	lc := plugin.NewLifecycle(pluginStore, rt)
 	lc.SetProxy(plugin.NewProxy())
+	if cat, err := plugin.NewCatalog(plugin.DefaultOperatorProfilesDir); err == nil && cat != nil {
+		lc.SetCatalog(cat)
+	}
 	inst := plugin.NewInstaller(pluginStore)
 	inst.SetDemolisher(lc)
 	return inst, store, nil

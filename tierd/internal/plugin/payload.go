@@ -63,6 +63,11 @@ type PayloadInputs struct {
 	ImageRef  string         // resolved by Materialise; e.g. "ghcr.io/...@sha256:..."
 	Volumes   []VolumeRow    // from the DB; expanded with per-instance host paths
 	Config    []ConfigRow    // already merged with manifest defaults
+	// Profiles is the merged profile fragments (devices, env, capAdd,
+	// pidsLimit, oomScoreAdj, lxc raw config). When nil the renderer
+	// behaves as phase 1–4 (no profile contribution); production
+	// callers always pass a non-nil *Resolved from plugin.Resolve.
+	Profiles  *Resolved
 }
 
 // BuildCreatePayload renders the runtime.CreateContainerRequest for
@@ -95,13 +100,27 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 		binds = append(binds, host+":"+vol.BindPath)
 	}
 
-	env := make([]string, 0, len(in.Config))
-	// Stable env order so the rendered payload is deterministic in
-	// tests and so a config-ordering reshuffle doesn't trigger a
-	// container recreate diff.
-	sort.Slice(in.Config, func(i, j int) bool { return in.Config[i].Key < in.Config[j].Key })
+	// Build the env list. Profile-contributed env entries land first,
+	// the manifest's plugin_config entries after — so plugin_config
+	// wins on key collisions (operators tuning runtime values
+	// override profile defaults).
+	envMap := map[string]string{}
+	if in.Profiles != nil {
+		for k, v := range in.Profiles.Env {
+			envMap[k] = v
+		}
+	}
 	for _, c := range in.Config {
-		env = append(env, c.Key+"="+c.Value)
+		envMap[c.Key] = c.Value
+	}
+	envKeys := make([]string, 0, len(envMap))
+	for k := range envMap {
+		envKeys = append(envKeys, k)
+	}
+	sort.Strings(envKeys)
+	env := make([]string, 0, len(envKeys))
+	for _, k := range envKeys {
+		env = append(env, k+"="+envMap[k])
 	}
 
 	labels := map[string]string{
@@ -111,6 +130,38 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 		runtime.PluginInstanceLabel: strconv.Itoa(in.Instance),
 	}
 
+	host := runtime.HostConfig{
+		Binds:       binds,
+		NetworkMode: runtime.PluginBridgeName,
+		RestartPolicy: runtime.RestartPolicy{
+			Name: dockerRestartPolicyName(in.Manifest.EffectiveRestartPolicy()),
+		},
+	}
+	if in.Profiles != nil {
+		// Devices: profile-contributed mappings.
+		for _, d := range in.Profiles.Devices {
+			host.Devices = append(host.Devices, runtime.DeviceMapping{
+				PathOnHost:        d.Path,
+				PathInContainer:   d.Path,
+				CgroupPermissions: cgroupPerms(d.CgroupPermissions),
+			})
+		}
+		host.CapAdd = append([]string(nil), in.Profiles.CapAdd...)
+		if in.Profiles.PidsLimit != 0 {
+			host.PidsLimit = in.Profiles.PidsLimit
+		}
+		if in.Profiles.OomScoreAdj != nil {
+			host.OomScoreAdj = *in.Profiles.OomScoreAdj
+		}
+
+		// LXC raw-config directives ride as labels for LXC2Docker
+		// to apply at container start. Indexed so the ordering is
+		// preserved (the directives are order-sensitive).
+		for i, raw := range in.Profiles.LXCRaw {
+			labels[fmt.Sprintf("io.smoothnas.lxc.raw.%d", i)] = raw
+		}
+	}
+
 	return runtime.CreateContainerRequest{
 		Image:      in.ImageRef,
 		Cmd:        append([]string(nil), in.Manifest.Container.Command...),
@@ -118,15 +169,20 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 		WorkingDir: in.Manifest.Container.WorkingDir,
 		User:       in.Manifest.Container.User,
 		Labels:     labels,
-		HostConfig: runtime.HostConfig{
-			Binds:       binds,
-			NetworkMode: runtime.PluginBridgeName,
-			RestartPolicy: runtime.RestartPolicy{
-				Name: dockerRestartPolicyName(in.Manifest.EffectiveRestartPolicy()),
-			},
-			// Devices left empty: phase 05 (profiles) populates them.
-		},
+		HostConfig: host,
 	}, nil
+}
+
+// cgroupPerms defaults empty permissions to "rwm". A profile that
+// declares a device without explicit permissions almost always
+// wants full access — explicit "" usually means "I forgot to set
+// it" rather than "I want zero permissions" (which would make the
+// device useless).
+func cgroupPerms(p string) string {
+	if p == "" {
+		return "rwm"
+	}
+	return p
 }
 
 // volumeHostPath looks up the host path for a (volume, instance)

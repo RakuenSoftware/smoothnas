@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -52,6 +53,12 @@ type PluginRow struct {
 	InstanceConfigurable bool
 	InstalledAt          string
 	UpdatedAt            string
+	// ResolvedProfiles is the profile-name list that was actually
+	// applied at install/materialise time (after default-limits
+	// auto-injection and operator overrides). Empty list = no
+	// profiles. The phase-1 install path leaves this empty;
+	// Lifecycle.Materialise populates it once profiles are wired.
+	ResolvedProfiles []string
 }
 
 // InstanceRow is the in-memory image of one plugin_instances row.
@@ -350,7 +357,7 @@ func (s *Store) List() ([]PluginRow, error) {
 		`SELECT name, version, state, manifest, artifact_type,
 		        COALESCE(image_ref, ''), COALESCE(distro_summary, ''),
 		        instance_count, instance_configurable,
-		        installed_at, updated_at
+		        installed_at, updated_at, profiles_json
 		 FROM plugins
 		 ORDER BY name`,
 	)
@@ -414,6 +421,32 @@ func (s *Store) TierConsumers(poolName string) ([]string, error) {
 		out = append(out, name)
 	}
 	return out, rows.Err()
+}
+
+// SetResolvedProfiles records the merged-profile-name list applied
+// at install/materialise time. Stored as a JSON array so a future
+// tierd doesn't have to re-resolve against a possibly-changed
+// catalog to know what the containers were created with.
+func (s *Store) SetResolvedProfiles(name string, profileNames []string) error {
+	if profileNames == nil {
+		profileNames = []string{}
+	}
+	encoded, err := json.Marshal(profileNames)
+	if err != nil {
+		return fmt.Errorf("encode profiles: %w", err)
+	}
+	res, err := s.db.Exec(
+		`UPDATE plugins SET profiles_json = ?, updated_at = datetime('now') WHERE name = ?`,
+		string(encoded), name,
+	)
+	if err != nil {
+		return fmt.Errorf("update plugins.profiles_json: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrPluginNotFound
+	}
+	return nil
 }
 
 // SetInstanceContainerID records the runtime daemon's container ID
@@ -582,7 +615,7 @@ func (s *Store) getPluginRow(name string) (PluginRow, error) {
 		`SELECT name, version, state, manifest, artifact_type,
 		        COALESCE(image_ref, ''), COALESCE(distro_summary, ''),
 		        instance_count, instance_configurable,
-		        installed_at, updated_at
+		        installed_at, updated_at, profiles_json
 		 FROM plugins WHERE name = ?`,
 		name,
 	)
@@ -602,15 +635,22 @@ type rowScanner interface {
 func scanPluginRow(rs rowScanner) (PluginRow, error) {
 	var r PluginRow
 	var configurable int
+	var profilesJSON string
 	if err := rs.Scan(
 		&r.Name, &r.Version, &r.State, &r.ManifestYAML, &r.ArtifactType,
 		&r.ImageRef, &r.DistroSummary,
 		&r.InstanceCount, &configurable,
-		&r.InstalledAt, &r.UpdatedAt,
+		&r.InstalledAt, &r.UpdatedAt, &profilesJSON,
 	); err != nil {
 		return PluginRow{}, err
 	}
 	r.InstanceConfigurable = configurable != 0
+	if profilesJSON != "" {
+		// Default value from the migration is the empty array, so
+		// this should always succeed; tolerate the unlikely
+		// "old row with NULL" case by leaving ResolvedProfiles nil.
+		_ = json.Unmarshal([]byte(profilesJSON), &r.ResolvedProfiles)
+	}
 	return r, nil
 }
 

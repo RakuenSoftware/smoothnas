@@ -62,6 +62,11 @@ type Lifecycle struct {
 	// skips nginx route generation. Production wires *Proxy via
 	// SetProxy at startup.
 	proxy ProxyManager
+	// catalog is optional: when nil (phase 1-4 tests), Materialise
+	// skips profile resolution and the create payload contains no
+	// profile-contributed fragments. Production wires a *Catalog
+	// via SetCatalog at startup.
+	catalog *Catalog
 }
 
 // NewLifecycle constructs a Lifecycle around an existing Store and a
@@ -77,6 +82,15 @@ func NewLifecycle(s *Store, rt RuntimeClient) *Lifecycle {
 // integration (tests, environments without nginx).
 func (l *Lifecycle) SetProxy(p ProxyManager) {
 	l.proxy = p
+}
+
+// SetCatalog attaches the profile catalog. With a Catalog attached,
+// Materialise resolves profiles, runs preflight, persists the
+// applied profile names, and threads the merged fragments into the
+// container create payload. Pass nil to disable profile resolution
+// (phase 1-4 behaviour).
+func (l *Lifecycle) SetCatalog(c *Catalog) {
+	l.catalog = c
 }
 
 // Materialise pulls the image (and runs the lxc-distro setup flow if
@@ -104,6 +118,22 @@ func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 		return fmt.Errorf("ensure plugin bridge: %w", err)
 	}
 
+	// Phase 05: resolve profiles. nil catalog = no profile fragments
+	// (preserves phase 1-4 test behaviour). When set, this validates
+	// every referenced profile exists, runs preflight gates, and
+	// returns the merged fragments to thread into the create payload.
+	var resolved *Resolved
+	if l.catalog != nil {
+		r, err := Resolve(l.catalog, manifest, nil)
+		if err != nil {
+			return fmt.Errorf("resolve profiles: %w", err)
+		}
+		if err := l.store.SetResolvedProfiles(name, r.Names); err != nil {
+			return fmt.Errorf("persist resolved profiles: %w", err)
+		}
+		resolved = r
+	}
+
 	imageRef, err := l.materialiseImage(ctx, &rec.Plugin, manifest)
 	if err != nil {
 		return err
@@ -129,6 +159,7 @@ func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 			ImageRef: imageRef,
 			Volumes:  rec.Volumes,
 			Config:   rec.Config,
+			Profiles: resolved,
 		})
 		if err != nil {
 			return fmt.Errorf("build payload for instance %d: %w", inst.Instance, err)
