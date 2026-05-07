@@ -144,20 +144,16 @@ jobs:
       - name: Install system dependencies
         run: |
           set -euo pipefail
-          # Ubuntu 24.04 ships Firefox as a snap, not a .deb; the Mozilla Team
-          # PPA provides a proper firefox-esr .deb that smoothiso can bundle
-          # into the installer initrd.
-          sudo add-apt-repository -y ppa:mozillateam/ppa
           sudo apt-get update
           # isolinux + syslinux-utils are BIOS-only x86 tools and are not
-          # in the arm64 Ubuntu archive; only the amd64 leg needs them.
+          # in the arm64 archive; only the amd64 leg needs them.
           bios_pkgs=""
           if [ "${{ matrix.deb_arch }}" = "amd64" ]; then
             bios_pkgs="isolinux syslinux-utils"
           fi
           sudo apt-get install -y \
             xorriso $bios_pkgs cpio gzip file curl \
-            libpam0g-dev gcc dpkg-dev xz-utils ripgrep
+            gcc dpkg-dev xz-utils ripgrep
 
       - uses: actions/setup-go@v5
         with:
@@ -206,6 +202,8 @@ jobs:
           ZFS_ARTIFACT_DIR: ${{ github.workspace }}/deps/smoothkernel-out
           SMOOTHFS_REPO_URL: https://github.com/RakuenSoftware/smoothfs.git
           DEB_ARCH: ${{ matrix.deb_arch }}
+          # Installer UI is whiptail; no browser is bundled or used.
+          INSTALLER_BROWSER_DEFERRED: '1'
         run: |
           chmod +x iso/build-iso.sh
           ./iso/build-iso.sh ${{ needs.meta.outputs.version }}
