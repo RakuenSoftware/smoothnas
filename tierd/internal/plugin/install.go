@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,12 +12,26 @@ import (
 // (resolved in phase 03), not here.
 const DefaultPluginsRoot = "/var/lib/smoothnas/plugins"
 
+// Demolisher is the subset of *Lifecycle the Installer needs at
+// uninstall time: stop every container, remove them, drop the
+// cached image. An interface (rather than a *Lifecycle field)
+// keeps install.go free of any runtime-client imports and lets
+// phase 1 tests run with no runtime configured.
+type Demolisher interface {
+	Demolish(ctx context.Context, name string) error
+}
+
 // Installer wires a plugin.Store to a filesystem layout. It owns
 // the install / uninstall flow that operators reach through the
 // CLI (and, in phase 06, the UI).
+//
+// The Demolisher is optional. When nil (phase 1 builds, tests),
+// Uninstall skips container/image teardown and is otherwise
+// unchanged.
 type Installer struct {
-	store        *Store
-	pluginsRoot  string
+	store       *Store
+	pluginsRoot string
+	demolisher  Demolisher
 
 	// mkdirAll is overridable in tests. Defaults to os.MkdirAll.
 	mkdirAll func(path string, perm os.FileMode) error
@@ -25,6 +40,8 @@ type Installer struct {
 }
 
 // NewInstaller constructs an Installer rooted at DefaultPluginsRoot.
+// The returned Installer has no Demolisher attached; callers that
+// want runtime teardown on Uninstall must call SetDemolisher.
 func NewInstaller(store *Store) *Installer {
 	return &Installer{
 		store:       store,
@@ -38,6 +55,13 @@ func NewInstaller(store *Store) *Installer {
 // Used by tests; production callers stick with DefaultPluginsRoot.
 func (i *Installer) SetPluginsRoot(path string) {
 	i.pluginsRoot = path
+}
+
+// SetDemolisher attaches a Demolisher (typically *Lifecycle) so
+// Uninstall calls runtime stop/remove + image drop before deleting
+// the DB rows. Pass nil to revert to the phase-1 behaviour.
+func (i *Installer) SetDemolisher(d Demolisher) {
+	i.demolisher = d
 }
 
 // Install parses the YAML, validates it, fans out per-instance
@@ -131,18 +155,36 @@ func (i *Installer) resolveVolumePaths(m *Manifest, count int) (
 	return paths, mkdirs, nil
 }
 
-// Uninstall is the phase-1 stub: deletes the DB rows (cascading to
-// every child table) and removes the plugin's flat-volume directory
-// tree under DefaultPluginsRoot. Tier-bound volume teardown lives in
-// phase 03; container/image/nginx teardown lives in phases 02 and 04.
+// Uninstall removes the plugin and every cascading row + directory
+// it owns. When a Demolisher has been attached (phase 02+), it is
+// called first to stop/remove containers and drop the cached image
+// — that step needs the plugin_instances rows that the DB delete
+// would otherwise wipe out, so the order is:
 //
-// If the plugin doesn't exist, returns ErrPluginNotFound.
+//  1. Demolisher.Demolish — runtime teardown (skipped if nil)
+//  2. store.Delete         — DB rows (cascades all child tables)
+//  3. removeAll flat dirs  — filesystem teardown
+//  4. best-effort parent dir cleanup
+//
+// Tier-bound volume teardown still lives in phase 03; nginx + bridge
+// teardown lives in phase 04. Returns ErrPluginNotFound when no
+// plugin matches.
 func (i *Installer) Uninstall(name string) error {
 	// Snapshot which flat directories we own so we know what to remove
 	// after the DB rows are gone.
 	rec, err := i.store.Get(name)
 	if err != nil {
 		return err
+	}
+
+	// Phase 02: runtime teardown happens before the DB delete because
+	// Demolish needs the per-instance container_id rows. If the runtime
+	// daemon is unreachable Demolish returns an error; the operator can
+	// retry uninstall after the daemon is back.
+	if i.demolisher != nil {
+		if err := i.demolisher.Demolish(context.Background(), name); err != nil {
+			return fmt.Errorf("runtime teardown: %w", err)
+		}
 	}
 
 	if err := i.store.Delete(name); err != nil {

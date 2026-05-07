@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/iscsi"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/runtime"
 )
 
 const exTempFail = 75
@@ -65,9 +67,16 @@ Subcommands (plugin):
   show      <name>                                Print full per-instance state, volumes, ports,
                                                     and config for one plugin.
   uninstall <name>                                Remove flat-volume directories and DB rows for
-                                                    a plugin. Tier-bound volume teardown lands in
-                                                    phase 03; container teardown lands in phase 02.
-  start | stop | restart  <name>                  Stub — prints the phase that will implement it.
+                                                    a plugin. With a running smoothnas-runtime,
+                                                    also stops/removes containers and drops the
+                                                    cached image. Tier-bound volume teardown
+                                                    lands in phase 03.
+  materialise <name>                              Pull the image (and run lxc-distro setup),
+                                                    then create per-instance containers. Most
+                                                    operators run this before 'start'.
+  start | stop | restart  <name>                  Lifecycle verbs against an installed plugin.
+                                                    Honours SMOOTHNAS_RUNTIME_SOCKET (default
+                                                    /run/smoothnas-runtime/docker.sock).
 
 Plugin commands honour the TIERD_DB env var (default /var/lib/tierd/tierd.db).
 
@@ -116,6 +125,60 @@ func openPluginInstaller() (*plugin.Installer, *db.Store, error) {
 		return nil, nil, fmt.Errorf("migrate: %w", err)
 	}
 	return plugin.NewInstaller(plugin.NewStore(store)), store, nil
+}
+
+// openPluginLifecycle opens the tierd database and a runtime client
+// pointed at smoothnas-runtime, and returns a Lifecycle that
+// composes them. SMOOTHNAS_RUNTIME_SOCKET overrides the socket path
+// (default runtime.DefaultSocketPath); TIERD_DB overrides the DB
+// path same as openPluginInstaller. Caller defers store.Close().
+func openPluginLifecycle() (*plugin.Lifecycle, *db.Store, error) {
+	dbPath := os.Getenv("TIERD_DB")
+	if dbPath == "" {
+		dbPath = "/var/lib/tierd/tierd.db"
+	}
+	sock := os.Getenv("SMOOTHNAS_RUNTIME_SOCKET")
+	if sock == "" {
+		sock = runtime.DefaultSocketPath
+	}
+	store, err := db.Open(dbPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open db at %s: %w", dbPath, err)
+	}
+	if err := store.Migrate(); err != nil {
+		store.Close()
+		return nil, nil, fmt.Errorf("migrate: %w", err)
+	}
+	rt := runtime.NewClient(sock)
+	return plugin.NewLifecycle(plugin.NewStore(store), rt), store, nil
+}
+
+// openPluginInstallerWithRuntime is the install/uninstall variant
+// that also wires a Lifecycle as the Demolisher. With this on, the
+// CLI's `plugin uninstall` will stop and remove containers + drop
+// the cached image before deleting the DB rows.
+func openPluginInstallerWithRuntime() (*plugin.Installer, *db.Store, error) {
+	dbPath := os.Getenv("TIERD_DB")
+	if dbPath == "" {
+		dbPath = "/var/lib/tierd/tierd.db"
+	}
+	sock := os.Getenv("SMOOTHNAS_RUNTIME_SOCKET")
+	if sock == "" {
+		sock = runtime.DefaultSocketPath
+	}
+	store, err := db.Open(dbPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open db at %s: %w", dbPath, err)
+	}
+	if err := store.Migrate(); err != nil {
+		store.Close()
+		return nil, nil, fmt.Errorf("migrate: %w", err)
+	}
+	pluginStore := plugin.NewStore(store)
+	rt := runtime.NewClient(sock)
+	inst := plugin.NewInstaller(pluginStore)
+	inst.SetDemolisher(plugin.NewLifecycle(pluginStore, rt))
+	return inst, store, nil
 }
 
 func pluginCmd(args []string) {
@@ -200,7 +263,7 @@ func pluginCmd(args []string) {
 			fmt.Fprintln(os.Stderr, "tierd-cli plugin uninstall <name>")
 			os.Exit(2)
 		}
-		inst, store, err := openPluginInstaller()
+		inst, store, err := openPluginInstallerWithRuntime()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
@@ -212,15 +275,62 @@ func pluginCmd(args []string) {
 		}
 		fmt.Printf("uninstalled %s\n", rest[0])
 
-	case "start", "stop", "restart":
-		fmt.Fprintf(os.Stderr, "tierd-cli plugin %s: lifecycle requires phase 02 (LXC2Docker integration); not yet implemented\n", sub)
-		os.Exit(1)
+	case "materialise", "materialize":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "tierd-cli plugin materialise <name>")
+			os.Exit(2)
+		}
+		lc, store, err := openPluginLifecycle()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		defer store.Close()
+		if err := lc.Materialise(context.Background(), rest[0]); err != nil {
+			fmt.Fprintf(os.Stderr, "materialise: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("materialised %s\n", rest[0])
+
+	case "start":
+		runLifecycleVerb("start", "started", rest, func(lc *plugin.Lifecycle, name string) error {
+			return lc.Start(context.Background(), name)
+		})
+	case "stop":
+		runLifecycleVerb("stop", "stopped", rest, func(lc *plugin.Lifecycle, name string) error {
+			return lc.Stop(context.Background(), name)
+		})
+	case "restart":
+		runLifecycleVerb("restart", "restarted", rest, func(lc *plugin.Lifecycle, name string) error {
+			return lc.Restart(context.Background(), name)
+		})
 
 	default:
 		fmt.Fprintf(os.Stderr, "tierd-cli plugin: unknown subcommand %q\n", sub)
 		usage()
 		os.Exit(2)
 	}
+}
+
+// runLifecycleVerb is the shared start/stop/restart shell. Past tense
+// is what gets printed since the verb has happened by the time we
+// print.
+func runLifecycleVerb(verb, past string, rest []string, fn func(*plugin.Lifecycle, string) error) {
+	if len(rest) != 1 {
+		fmt.Fprintf(os.Stderr, "tierd-cli plugin %s <name>\n", verb)
+		os.Exit(2)
+	}
+	lc, store, err := openPluginLifecycle()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+	if err := fn(lc, rest[0]); err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", verb, err)
+		os.Exit(1)
+	}
+	fmt.Printf("%s %s\n", past, rest[0])
 }
 
 func plural(n int) string {
