@@ -4,16 +4,15 @@
 # Usage: ./iso/build-iso.sh <version>
 #
 # Wraps the generic smoothiso builder with SmoothNAS-specific config and
-# hooks. The installer presents the SmoothGUI installer (firefox-esr in
-# kiosk mode) on the boot console; smoothiso/installer.sh drives the flow
-# and sources the project hooks under iso/hooks/.
+# hooks. The installer uses a whiptail text UI on the boot console;
+# smoothiso/installer.sh drives the flow and sources the project hooks
+# under iso/hooks/.
 #
 # Required sibling repos (override with env vars if checked out elsewhere):
 #   ../smoothiso        — generic Debian-installer ISO builder
-#   ../smoothgui        — React installer frontend
 #   ../smoothkernel     — SmoothKernel and OpenZFS .deb artifacts
 #
-# Override env vars: SMOOTHISO_DIR, SMOOTHGUI_DIR, SMOOTHKERNEL_DIR,
+# Override env vars: SMOOTHISO_DIR, SMOOTHKERNEL_DIR,
 # ZFS_ARTIFACT_DIR, SMOOTHFS_REPO_URL, SMOOTHFS_REPO_REF, SMOOTHFS_SRC_DIR,
 # DEBIAN_MIRROR.
 set -euo pipefail
@@ -29,11 +28,6 @@ OUTPUT_DIR="${PROJECT_DIR}/iso/output"
 ISO_FILE="${OUTPUT_DIR}/smoothnas-${VERSION}-${DEB_ARCH}.iso"
 HOOKS_DIR="${SCRIPT_DIR}/hooks"
 SMOOTHISO_DIR="${SMOOTHISO_DIR:-${PROJECT_DIR}/../smoothiso}"
-SMOOTHGUI_DIR="${SMOOTHGUI_DIR:-${PROJECT_DIR}/../smoothgui}"
-SMOOTHGUI_FRONTEND_DIR="${SMOOTHGUI_FRONTEND_DIR:-${SMOOTHGUI_DIR}/dist/installer}"
-SMOOTHGUI_FRONTEND_REQUIRED="${SMOOTHGUI_FRONTEND_REQUIRED:-1}"
-SMOOTHGUI_FRONTEND_PORT="${SMOOTHGUI_FRONTEND_PORT:-8080}"
-SMOOTHGUI_FRONTEND_BIND="${SMOOTHGUI_FRONTEND_BIND:-127.0.0.1}"
 # Where to find prebuilt SmoothKernel + OpenZFS .debs. The CI release
 # workflow downloads them from a pinned RakuenSoftware/smoothkernel
 # GitHub release; operators can point this at a local out/ directory
@@ -160,30 +154,6 @@ resolve_appliance_artifacts() {
     fi
 }
 
-build_smoothgui_frontend() {
-    if [ -d "$SMOOTHGUI_FRONTEND_DIR" ] && \
-        { [ -f "${SMOOTHGUI_FRONTEND_DIR}/index.html" ] || [ -f "${SMOOTHGUI_FRONTEND_DIR}/index.installer.html" ]; }; then
-        return 0
-    fi
-
-    if [ ! -d "$SMOOTHGUI_DIR" ]; then
-        echo "ERROR: SmoothGUI source tree not found at ${SMOOTHGUI_DIR}."
-        exit 1
-    fi
-
-    echo "Building SmoothGUI installer frontend..."
-    (cd "$SMOOTHGUI_DIR" && npm ci && npm run build:installer) || {
-        echo "ERROR: failed to build smoothgui installer frontend."
-        exit 1
-    }
-
-    SMOOTHGUI_FRONTEND_DIR="${SMOOTHGUI_DIR}/dist/installer"
-    if [ ! -d "$SMOOTHGUI_FRONTEND_DIR" ] || \
-        { [ ! -f "${SMOOTHGUI_FRONTEND_DIR}/index.html" ] && [ ! -f "${SMOOTHGUI_FRONTEND_DIR}/index.installer.html" ]; }; then
-        echo "ERROR: SmoothGUI installer frontend build output missing at ${SMOOTHGUI_FRONTEND_DIR}."
-        exit 1
-    fi
-}
 
 prepare_smoothnas_payload() {
     local payload_dir="$1"
@@ -256,7 +226,6 @@ main() {
     fi
 
     resolve_appliance_artifacts
-    build_smoothgui_frontend
 
     if [ ! -f "${PROJECT_DIR}/bin/tierd" ]; then
         local host_arch
@@ -290,17 +259,8 @@ main() {
 
     (
         cd "$SMOOTHISO_DIR"
-        SMOOTHGUI_FRONTEND_DIR="$SMOOTHGUI_FRONTEND_DIR" \
-        SMOOTHGUI_FRONTEND_REQUIRED="$SMOOTHGUI_FRONTEND_REQUIRED" \
-        SMOOTHGUI_FRONTEND_PORT="$SMOOTHGUI_FRONTEND_PORT" \
-        SMOOTHGUI_FRONTEND_BIND="$SMOOTHGUI_FRONTEND_BIND" \
-        SMOOTHGUI_BROWSER_USER='smoothinstaller' \
-        SMOOTHGUI_BROWSER_UID="${SMOOTHGUI_BROWSER_UID:-1000}" \
-        SMOOTHGUI_BROWSER_GID="${SMOOTHGUI_BROWSER_GID:-1000}" \
-        SMOOTHGUI_REQUIRE_VISIBLE_DISPLAY="${SMOOTHGUI_REQUIRE_VISIBLE_DISPLAY:-1}" \
-        SMOOTHGUI_ALLOW_XVFB="${SMOOTHGUI_ALLOW_XVFB:-0}" \
-        SMOOTHGUI_XORG_STARTUP_TIMEOUT="${SMOOTHGUI_XORG_STARTUP_TIMEOUT:-12}" \
         SMOOTHNAS_PAYLOAD_DIR="$payload_dir" \
+        INSTALLER_LANGUAGES="en:English nl:Nederlands" \
         INSTALLER_KERNEL_PACKAGES="" \
         INSTALLER_GPU_FIRMWARE_PKGS="firmware-amd-graphics" \
         INSTALLER_GPU_KERNEL_MODULES="${INSTALLER_GPU_KERNEL_MODULES:-amdgpu radeon}" \
