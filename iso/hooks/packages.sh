@@ -37,7 +37,10 @@ mkdir -p "$TARGET/opt/smoothnas/repo/pool"
 _download_pkg() {
     local filename="$1"
     echo "  Downloading ${filename}..."
-    curl -fsSL -o "$TARGET/opt/smoothnas/repo/pool/${filename}" \
+    # curl runs inside the chroot because the d-i installer environment does
+    # not include it; smoothiso installs curl into $TARGET before sourcing
+    # this hook, and busybox wget's axTLS fails GitHub's CDN TLS handshake.
+    chroot "$TARGET" curl -fsSL -o "/opt/smoothnas/repo/pool/${filename}" \
         "${SMOOTHKERNEL_RELEASE_BASE_URL}/${filename}" || \
         die "Failed to download ${filename}"
 }
