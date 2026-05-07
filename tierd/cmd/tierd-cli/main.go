@@ -133,9 +133,10 @@ func openPluginInstaller() (*plugin.Installer, *db.Store, error) {
 
 // openPluginLifecycle opens the tierd database and a runtime client
 // pointed at smoothnas-runtime, and returns a Lifecycle that
-// composes them. SMOOTHNAS_RUNTIME_SOCKET overrides the socket path
-// (default runtime.DefaultSocketPath); TIERD_DB overrides the DB
-// path same as openPluginInstaller. Caller defers store.Close().
+// composes them with a production nginx Proxy attached.
+// SMOOTHNAS_RUNTIME_SOCKET overrides the socket path (default
+// runtime.DefaultSocketPath); TIERD_DB overrides the DB path same
+// as openPluginInstaller. Caller defers store.Close().
 func openPluginLifecycle() (*plugin.Lifecycle, *db.Store, error) {
 	dbPath := os.Getenv("TIERD_DB")
 	if dbPath == "" {
@@ -154,7 +155,9 @@ func openPluginLifecycle() (*plugin.Lifecycle, *db.Store, error) {
 		return nil, nil, fmt.Errorf("migrate: %w", err)
 	}
 	rt := runtime.NewClient(sock)
-	return plugin.NewLifecycle(plugin.NewStore(store), rt), store, nil
+	lc := plugin.NewLifecycle(plugin.NewStore(store), rt)
+	lc.SetProxy(plugin.NewProxy())
+	return lc, store, nil
 }
 
 // volumeTierFlags is a flag.Value implementation that captures
@@ -273,8 +276,10 @@ func openPluginInstallerWithRuntime() (*plugin.Installer, *db.Store, error) {
 	}
 	pluginStore := plugin.NewStore(store)
 	rt := runtime.NewClient(sock)
+	lc := plugin.NewLifecycle(pluginStore, rt)
+	lc.SetProxy(plugin.NewProxy())
 	inst := plugin.NewInstaller(pluginStore)
-	inst.SetDemolisher(plugin.NewLifecycle(pluginStore, rt))
+	inst.SetDemolisher(lc)
 	return inst, store, nil
 }
 

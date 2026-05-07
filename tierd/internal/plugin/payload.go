@@ -119,12 +119,11 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 		User:       in.Manifest.Container.User,
 		Labels:     labels,
 		HostConfig: runtime.HostConfig{
-			Binds: binds,
+			Binds:       binds,
+			NetworkMode: runtime.PluginBridgeName,
 			RestartPolicy: runtime.RestartPolicy{
 				Name: dockerRestartPolicyName(in.Manifest.EffectiveRestartPolicy()),
 			},
-			// NetworkMode left empty: phase 04 sets it to
-			// "smoothnas-plugins". Phase 02 uses the daemon default.
 			// Devices left empty: phase 05 (profiles) populates them.
 		},
 	}, nil

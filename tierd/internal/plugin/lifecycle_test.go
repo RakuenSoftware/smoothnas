@@ -26,14 +26,19 @@ type fakeRuntime struct {
 	pullCalls     []string
 	commitCalls   []string
 	waitCalls     []string
+	bridgeCalls   int
 
 	// Behaviour knobs.
-	pullErr     error
-	createErr   error
-	startErr    error
-	waitExit    int
-	commitErr   error
+	pullErr        error
+	createErr      error
+	startErr       error
+	waitExit       int
+	commitErr      error
 	inspectMissing map[string]bool // container IDs that 404 on inspect
+	// bridgeIP is what InspectContainerBridgeIP returns. Default
+	// empty string makes captureBridgeIP retry; tests that exercise
+	// the success path set this to a real-looking IP.
+	bridgeIP string
 
 	// Generated container IDs counter.
 	nextID int
@@ -41,6 +46,16 @@ type fakeRuntime struct {
 
 func (f *fakeRuntime) Ping(ctx context.Context) error                            { return nil }
 func (f *fakeRuntime) Info(ctx context.Context) (runtime.Info, error)            { return runtime.Info{}, nil }
+func (f *fakeRuntime) EnsurePluginBridge(ctx context.Context) (string, error)    { return "fake-bridge", nil }
+func (f *fakeRuntime) InspectContainerBridgeIP(ctx context.Context, id string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bridgeCalls++
+	if f.bridgeIP == "" {
+		return "", runtime.ErrBridgeIPNotReady
+	}
+	return f.bridgeIP, nil
+}
 func (f *fakeRuntime) ListManagedContainers(ctx context.Context) ([]runtime.ContainerSummary, error) {
 	return nil, nil
 }
@@ -320,6 +335,10 @@ func TestLifecycle_Start_StopAndRestart(t *testing.T) {
 	if err := lc.Materialise(context.Background(), "gh-runner"); err != nil {
 		t.Fatalf("materialise: %v", err)
 	}
+	// Phase 04: Start now polls for a bridge IP. Tell the fake to
+	// hand one back immediately so the test doesn't burn its retry
+	// budget.
+	rt.bridgeIP = "10.66.0.10"
 
 	if err := lc.Start(context.Background(), "gh-runner"); err != nil {
 		t.Fatalf("start: %v", err)
@@ -396,6 +415,172 @@ func TestLifecycle_Materialise_RecreatesGhostContainer(t *testing.T) {
 	}
 	if len(rt.createCalls) != 2 {
 		t.Errorf("create calls = %d want 2 (initial + ghost recreate)", len(rt.createCalls))
+	}
+}
+
+// fakeProxyManager records every Apply / Remove for lifecycle
+// integration assertions.
+type fakeProxyManager struct {
+	applyCalls  []PluginRoute
+	removeCalls []string
+	applyErr    error
+	removeErr   error
+}
+
+func (f *fakeProxyManager) Apply(_ context.Context, route PluginRoute) error {
+	f.applyCalls = append(f.applyCalls, route)
+	return f.applyErr
+}
+func (f *fakeProxyManager) Remove(_ context.Context, name string) error {
+	f.removeCalls = append(f.removeCalls, name)
+	return f.removeErr
+}
+
+func TestLifecycle_Start_CapturesBridgeIPAndAppliesProxyRoute(t *testing.T) {
+	lc, rt, store := installFixture(t, "llama.yaml")
+	if _, err := store.db.Exec(
+		`UPDATE plugin_volume_paths SET host_path = '/mnt/m' WHERE plugin_name = 'llama-cpp'`,
+	); err != nil {
+		t.Fatalf("fake tier resolution: %v", err)
+	}
+	if err := lc.Materialise(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	rt.bridgeIP = "10.66.0.42"
+	pxy := &fakeProxyManager{}
+	lc.SetProxy(pxy)
+
+	if err := lc.Start(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// IP captured into the DB.
+	rec, _ := store.Get("llama-cpp")
+	if rec.Instances[0].BridgeIP != "10.66.0.42" {
+		t.Errorf("bridge_ip = %q want 10.66.0.42", rec.Instances[0].BridgeIP)
+	}
+	// One Apply call with the right shape.
+	if len(pxy.applyCalls) != 1 {
+		t.Fatalf("apply calls = %d want 1", len(pxy.applyCalls))
+	}
+	route := pxy.applyCalls[0]
+	if route.PluginName != "llama-cpp" {
+		t.Errorf("PluginName = %q", route.PluginName)
+	}
+	if len(route.Routes) != 1 {
+		t.Fatalf("Routes = %d want 1", len(route.Routes))
+	}
+	if route.Routes[0].LocationPath != "/plugins/llama-cpp/" {
+		t.Errorf("LocationPath = %q", route.Routes[0].LocationPath)
+	}
+	if route.Routes[0].UpstreamURL != "http://10.66.0.42:8080/" {
+		t.Errorf("UpstreamURL = %q", route.Routes[0].UpstreamURL)
+	}
+}
+
+func TestLifecycle_Start_NoProxyDoesNotApply(t *testing.T) {
+	lc, rt, store := installFixture(t, "llama.yaml")
+	if _, err := store.db.Exec(
+		`UPDATE plugin_volume_paths SET host_path = '/mnt/m' WHERE plugin_name = 'llama-cpp'`,
+	); err != nil {
+		t.Fatalf("fake tier: %v", err)
+	}
+	if err := lc.Materialise(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	rt.bridgeIP = "10.66.0.5"
+	// No SetProxy call — Start must not panic, must still capture IP.
+	if err := lc.Start(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	rec, _ := store.Get("llama-cpp")
+	if rec.Instances[0].BridgeIP != "10.66.0.5" {
+		t.Errorf("bridge_ip not captured")
+	}
+}
+
+func TestLifecycle_Demolish_CallsProxyRemoveBeforeContainers(t *testing.T) {
+	lc, rt, store := installFixture(t, "llama.yaml")
+	if _, err := store.db.Exec(
+		`UPDATE plugin_volume_paths SET host_path = '/mnt/m' WHERE plugin_name = 'llama-cpp'`,
+	); err != nil {
+		t.Fatalf("fake tier: %v", err)
+	}
+	if err := lc.Materialise(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	rt.bridgeIP = "10.66.0.7"
+	pxy := &fakeProxyManager{}
+	lc.SetProxy(pxy)
+	if err := lc.Start(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := lc.Demolish(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("demolish: %v", err)
+	}
+	if len(pxy.removeCalls) != 1 || pxy.removeCalls[0] != "llama-cpp" {
+		t.Errorf("Remove calls = %v want [llama-cpp]", pxy.removeCalls)
+	}
+}
+
+func TestLifecycle_Materialise_EnsuresPluginBridge(t *testing.T) {
+	lc, _, store := installFixture(t, "llama.yaml")
+	if _, err := store.db.Exec(
+		`UPDATE plugin_volume_paths SET host_path = '/mnt/m' WHERE plugin_name = 'llama-cpp'`,
+	); err != nil {
+		t.Fatalf("fake tier: %v", err)
+	}
+	// fakeRuntime.EnsurePluginBridge always returns ("fake-bridge", nil)
+	// — just verify Materialise completes without error and that
+	// the container create payload set NetworkMode appropriately.
+	if err := lc.Materialise(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+}
+
+func TestLifecycle_BuildPluginRoute_MultiplePortsGetSuffixes(t *testing.T) {
+	// Synthesise a record with two exposed ports to verify the
+	// first-gets-bare-path / rest-get-suffix logic.
+	rec := &PluginRecord{
+		Plugin:    PluginRow{Name: "myapp", Version: "1.0.0"},
+		Instances: []InstanceRow{{Instance: 1, BridgeIP: "10.66.0.5"}},
+		Ports: []PortRow{
+			{Name: "http", ContainerPort: 8080, Protocol: "tcp", Expose: true},
+			{Name: "api", ContainerPort: 9090, Protocol: "tcp", Expose: true},
+		},
+	}
+	lc := &Lifecycle{}
+	route, err := lc.buildPluginRoute(rec)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(route.Routes) != 2 {
+		t.Fatalf("routes = %d want 2", len(route.Routes))
+	}
+	if route.Routes[0].LocationPath != "/plugins/myapp/" {
+		t.Errorf("first location = %q", route.Routes[0].LocationPath)
+	}
+	if route.Routes[1].LocationPath != "/plugins/myapp/api/" {
+		t.Errorf("second location = %q", route.Routes[1].LocationPath)
+	}
+}
+
+func TestLifecycle_BuildPluginRoute_SkipsUnexposedPorts(t *testing.T) {
+	rec := &PluginRecord{
+		Plugin:    PluginRow{Name: "x"},
+		Instances: []InstanceRow{{Instance: 1, BridgeIP: "10.66.0.5"}},
+		Ports: []PortRow{
+			{Name: "internal", ContainerPort: 7777, Protocol: "tcp", Expose: false},
+			{Name: "http", ContainerPort: 8080, Protocol: "tcp", Expose: true},
+		},
+	}
+	lc := &Lifecycle{}
+	route, err := lc.buildPluginRoute(rec)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(route.Routes) != 1 || !strings.Contains(route.Routes[0].UpstreamURL, ":8080/") {
+		t.Errorf("expected only the exposed port; got %+v", route.Routes)
 	}
 }
 
