@@ -35,6 +35,7 @@ import Terminal from './pages/Terminal/Terminal';
 import Benchmarks from './pages/Benchmarks/Benchmarks';
 import Updates from './pages/Updates/Updates';
 import Backups from './pages/Backups/Backups';
+import Plugins from './pages/Plugins/Plugins';
 
 function ProtectedLayout() {
   const { loggedIn } = useAuth();
@@ -149,6 +150,7 @@ export default function App() {
               <Route path="/users" element={<Users />} />
               <Route path="/terminal" element={<Terminal />} />
               <Route path="/updates" element={<Updates />} />
+              <Route path="/plugins" element={<Plugins />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="*" element={<Navigate to="/dashboard" replace />} />
             </Route>

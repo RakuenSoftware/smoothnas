@@ -317,4 +317,25 @@ export const api = {
   listTieringNamespaceSnapshots: (id: string) => apiFetch<any[]>('GET', `/tiering/namespaces/${id}/snapshots`),
   getTieringNamespaceSnapshot: (id: string, snapID: string) => apiFetch<any>('GET', `/tiering/namespaces/${id}/snapshots/${snapID}`),
   deleteTieringNamespaceSnapshot: (id: string, snapID: string) => apiFetch<void>('DELETE', `/tiering/namespaces/${id}/snapshots/${snapID}`),
+
+  // --- Plugins (phase 06a backend; 6b/c/d add the UI that consumes these) ---
+  listPlugins: () => apiFetch<{ plugins: any[] }>('GET', '/plugins'),
+  getPlugin: (name: string) => apiFetch<any>('GET', `/plugins/${name}`),
+  preflightPlugin: (req: { manifest: string; tierAssignments?: { default?: string; perVolume?: Record<string, string> } }) =>
+    apiFetch<any>('POST', '/plugins/preflight', req),
+  installPlugin: (req: { manifest: string; tierAssignments?: { default?: string; perVolume?: Record<string, string> } }) =>
+    apiFetch<any>('POST', '/plugins/install', req),
+  uninstallPlugin: (name: string) => apiFetch<void>('DELETE', `/plugins/${name}`),
+  materialisePlugin: (name: string) => apiFetch<any>('POST', `/plugins/${name}/materialise`, {}),
+  startPlugin: (name: string) => apiFetch<any>('POST', `/plugins/${name}/start`, {}),
+  stopPlugin: (name: string) => apiFetch<any>('POST', `/plugins/${name}/stop`, {}),
+  restartPlugin: (name: string) => apiFetch<any>('POST', `/plugins/${name}/restart`, {}),
+  updatePluginConfig: (name: string, config: Record<string, string>) =>
+    apiFetch<any>('PUT', `/plugins/${name}/config`, { config }),
+
+  // --- Plugin profiles (phase 05) ---
+  listPluginProfiles: () => apiFetch<{ profiles: any[] }>('GET', '/plugin-profiles'),
+  getPluginProfile: (name: string) => apiFetch<any>('GET', `/plugin-profiles/${name}`),
+  previewPluginProfile: (req: { manifest: string }) =>
+    apiFetch<any>('POST', '/plugin-profiles/preview', req),
 };

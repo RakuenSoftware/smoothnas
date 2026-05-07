@@ -133,6 +133,109 @@
 }
 
 
+// --- Plugin cards (phase 06b) ---
+.plugin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.plugin-card {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  .plugin-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+
+    h3 {
+      margin: 0 0 4px 0;
+      font-size: 16px;
+    }
+
+    .plugin-card-meta {
+      font-size: 12px;
+      color: #777;
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+  }
+
+  .plugin-card-fields {
+    margin: 0;
+    display: grid;
+    grid-template-columns: 90px 1fr;
+    gap: 4px 12px;
+    font-size: 13px;
+
+    dt {
+      color: #888;
+      font-weight: 500;
+    }
+    dd {
+      margin: 0;
+      color: #333;
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+    .truncate {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .muted {
+      color: #999;
+    }
+  }
+
+  .plugin-card-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    border-top: 1px solid #f0f0f0;
+    padding-top: 12px;
+  }
+}
+
+.chip-row {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: #eef3f8;
+  color: #2c3e50;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 48px 24px;
+  color: #888;
+  background: #fafafa;
+  border: 1px dashed #ddd;
+  border-radius: 6px;
+  margin-top: 24px;
+
+  h2 { margin: 0 0 8px 0; font-size: 16px; color: #555; }
+  p  { margin: 0; max-width: 480px; margin-left: auto; margin-right: auto; }
+}
+
 .tier-level-row {
   display: grid;
   grid-template-columns: 90px 1fr 1fr 1fr 60px 60px;
