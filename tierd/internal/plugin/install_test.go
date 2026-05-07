@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -160,6 +161,69 @@ func TestInstaller_Uninstall_MissingReturnsErrPluginNotFound(t *testing.T) {
 	inst, _ := newTestInstaller(t)
 	if err := inst.Uninstall("nope"); !errors.Is(err, ErrPluginNotFound) {
 		t.Errorf("err = %v, want ErrPluginNotFound", err)
+	}
+}
+
+// fakeDemolisher records its calls and optionally fails on demand.
+// Used to verify Installer.Uninstall calls the runtime teardown path
+// when one is attached.
+type fakeDemolisher struct {
+	calls []string
+	err   error
+}
+
+func (f *fakeDemolisher) Demolish(_ context.Context, name string) error {
+	f.calls = append(f.calls, name)
+	return f.err
+}
+
+func TestInstaller_Uninstall_CallsDemolisherBeforeDBDelete(t *testing.T) {
+	inst, _ := newTestInstaller(t)
+	if _, err := inst.Install(readFixture(t, "ubuntu-python.yaml")); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	d := &fakeDemolisher{}
+	inst.SetDemolisher(d)
+	if err := inst.Uninstall("ubuntu-python"); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if len(d.calls) != 1 || d.calls[0] != "ubuntu-python" {
+		t.Errorf("Demolish calls = %v want [ubuntu-python]", d.calls)
+	}
+	if _, err := inst.store.Get("ubuntu-python"); !errors.Is(err, ErrPluginNotFound) {
+		t.Errorf("plugin should be deleted: %v", err)
+	}
+}
+
+func TestInstaller_Uninstall_DemolisherErrorPreventsDBDelete(t *testing.T) {
+	inst, _ := newTestInstaller(t)
+	if _, err := inst.Install(readFixture(t, "ubuntu-python.yaml")); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	d := &fakeDemolisher{err: errors.New("daemon unreachable")}
+	inst.SetDemolisher(d)
+	if err := inst.Uninstall("ubuntu-python"); err == nil {
+		t.Fatal("expected error")
+	}
+	// DB row must still exist — operator can retry after daemon is back.
+	if _, err := inst.store.Get("ubuntu-python"); err != nil {
+		t.Errorf("plugin row should survive demolisher failure: %v", err)
+	}
+}
+
+func TestInstaller_Uninstall_NoDemolisherIsPhaseOneBehaviour(t *testing.T) {
+	// Re-asserts the original behaviour now that the code path is
+	// gated on the optional Demolisher field.
+	inst, _ := newTestInstaller(t)
+	if _, err := inst.Install(readFixture(t, "ubuntu-python.yaml")); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	// No SetDemolisher call.
+	if err := inst.Uninstall("ubuntu-python"); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if _, err := inst.store.Get("ubuntu-python"); !errors.Is(err, ErrPluginNotFound) {
+		t.Errorf("plugin should be deleted: %v", err)
 	}
 }
 

@@ -374,6 +374,66 @@ func (s *Store) Delete(name string) error {
 	return nil
 }
 
+// SetInstanceContainerID records the runtime daemon's container ID
+// for one instance. Phase 02's Lifecycle.Materialise calls this
+// after each successful POST /containers/create.
+func (s *Store) SetInstanceContainerID(name string, instance int, id string) error {
+	res, err := s.db.Exec(
+		`UPDATE plugin_instances
+		 SET container_id = ?, last_change = datetime('now')
+		 WHERE plugin_name = ? AND instance = ?`,
+		sqlNullable(id), name, instance,
+	)
+	if err != nil {
+		return fmt.Errorf("update plugin_instances.container_id: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrPluginNotFound
+	}
+	return nil
+}
+
+// SetImageRef updates the resolved image ref on the plugins row.
+// Lifecycle calls this after a successful pull so subsequent
+// operations don't have to re-resolve.
+func (s *Store) SetImageRef(name, ref string) error {
+	res, err := s.db.Exec(
+		`UPDATE plugins
+		 SET image_ref = ?, updated_at = datetime('now')
+		 WHERE name = ?`,
+		sqlNullable(ref), name,
+	)
+	if err != nil {
+		return fmt.Errorf("update plugins.image_ref: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrPluginNotFound
+	}
+	return nil
+}
+
+// SetInstanceBridgeIP records the per-instance bridge IP. Phase 04
+// will use this when generating the nginx route. Phase 02 wires the
+// setter so the call site exists; phase 04 reads it.
+func (s *Store) SetInstanceBridgeIP(name string, instance int, ip string) error {
+	res, err := s.db.Exec(
+		`UPDATE plugin_instances
+		 SET bridge_ip = ?, last_change = datetime('now')
+		 WHERE plugin_name = ? AND instance = ?`,
+		sqlNullable(ip), name, instance,
+	)
+	if err != nil {
+		return fmt.Errorf("update plugin_instances.bridge_ip: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrPluginNotFound
+	}
+	return nil
+}
+
 // SetInstanceState updates one instance's state and recomputes the
 // aggregate plugins.state column atomically. Returns ErrPluginNotFound
 // if the (plugin, instance) row doesn't exist.
