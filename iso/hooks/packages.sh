@@ -53,20 +53,18 @@ for _zfs_pkg in $SMOOTHKERNEL_ZFS_FILENAMES; do
 done
 
 echo "  Generating apt Packages index..."
-# Run inside the chroot so dpkg-deb has full compression support, then
-# extract control via raw ar+tar so we don't depend on dpkg-deb's
-# command-line surface (busybox dpkg-deb prints empty output for `-f`,
-# and writes -e to <dir>/DEBIAN, both of which silently broke earlier
-# attempts). Every Debian .deb is an ar archive of debian-binary,
-# control.tar.<comp>, data.tar.<comp> — extracting control.tar with
-# busybox tar (gzip/xz/zstd all built in) is rock-solid.
+# A .deb is an ar archive of debian-binary, control.tar.<comp>,
+# data.tar.<comp>. Extract control.tar directly via ar+tar to sidestep
+# the chroot's busybox dpkg-deb (which doesn't accept long flags, prints
+# empty for short -f, and writes -e to <dir>/DEBIAN). busybox tar does
+# NOT auto-detect compression, so pipe through the matching decompressor
+# (zstdcat / xzcat / gunzip — all busybox applets in trixie).
 chroot "$TARGET" sh -eu -c '
     cd /opt/smoothnas/repo
     : > Packages
     for _deb in pool/*.deb; do
         _tmp=$(mktemp -d)
         ( cd "$_tmp" && ar x "/opt/smoothnas/repo/$_deb" )
-        # control.tar.* (.gz / .xz / .zst); take the first match
         _ctrl_archive=""
         for _f in "$_tmp"/control.tar*; do
             [ -e "$_f" ] && _ctrl_archive="$_f" && break
@@ -75,10 +73,24 @@ chroot "$TARGET" sh -eu -c '
             echo "ERROR: no control.tar in $_deb" >&2
             exit 1
         fi
-        ( cd "$_tmp" && tar -xf "$_ctrl_archive" ./control 2>/dev/null \
-            || tar -xf "$_ctrl_archive" control )
+        case "$_ctrl_archive" in
+            *.zst) zstdcat "$_ctrl_archive"   | tar -xf - -C "$_tmp" ;;
+            *.xz)  xzcat   "$_ctrl_archive"   | tar -xf - -C "$_tmp" ;;
+            *.gz)  gunzip -c "$_ctrl_archive" | tar -xf - -C "$_tmp" ;;
+            *)     tar -xf "$_ctrl_archive" -C "$_tmp" ;;
+        esac
+        # Some debs use ./control, some control; accept either.
+        if [ -f "$_tmp/control" ]; then
+            _control="$_tmp/control"
+        elif [ -f "$_tmp/./control" ]; then
+            _control="$_tmp/./control"
+        else
+            echo "ERROR: control file not found after extracting $_deb" >&2
+            ls -la "$_tmp" >&2
+            exit 1
+        fi
         {
-            cat "$_tmp/control"
+            cat "$_control"
             printf "Filename: %s\nSize: %s\nSHA256: %s\n\n" \
                 "$_deb" \
                 "$(wc -c < "$_deb")" \
