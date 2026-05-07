@@ -142,6 +142,7 @@ export default function Plugins() {
               busy={busyName === p.name}
               onLifecycle={(verb) => lifecycle(p.name, verb)}
               onUninstall={() => setConfirmUninstall(p.name)}
+              onConfigure={() => navigate(`/plugins/manage/${p.name}`)}
             />
           ))}
         </div>
@@ -169,11 +170,13 @@ function PluginCard({
   busy,
   onLifecycle,
   onUninstall,
+  onConfigure,
 }: {
   plugin: PluginRow;
   busy: boolean;
   onLifecycle: (verb: 'start' | 'stop' | 'restart' | 'materialise') => void;
   onUninstall: () => void;
+  onConfigure: () => void;
 }) {
   const { t } = useI18n();
   const isRunning = plugin.state === 'running';
@@ -266,6 +269,12 @@ function PluginCard({
             {t('plugins.action.restart')}
           </button>
         )}
+        <button
+          className="btn"
+          onClick={onConfigure}
+        >
+          {t('plugins.action.configure')}
+        </button>
         <button
           className="btn"
           disabled

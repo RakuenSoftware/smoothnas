@@ -388,6 +388,197 @@
   font-size: 13px;
 }
 
+// --- Plugin detail page (phase 06d) ---
+.plugin-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+
+  h1 {
+    margin: 0 0 4px 0;
+    font-size: 22px;
+  }
+  .plugin-detail-meta {
+    color: #777;
+    font-size: 13px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+}
+
+.plugin-detail-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid #e0e0e0;
+  margin-bottom: 16px;
+
+  button {
+    padding: 10px 16px;
+    border: none;
+    background: transparent;
+    color: #777;
+    font-size: 13px;
+    cursor: pointer;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -1px;
+
+    &:hover { color: #333; }
+    &.active {
+      color: #1565c0;
+      border-bottom-color: #1565c0;
+      font-weight: 600;
+    }
+    &.danger.active {
+      color: #c62828;
+      border-bottom-color: #c62828;
+    }
+  }
+}
+
+.plugin-detail-pane {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 24px;
+
+  h2 {
+    margin: 0 0 8px 0;
+    font-size: 18px;
+  }
+  > p.subtitle {
+    color: #777;
+    margin: 0 0 16px 0;
+    font-size: 13px;
+  }
+}
+
+.plugin-kv-list {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 8px 16px;
+  font-size: 13px;
+  margin: 0;
+
+  dt {
+    color: #888;
+    padding-top: 2px;
+  }
+  dd {
+    margin: 0;
+    color: #333;
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+  }
+}
+
+.plugin-detail-section {
+  margin-top: 24px;
+
+  h3 {
+    margin: 0 0 8px 0;
+    font-size: 14px;
+    color: #555;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    th, td {
+      text-align: left;
+      padding: 6px 8px;
+      border-bottom: 1px solid #f3f3f3;
+    }
+    th { color: #888; font-weight: 500; }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+  }
+}
+
+.plugin-log-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+
+  .stream-state {
+    margin-right: auto;
+    font-size: 12px;
+    color: #888;
+
+    &.connected   { color: #2e7d32; }
+    &.disconnected { color: #c62828; }
+  }
+}
+
+.plugin-log-view {
+  background: #1e1e1e;
+  color: #e0e0e0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  border-radius: 4px;
+  padding: 12px;
+  height: 480px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.plugin-config-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  .config-field {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 8px 16px;
+    align-items: center;
+
+    label { font-weight: 600; font-size: 13px; }
+    input {
+      width: 100%;
+      padding: 6px 8px;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      font-size: 13px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .help {
+      grid-column: 2;
+      font-size: 12px;
+      color: #888;
+    }
+  }
+  .config-actions {
+    display: flex;
+    gap: 8px;
+    border-top: 1px solid #f0f0f0;
+    padding-top: 12px;
+    margin-top: 8px;
+  }
+}
+
+.danger-card {
+  border: 1px solid #ffcdd2;
+  background: #fff5f5;
+  border-radius: 4px;
+  padding: 16px;
+  margin-bottom: 12px;
+
+  h3 { margin: 0 0 8px 0; color: #c62828; font-size: 14px; }
+  p  { margin: 0 0 12px 0; font-size: 13px; color: #555; }
+}
+
 .empty-state {
   text-align: center;
   padding: 48px 24px;
