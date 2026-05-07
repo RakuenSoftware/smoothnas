@@ -168,10 +168,10 @@ install_firstboot_service_packages() {
     systemctl disable --now smbd nmbd winbind samba-ad-dc 2>/dev/null || true
 }
 
-# Persist the language the operator picked during install. The kiosk wrote
-# it to /etc/smoothnas/installer-lang inside the target filesystem; surface
-# it at /etc/smoothnas/locale so the web UI's unauthenticated /api/locale
-# endpoint can read it before login.
+# Promote the installer language selection to the runtime locale file.
+# configure.sh writes /etc/smoothnas/installer-lang during installation;
+# surface it at /etc/smoothnas/locale so the web UI's unauthenticated
+# /api/locale endpoint can read it before login.
 INSTALL_LANG=""
 if [ -r /etc/smoothnas/installer-lang ]; then
     INSTALL_LANG=$(head -n 1 /etc/smoothnas/installer-lang | tr -d '[:space:]')
