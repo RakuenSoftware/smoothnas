@@ -227,6 +227,177 @@ func TestInstaller_Uninstall_NoDemolisherIsPhaseOneBehaviour(t *testing.T) {
 	}
 }
 
+func TestInstaller_InstallWithOptions_TierBoundResolves(t *testing.T) {
+	inst, _ := newTestInstaller(t)
+	tierMount := filepath.Join(t.TempDir(), "media")
+	if err := os.MkdirAll(tierMount, 0o755); err != nil {
+		t.Fatalf("mkdir tier mount: %v", err)
+	}
+	tp := newFakeTP()
+	tp.put("media", tierMount, "healthy", "NVME", "SSD", "HDD")
+	inst.SetTierProvider(tp, fakeStatfs{}.avail)
+
+	rec, err := inst.InstallWithOptions(readFixture(t, "llama.yaml"), InstallOptions{
+		Tiers: TierAssignments{Default: "media"},
+	})
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if len(rec.Volumes) != 1 {
+		t.Fatalf("volumes = %d", len(rec.Volumes))
+	}
+	v := rec.Volumes[0]
+	if v.TierPool != "media" {
+		t.Errorf("tier_pool = %q want media", v.TierPool)
+	}
+	wantPath := filepath.Join(tierMount, ".plugins", "llama-cpp", "models")
+	if v.Paths[1] != wantPath {
+		t.Errorf("path[1] = %q want %q", v.Paths[1], wantPath)
+	}
+	if st, err := os.Stat(wantPath); err != nil || !st.IsDir() {
+		t.Errorf("expected tier-bound dir to be created: %v", err)
+	}
+}
+
+func TestInstaller_InstallWithOptions_PreflightFailureBlocksInstall(t *testing.T) {
+	inst, _ := newTestInstaller(t)
+	tp := newFakeTP() // no tiers registered
+	inst.SetTierProvider(tp, fakeStatfs{}.avail)
+
+	_, err := inst.InstallWithOptions(readFixture(t, "llama.yaml"), InstallOptions{
+		Tiers: TierAssignments{Default: "ghost"},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var pe *PreflightError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected *PreflightError, got %T: %v", err, err)
+	}
+	// Plugin row must NOT exist — preflight runs before any DB
+	// writes.
+	if _, err := inst.store.Get("llama-cpp"); !errors.Is(err, ErrPluginNotFound) {
+		t.Errorf("plugin row should not exist after preflight failure: %v", err)
+	}
+}
+
+func TestInstaller_InstallWithOptions_FlatVolumeUnchanged(t *testing.T) {
+	// ubuntu-python.yaml has only flat volumes; tier-bound preflight
+	// shouldn't touch the install path.
+	inst, _ := newTestInstaller(t)
+	tp := newFakeTP() // empty — flat volumes shouldn't ask
+	inst.SetTierProvider(tp, fakeStatfs{}.avail)
+
+	rec, err := inst.InstallWithOptions(readFixture(t, "ubuntu-python.yaml"), InstallOptions{})
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if rec.Volumes[0].Mode != VolumeModeFlat {
+		t.Errorf("expected flat volume; got %q", rec.Volumes[0].Mode)
+	}
+}
+
+func TestInstaller_InstallWithOptions_PerVolumeOverride(t *testing.T) {
+	inst, _ := newTestInstaller(t)
+	fastMount := filepath.Join(t.TempDir(), "fast")
+	defaultMount := filepath.Join(t.TempDir(), "default-pool")
+	for _, m := range []string{fastMount, defaultMount} {
+		if err := os.MkdirAll(m, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	tp := newFakeTP()
+	tp.put("fast", fastMount, "healthy", "SSD")
+	tp.put("default-pool", defaultMount, "healthy", "SSD")
+	inst.SetTierProvider(tp, fakeStatfs{}.avail)
+
+	rec, err := inst.InstallWithOptions(readFixture(t, "gh-runner.yaml"), InstallOptions{
+		Tiers: TierAssignments{
+			Default:   "default-pool",
+			PerVolume: map[string]string{"workspace": "fast"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if rec.Volumes[0].TierPool != "fast" {
+		t.Errorf("per-volume override didn't win; tier_pool = %q", rec.Volumes[0].TierPool)
+	}
+	if len(rec.Volumes[0].Paths) != 2 {
+		t.Fatalf("paths = %d want 2", len(rec.Volumes[0].Paths))
+	}
+	want1 := filepath.Join(fastMount, ".plugins", "gh-runner", "instance-1", "workspace")
+	want2 := filepath.Join(fastMount, ".plugins", "gh-runner", "instance-2", "workspace")
+	if rec.Volumes[0].Paths[1] != want1 || rec.Volumes[0].Paths[2] != want2 {
+		t.Errorf("per-instance paths = %+v", rec.Volumes[0].Paths)
+	}
+}
+
+func TestInstaller_Uninstall_RemovesTierBoundDirsAndParent(t *testing.T) {
+	inst, _ := newTestInstaller(t)
+	tierMount := filepath.Join(t.TempDir(), "media")
+	if err := os.MkdirAll(tierMount, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	tp := newFakeTP()
+	tp.put("media", tierMount, "healthy", "NVME")
+	inst.SetTierProvider(tp, fakeStatfs{}.avail)
+
+	if _, err := inst.InstallWithOptions(readFixture(t, "llama.yaml"), InstallOptions{
+		Tiers: TierAssignments{Default: "media"},
+	}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	volumeDir := filepath.Join(tierMount, ".plugins", "llama-cpp", "models")
+	if _, err := os.Stat(volumeDir); err != nil {
+		t.Fatalf("setup: volume dir should exist: %v", err)
+	}
+
+	if err := inst.Uninstall("llama-cpp"); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if _, err := os.Stat(volumeDir); !os.IsNotExist(err) {
+		t.Errorf("volume dir should be gone: %v", err)
+	}
+	pluginParent := filepath.Join(tierMount, ".plugins", "llama-cpp")
+	if _, err := os.Stat(pluginParent); !os.IsNotExist(err) {
+		t.Errorf("plugin parent dir should be gone: %v", err)
+	}
+}
+
+func TestStore_TierConsumers(t *testing.T) {
+	s := openTestStore(t)
+
+	// Install one plugin onto "media" via the resolved-tier path.
+	inst := NewInstaller(s)
+	inst.SetPluginsRoot(t.TempDir())
+	tierMount := filepath.Join(t.TempDir(), "media")
+	if err := os.MkdirAll(tierMount, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	tp := newFakeTP()
+	tp.put("media", tierMount, "healthy", "NVME")
+	inst.SetTierProvider(tp, fakeStatfs{}.avail)
+
+	if _, err := inst.InstallWithOptions(readFixture(t, "llama.yaml"), InstallOptions{
+		Tiers: TierAssignments{Default: "media"},
+	}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	consumers, err := s.TierConsumers("media")
+	if err != nil {
+		t.Fatalf("consumers: %v", err)
+	}
+	if len(consumers) != 1 || consumers[0] != "llama-cpp" {
+		t.Errorf("consumers = %v want [llama-cpp]", consumers)
+	}
+	// Different tier name → no consumers.
+	other, _ := s.TierConsumers("nope")
+	if len(other) != 0 {
+		t.Errorf("nope consumers should be empty, got %v", other)
+	}
+}
+
 // tiny local itoa to avoid importing strconv just for the test.
 func itoa(n int) string {
 	if n == 0 {

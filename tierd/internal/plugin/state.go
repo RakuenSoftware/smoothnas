@@ -113,10 +113,15 @@ type InsertParams struct {
 	Manifest *Manifest
 	// Paths is keyed by (volume name) → (instance number → host path).
 	// Tier-bound volumes whose host path has not yet been resolved
-	// (phase 03 territory) MUST still appear in this map with their
-	// instance entries set to "" (empty string). The plugin_volumes
-	// row's tier_pool gets the sentinel "<unresolved>".
+	// (phase 1 callers without tier assignments) MUST still appear
+	// in this map with their instance entries set to "" (empty
+	// string). The plugin_volumes row's tier_pool gets the sentinel
+	// "<unresolved>" in that case.
 	Paths map[string]map[int]string
+	// Tiers maps volume name → tier pool name for tier-bound volumes
+	// that the caller has already resolved (phase 03+). Volumes not
+	// present in this map fall back to the "<unresolved>" sentinel.
+	Tiers map[string]string
 }
 
 // Insert persists a plugin atomically across all six tables. Returns
@@ -204,10 +209,15 @@ func (s *Store) Insert(p InsertParams) error {
 		var slot sql.NullString
 		if vol.Mode == VolumeModeTierBound {
 			slot = sql.NullString{String: vol.Slot, Valid: vol.Slot != ""}
-			// Phase 03 fills in the real tier pool. Phase 1 leaves
-			// it as a sentinel so callers can tell "not yet resolved"
-			// from "empty by design".
-			tierPool = sql.NullString{String: "<unresolved>", Valid: true}
+			// Phase 03 callers populate p.Tiers with the resolved
+			// tier pool name. Phase 1 callers (no tier assignments)
+			// land here with an empty entry; we record the sentinel
+			// so the row reads "I'm tier-bound but not yet placed".
+			if resolved, ok := p.Tiers[vol.Name]; ok && resolved != "" {
+				tierPool = sql.NullString{String: resolved, Valid: true}
+			} else {
+				tierPool = sql.NullString{String: "<unresolved>", Valid: true}
+			}
 		}
 		if _, err := tx.Exec(
 			`INSERT INTO plugin_volumes
@@ -372,6 +382,38 @@ func (s *Store) Delete(name string) error {
 		return ErrPluginNotFound
 	}
 	return nil
+}
+
+// TierConsumers returns the names of every installed plugin that
+// has at least one volume bound to the given tier pool. The api
+// layer's tier-deletion handler consults this so an operator can't
+// destroy a tier out from under a running plugin.
+//
+// Returns an empty slice (not nil) when no plugins use the tier.
+func (s *Store) TierConsumers(poolName string) ([]string, error) {
+	if poolName == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(
+		`SELECT DISTINCT plugin_name
+		 FROM plugin_volumes
+		 WHERE tier_pool = ?
+		 ORDER BY plugin_name`,
+		poolName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query plugin tier consumers: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
 }
 
 // SetInstanceContainerID records the runtime daemon's container ID
