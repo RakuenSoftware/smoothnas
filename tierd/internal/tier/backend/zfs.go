@@ -42,6 +42,17 @@ func zfsExec(args ...string) error {
 	return nil
 }
 
+// isDatasetExistsErr reports whether `err` was emitted by `zfs create`
+// because the dataset was created by a concurrent caller between our
+// own existence check and our create attempt. The string is part of
+// the OpenZFS userspace ABI and stable across versions.
+func isDatasetExistsErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "dataset already exists")
+}
+
 // datasetExists reports whether the given dataset is present on the
 // host. Distinguishes "missing" (normal, first provision) from other
 // errors (pool missing, permissions) so callers can react sensibly.
@@ -112,17 +123,31 @@ func (zfsBackend) Provision(poolName, tierName, ref, mountPoint string, _ Provis
 	if err != nil {
 		return err
 	}
+	createdNow := false
 	if !exists {
 		// The nested parents (tierd/<pool>) aren't auto-created by zfs;
 		// -p makes `zfs create` build the intermediate datasets too.
 		// mountpoint=legacy lets us control the mount via the kernel
 		// rather than letting ZFS auto-mount at an unpredictable path.
 		if err := zfsExec(createDatasetArgs(ds)...); err != nil {
-			return err
+			// Two Provision callers can race on the same slot — one
+			// from the API assign goroutine, one from the post-provision
+			// reconcile that fires the moment the assign completes. Both
+			// see datasetExists==false at L+0; whichever loses the
+			// `zfs create` foot race gets "dataset already exists",
+			// which is the desired post-state. Fall through to property
+			// reconciliation so we don't leave the pool pinned in error.
+			if !isDatasetExistsErr(err) {
+				return err
+			}
+		} else {
+			createdNow = true
 		}
-	} else {
-		// If the dataset survives a reboot, keep tier-managed
-		// performance and mount properties in the expected state.
+	}
+	if !createdNow {
+		// Dataset pre-existed across a restart, or we lost the create
+		// race above. Either way, reconcile the managed properties so
+		// they don't drift from the desired values.
 		if err := ensureDatasetProperties(ds); err != nil {
 			return err
 		}

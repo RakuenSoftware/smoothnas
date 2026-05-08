@@ -195,7 +195,7 @@ type Config struct {
 	RemotePath  string // subdirectory within the remote path; may be empty
 	Direction   string // "push" or "pull"
 	Method      string // "cp" or "rsync"
-	Parallelism int    // used only when Method=="cp"; rsync always uses a single stream
+	Parallelism int    // worker count for cp; partitioned worker count for rsync (mount path). 1 = single stream.
 	UseSSH      bool   // Method=="rsync" only: true=direct SSH transport, false=mount NFS/SMB and rsync locally
 	Compress    bool   // rsync --compress (zstd on rsync 3.2+; zlib otherwise)
 	DeleteMode  bool   // rsync --delete
@@ -581,6 +581,29 @@ func rsyncMount(ctx context.Context, cfg Config, progress func(msg string, done,
 	// Compression is intentionally ignored on the NFS/SMB mount path:
 	// rsync is copying between local paths, so it cannot compress kernel
 	// RPC traffic and can only add CPU overhead on LAN transfers.
+	parallelism := cfg.Parallelism
+	if parallelism < 1 {
+		parallelism = 1
+	}
+	if cfg.DeleteMode {
+		// --delete is per-rsync-scope: a partitioned worker would try to
+		// delete files that exist outside its bucket because they're not
+		// in its --files-from set. Force single-stream when delete is on.
+		parallelism = 1
+	}
+	if parallelism > 1 {
+		summary, err := runParallelRsyncMount(runCtx, src, dst, parallelism, cfg.TargetType, progress)
+		if err != nil {
+			select {
+			case reason := <-reasonCh:
+				return "", fmt.Errorf("%s: %w", reason, err)
+			default:
+				return "", err
+			}
+		}
+		return summary, nil
+	}
+
 	args := rsyncMountArgs(dst)
 	if cfg.DeleteMode {
 		args = append(args, "--delete")
@@ -599,6 +622,111 @@ func rsyncMount(ctx context.Context, cfg Config, progress func(msg string, done,
 		}
 	}
 	return summary, nil
+}
+
+// runParallelRsyncMount partitions the top-level entries of src across
+// `parallelism` rsync workers and runs them concurrently against the same
+// dst. Each worker is given a --files-from list of entry names, so workers
+// don't overlap. Used when cfg.Parallelism > 1 on the rsync method.
+//
+// Per-file metadata round-trips (lookup/open/setattr/close on NFS) serialise
+// per-stream and cap single-stream throughput well below network bandwidth
+// when the workload is dominated by small files. Splitting into N streams
+// hides that latency behind parallelism and recovers wire-rate throughput.
+//
+// Tradeoffs vs single-stream:
+//   - Aggregate progress is reported as "running N streams" and a stream
+//     count, not a single rate — runRsyncProcess's per-call rate parser
+//     is per-process and there's no clean way to combine N of them
+//     without inventing a coordinator that's larger than the feature.
+//   - --delete is incompatible (handled by the caller before dispatching).
+//   - On error from any worker, the others are cancelled via shared ctx
+//     and the first error is returned.
+func runParallelRsyncMount(ctx context.Context, src, dst string, parallelism int, targetType string, progress func(msg string, done, total int)) (string, error) {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return "", fmt.Errorf("read source dir for parallel rsync: %w", err)
+	}
+	// Filter to names rsync can take as relative paths — entries with a
+	// "/" prefix or "." / ".." would confuse --files-from.
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		n := e.Name()
+		if n == "." || n == ".." || strings.ContainsRune(n, '/') {
+			continue
+		}
+		names = append(names, n)
+	}
+	if len(names) == 0 {
+		return "", nil // nothing to copy
+	}
+	if parallelism > len(names) {
+		parallelism = len(names)
+	}
+
+	parts := make([][]string, parallelism)
+	for i, n := range names {
+		parts[i%parallelism] = append(parts[i%parallelism], n)
+	}
+
+	listDir, err := os.MkdirTemp("", "smoothnas-rsync-parts-*")
+	if err != nil {
+		return "", fmt.Errorf("create rsync parts dir: %w", err)
+	}
+	defer os.RemoveAll(listDir)
+
+	listFiles := make([]string, parallelism)
+	for i, ns := range parts {
+		path := filepath.Join(listDir, fmt.Sprintf("p%d.list", i+1))
+		if err := os.WriteFile(path, []byte(strings.Join(ns, "\n")+"\n"), 0o600); err != nil {
+			return "", fmt.Errorf("write rsync partition list: %w", err)
+		}
+		listFiles[i] = path
+	}
+
+	progress(fmt.Sprintf("Running rsync over %s mount with %d parallel streams...", strings.ToUpper(targetType), parallelism), -1, -1)
+
+	workerCtx, cancelAll := context.WithCancel(ctx)
+	defer cancelAll()
+
+	type result struct {
+		idx int
+		err error
+		out string
+	}
+	results := make(chan result, parallelism)
+
+	for i, listPath := range listFiles {
+		i, listPath := i, listPath
+		go func() {
+			args := append([]string{}, rsyncMountArgs(dst)...)
+			args = append(args, "--files-from="+listPath, src, dst)
+			cmd := exec.CommandContext(workerCtx, "rsync", args...)
+			out, err := cmd.CombinedOutput()
+			results <- result{idx: i, err: err, out: string(out)}
+		}()
+	}
+
+	var firstErr error
+	var summary strings.Builder
+	for done := 0; done < parallelism; done++ {
+		r := <-results
+		if r.err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("parallel rsync stream %d: %w: %s",
+					r.idx+1, r.err, strings.TrimSpace(r.out))
+				cancelAll() // bring the other workers down
+			}
+			continue
+		}
+		summary.WriteString(fmt.Sprintf("[stream %d]\n%s\n",
+			r.idx+1, parsersyncSummary(r.out)))
+	}
+	if firstErr != nil {
+		return "", firstErr
+	}
+	progress("rsync complete", -1, -1)
+	return summary.String(), nil
 }
 
 // runCP mounts the remote NFS or SMB share, copies the tree with sha256

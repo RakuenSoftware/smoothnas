@@ -240,6 +240,12 @@ func (u *Updater) Check() (*UpdateStatus, error) {
 		jbailesSrcRel, _ = fetchLatestArtifactRelease(u.githubBaseURL, privateOwner, privateRepo)
 	}()
 	wg.Wait()
+	if stableErr != nil {
+		log.Printf("updater: stable channel fetch failed: %v", stableErr)
+	}
+	if testingErr != nil {
+		log.Printf("updater: testing channel fetch failed: %v", testingErr)
+	}
 
 	// Grab stale cache for fallback: on any per-channel failure we serve the
 	// previously fetched data rather than surfacing an error.

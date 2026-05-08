@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -458,13 +457,17 @@ func (h *BackupHandler) runBackup(w http.ResponseWriter, r *http.Request, id int
 
 		h.setLiveProgress(runID, "Starting backup...", -1, -1)
 		runCfg := backupConfigFromDB(cfg)
-		if routedPath, routed, err := h.smoothfsBulkIngestPath(cfg); err != nil {
-			log.Printf("backup run %d (config %d): smoothfs bulk route skipped: %v", runID, id, err)
-		} else if routed {
-			log.Printf("backup run %d (config %d): routing SmoothFS ingest %s -> %s", runID, id, cfg.LocalPath, routedPath)
-			h.setLiveProgress(runID, "Writing directly to SmoothFS bulk tier...", -1, -1)
-			runCfg.LocalPath = routedPath
-		}
+		// Backups write through the smoothfs mountpoint and let the
+		// kernel module apply the documented placement policy: new
+		// files land on the fastest tier until that tier reaches
+		// `write_staging_full_pct`, then spill to the next tier (see
+		// smoothfs/docs/smoothfs-support-matrix.md and
+		// smoothfs/src/smoothfs/{file,inode}.c). The previous
+		// "bulk ingest" bypass routed rsync straight to the slowest
+		// tier directory, which made the kernel module redundant for
+		// the very workload it was built for and produced incoming
+		// data with the inverted heat profile (cold tier loaded,
+		// fast tier empty).
 		summary, err := backup.Run(ctx, runCfg, func(msg string, done, total int) {
 			h.setLiveProgress(runID, msg, done, total)
 		})
@@ -665,71 +668,6 @@ func (h *BackupHandler) guardDeleteMode(cfg *db.BackupConfig) error {
 		return fmt.Errorf("refusing rsync --delete for spill-active smoothfs destination %s (pool %s)", dst, pool.Name)
 	}
 	return nil
-}
-
-func (h *BackupHandler) smoothfsBulkIngestPath(cfg *db.BackupConfig) (string, bool, error) {
-	if cfg == nil || cfg.Method != "rsync" || cfg.Direction != "pull" || cfg.DeleteMode {
-		return "", false, nil
-	}
-
-	dst := filepath.Clean(cfg.LocalPath)
-	empty, err := pathAbsentOrEmpty(dst)
-	if err != nil {
-		return "", false, fmt.Errorf("inspect destination %s: %w", dst, err)
-	}
-	if !empty {
-		return "", false, nil
-	}
-
-	pools, err := h.store.ListSmoothfsPools()
-	if err != nil {
-		return "", false, fmt.Errorf("list smoothfs pools: %w", err)
-	}
-	pool := smoothfsPoolForPath(dst, pools)
-	if pool == nil || len(pool.Tiers) < 2 {
-		return "", false, nil
-	}
-
-	fastPath := filepath.Clean(strings.TrimSpace(pool.Tiers[0]))
-	bulkPath := filepath.Clean(strings.TrimSpace(pool.Tiers[len(pool.Tiers)-1]))
-	if fastPath == "." || bulkPath == "." || fastPath == bulkPath {
-		return "", false, nil
-	}
-
-	rel, err := filepath.Rel(filepath.Clean(pool.Mountpoint), dst)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", false, nil
-	}
-	if rel == "." {
-		rel = ""
-	}
-	target := filepath.Join(bulkPath, rel)
-	log.Printf("backup: SmoothFS pool %s bulk ingest: writing rsync pull directly to backing %s instead of mount %s",
-		pool.Name, target, dst)
-	return target, true, nil
-}
-
-func pathAbsentOrEmpty(path string) (bool, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return true, nil
-		}
-		return false, err
-	}
-	defer f.Close()
-
-	_, err = f.ReadDir(1)
-	if err != nil {
-		if err == os.ErrNotExist {
-			return true, nil
-		}
-		if err == io.EOF {
-			return true, nil
-		}
-		return false, err
-	}
-	return false, nil
 }
 
 func smoothfsPoolForPath(path string, pools []db.SmoothfsPool) *db.SmoothfsPool {

@@ -1,12 +1,39 @@
 package backend
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestIsDatasetExistsErr(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"unrelated", errors.New("zfs create -p tank/x: out of space: exit status 1"), false},
+		// Error string produced by zfsExec wrapping a real `zfs create` failure
+		// when the dataset was created by a concurrent caller. Locks the
+		// substring match so we don't drift away from the OpenZFS userspace ABI.
+		{"race-loss", fmt.Errorf("zfs %s: %s: %w",
+			"create -p tank/tierd/media/HDD",
+			"cannot create 'tank/tierd/media/HDD': dataset already exists",
+			errors.New("exit status 1")), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isDatasetExistsErr(c.err); got != c.want {
+				t.Fatalf("isDatasetExistsErr(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
+	}
+}
 
 func TestCreateDatasetArgsIncludesManagedProperties(t *testing.T) {
 	got := createDatasetArgs("tank/tierd/media/HDD")
