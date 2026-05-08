@@ -365,6 +365,97 @@ func TestInstaller_Uninstall_RemovesTierBoundDirsAndParent(t *testing.T) {
 	}
 }
 
+func TestInstaller_BearerInjectedIssuesToken(t *testing.T) {
+	// llama.yaml's manifest declares ui.embed.auth=bearer-injected,
+	// so install should generate a token in plugin_secrets.
+	inst, _ := newTestInstaller(t)
+	tierMount := filepath.Join(t.TempDir(), "media")
+	if err := os.MkdirAll(tierMount, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	tp := newFakeTP()
+	tp.put("media", tierMount, "healthy", "NVME")
+	inst.SetTierProvider(tp, fakeStatfs{}.avail)
+
+	if _, err := inst.InstallWithOptions(readFixture(t, "llama.yaml"), InstallOptions{
+		Tiers: TierAssignments{Default: "media"},
+	}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	tok, err := inst.store.GetBearerToken("llama-cpp")
+	if err != nil {
+		t.Fatalf("get token: %v", err)
+	}
+	if len(tok) != 64 {
+		t.Errorf("token = %q (length %d, want 64 hex chars)", tok, len(tok))
+	}
+}
+
+func TestInstaller_NoEmbedAuthSkipsToken(t *testing.T) {
+	// ubuntu-python has no ui block; no token should be issued.
+	inst, _ := newTestInstaller(t)
+	if _, err := inst.Install(readFixture(t, "ubuntu-python.yaml")); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	tok, err := inst.store.GetBearerToken("ubuntu-python")
+	if err != nil {
+		t.Fatalf("get token: %v", err)
+	}
+	if tok != "" {
+		t.Errorf("expected empty token for plugin without embed auth; got %q", tok)
+	}
+}
+
+func TestStore_IssueBearerTokenIsIdempotentAndRotates(t *testing.T) {
+	s := openTestStore(t)
+	m := mustParse(t, "llama.yaml")
+	if err := s.Insert(InsertParams{
+		Manifest: m,
+		Paths:    pathsForSingleInstance(m, "/tmp"),
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	t1, err := s.IssueBearerToken("llama-cpp")
+	if err != nil {
+		t.Fatalf("issue 1: %v", err)
+	}
+	t2, err := s.IssueBearerToken("llama-cpp")
+	if err != nil {
+		t.Fatalf("issue 2: %v", err)
+	}
+	if t1 == t2 {
+		t.Errorf("rotate should produce a different token; got identical")
+	}
+	got, _ := s.GetBearerToken("llama-cpp")
+	if got != t2 {
+		t.Errorf("Get returned %q, want last-issued %q", got, t2)
+	}
+}
+
+func TestStore_BearerTokenCascadesOnPluginDelete(t *testing.T) {
+	s := openTestStore(t)
+	m := mustParse(t, "llama.yaml")
+	if err := s.Insert(InsertParams{
+		Manifest: m,
+		Paths:    pathsForSingleInstance(m, "/tmp"),
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if _, err := s.IssueBearerToken("llama-cpp"); err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	if err := s.Delete("llama-cpp"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	tok, err := s.GetBearerToken("llama-cpp")
+	if err != nil {
+		t.Fatalf("get post-delete: %v", err)
+	}
+	if tok != "" {
+		t.Errorf("token should cascade-delete; got %q", tok)
+	}
+}
+
 func TestStore_TierConsumers(t *testing.T) {
 	s := openTestStore(t)
 
