@@ -19,7 +19,9 @@ import (
 	smoothfsclient "github.com/RakuenSoftware/smoothfs"
 	"github.com/google/uuid"
 
+	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/iscsi"
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
 )
 
 const exTempFail = 75
@@ -30,6 +32,7 @@ func usage() {
 Usage:
   tierd-cli smoothfs <subcommand> --pool <uuid> [args...]
   tierd-cli iscsi    <subcommand> [args...]
+  tierd-cli plugin   <subcommand> [args...]
 
 Subcommands (smoothfs):
   create-pool  --name <n> --tiers <a:b:c> [--uuid <u>] [--mount-base <path>]
@@ -53,6 +56,21 @@ Subcommands (iscsi):
   destroy       --iqn <iqn> [--file <path>]       Tear down the target; clears PIN_LUN if --file
                                                     names a smoothfs-backed path.
 
+Subcommands (plugin):
+  install   <manifest.yaml>                       Parse and validate the manifest, record the plugin
+                                                    in tierd's database, and create flat-volume
+                                                    directories. Phase 1 — does not create or run
+                                                    any container; that lands in phase 02.
+  list                                            List installed plugins.
+  show      <name>                                Print full per-instance state, volumes, ports,
+                                                    and config for one plugin.
+  uninstall <name>                                Remove flat-volume directories and DB rows for
+                                                    a plugin. Tier-bound volume teardown lands in
+                                                    phase 03; container teardown lands in phase 02.
+  start | stop | restart  <name>                  Stub — prints the phase that will implement it.
+
+Plugin commands honour the TIERD_DB env var (default /var/lib/tierd/tierd.db).
+
 The promote/demote subcommands send a MOVE_PLAN; tierd's worker pool
 runs copy/verify/cutover/cleanup. Use 'inspect' to follow progress.
 `)
@@ -71,11 +89,205 @@ func main() {
 		smoothfsCmd(args[1:])
 	case "iscsi":
 		iscsiCmd(args[1:])
+	case "plugin":
+		pluginCmd(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "tierd-cli: unknown command %q\n", args[0])
 		usage()
 		os.Exit(2)
 	}
+}
+
+// openPluginInstaller opens the tierd database and returns an Installer
+// rooted at the standard plugin directory. The DB path honours
+// TIERD_DB to match `tierd` itself; tests override TIERD_DB to point
+// at a tempdir.
+func openPluginInstaller() (*plugin.Installer, *db.Store, error) {
+	dbPath := os.Getenv("TIERD_DB")
+	if dbPath == "" {
+		dbPath = "/var/lib/tierd/tierd.db"
+	}
+	store, err := db.Open(dbPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open db at %s: %w", dbPath, err)
+	}
+	if err := store.Migrate(); err != nil {
+		store.Close()
+		return nil, nil, fmt.Errorf("migrate: %w", err)
+	}
+	return plugin.NewInstaller(plugin.NewStore(store)), store, nil
+}
+
+func pluginCmd(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "tierd-cli plugin: subcommand required")
+		usage()
+		os.Exit(2)
+	}
+	sub := args[0]
+	rest := args[1:]
+
+	switch sub {
+	case "install":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "tierd-cli plugin install <manifest.yaml>")
+			os.Exit(2)
+		}
+		yamlBytes, err := os.ReadFile(rest[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read manifest: %v\n", err)
+			os.Exit(1)
+		}
+		inst, store, err := openPluginInstaller()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		defer store.Close()
+		rec, err := inst.Install(yamlBytes)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "install: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("installed %s@%s (%s, %d instance%s)\n",
+			rec.Plugin.Name, rec.Plugin.Version, rec.Plugin.ArtifactType,
+			rec.Plugin.InstanceCount, plural(rec.Plugin.InstanceCount))
+
+	case "list":
+		_, store, err := openPluginInstaller()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		defer store.Close()
+		ps := plugin.NewStore(store)
+		rows, err := ps.List()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "list: %v\n", err)
+			os.Exit(1)
+		}
+		if len(rows) == 0 {
+			fmt.Println("no plugins installed")
+			return
+		}
+		fmt.Printf("%-24s %-10s %-12s %-12s %s\n", "NAME", "VERSION", "STATE", "ARTIFACT", "INSTANCES")
+		for _, r := range rows {
+			fmt.Printf("%-24s %-10s %-12s %-12s %d\n",
+				r.Name, r.Version, r.State, r.ArtifactType, r.InstanceCount)
+		}
+
+	case "show":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "tierd-cli plugin show <name>")
+			os.Exit(2)
+		}
+		_, store, err := openPluginInstaller()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		defer store.Close()
+		ps := plugin.NewStore(store)
+		rec, err := ps.Get(rest[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "show: %v\n", err)
+			os.Exit(1)
+		}
+		printPluginRecord(rec)
+
+	case "uninstall":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "tierd-cli plugin uninstall <name>")
+			os.Exit(2)
+		}
+		inst, store, err := openPluginInstaller()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		defer store.Close()
+		if err := inst.Uninstall(rest[0]); err != nil {
+			fmt.Fprintf(os.Stderr, "uninstall: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("uninstalled %s\n", rest[0])
+
+	case "start", "stop", "restart":
+		fmt.Fprintf(os.Stderr, "tierd-cli plugin %s: lifecycle requires phase 02 (LXC2Docker integration); not yet implemented\n", sub)
+		os.Exit(1)
+
+	default:
+		fmt.Fprintf(os.Stderr, "tierd-cli plugin: unknown subcommand %q\n", sub)
+		usage()
+		os.Exit(2)
+	}
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+func printPluginRecord(rec *plugin.PluginRecord) {
+	p := rec.Plugin
+	fmt.Printf("name:           %s\n", p.Name)
+	fmt.Printf("version:        %s\n", p.Version)
+	fmt.Printf("state:          %s\n", p.State)
+	fmt.Printf("artifact:       %s\n", p.ArtifactType)
+	if p.ImageRef != "" {
+		fmt.Printf("image:          %s\n", p.ImageRef)
+	}
+	if p.DistroSummary != "" {
+		fmt.Printf("distro:         %s\n", p.DistroSummary)
+	}
+	fmt.Printf("instances:      %d (configurable=%v)\n", p.InstanceCount, p.InstanceConfigurable)
+	fmt.Printf("installed_at:   %s\n", p.InstalledAt)
+	fmt.Printf("updated_at:     %s\n", p.UpdatedAt)
+
+	if len(rec.Instances) > 0 {
+		fmt.Println()
+		fmt.Println("Instances:")
+		for _, inst := range rec.Instances {
+			fmt.Printf("  %d: state=%s container=%s bridge_ip=%s last_change=%s\n",
+				inst.Instance, inst.State,
+				orDash(inst.ContainerID), orDash(inst.BridgeIP), inst.LastChange)
+		}
+	}
+	if len(rec.Volumes) > 0 {
+		fmt.Println()
+		fmt.Println("Volumes:")
+		for _, v := range rec.Volumes {
+			fmt.Printf("  %s: mode=%s slot=%s tier=%s perInstance=%v bind=%s\n",
+				v.Name, v.Mode, orDash(v.Slot), orDash(v.TierPool), v.PerInstance, v.BindPath)
+			for inst, host := range v.Paths {
+				fmt.Printf("    instance %d → %s\n", inst, orDash(host))
+			}
+		}
+	}
+	if len(rec.Ports) > 0 {
+		fmt.Println()
+		fmt.Println("Ports:")
+		for _, p := range rec.Ports {
+			fmt.Printf("  %s: %d/%s expose=%v hostExpose=%v\n",
+				p.Name, p.ContainerPort, p.Protocol, p.Expose, p.HostExpose)
+		}
+	}
+	if len(rec.Config) > 0 {
+		fmt.Println()
+		fmt.Println("Config:")
+		for _, c := range rec.Config {
+			fmt.Printf("  %s = %s\n", c.Key, c.Value)
+		}
+	}
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func iscsiCmd(args []string) {
