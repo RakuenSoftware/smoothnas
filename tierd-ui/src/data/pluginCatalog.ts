@@ -13,7 +13,7 @@
 // else in the UI.
 //
 // Adding a plugin: drop a new entry below and import the manifest
-// string. Hardware-specific variants (CPU vs CUDA vs ROCm for
+// string. Hardware-specific variants (CPU vs CUDA vs Vulkan for
 // llama.cpp) are separate entries, because picking the right binary
 // for the host's GPU is exactly the choice the wizard is supposed
 // to surface.
@@ -24,7 +24,7 @@ export type CatalogEntry = {
   vendor: string;        // small label below the name
   description: string;   // 1-2 line summary, plain text
   homepage?: string;     // GitHub or vendor link
-  tags?: string[];       // optional hardware/use chips ("AMD ROCm", "NVIDIA CUDA", ...)
+  tags?: string[];       // optional hardware/use chips ("AMD Vulkan", "NVIDIA CUDA", ...)
   manifestYaml: string;  // verbatim smoothnas-plugin.yaml content
 };
 
@@ -161,21 +161,21 @@ config:
     description: Maximum context length in tokens.
 `;
 
-const llamaCppRocmManifest = `apiVersion: smoothnas.io/v1
+const llamaCppVulkanManifest = `apiVersion: smoothnas.io/v1
 kind: Plugin
 
 metadata:
   name: llama-cpp
   version: 0.1.0
   description: |
-    llama.cpp inference server with AMD ROCm acceleration.
+    llama.cpp inference server with AMD Vulkan acceleration.
     Models live on the NVME slot of an operator-chosen tier.
   vendor: smoothnas
   homepage: https://github.com/RakuenSoftware/smoothnas-plugin-llama-cpp
 
 artifact:
   type: oci-image
-  image: ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp:0.1.0-rocm
+  image: ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp:0.1.0-vulkan
 
 container:
   command:
@@ -286,14 +286,14 @@ export const pluginCatalog: CatalogEntry[] = [
     manifestYaml: ghRunnerManifest,
   },
   {
-    id: 'llama-cpp-rocm',
-    name: 'llama.cpp (AMD ROCm)',
+    id: 'llama-cpp-vulkan',
+    name: 'llama.cpp (AMD Vulkan)',
     vendor: 'smoothnas',
     description:
-      'llama.cpp inference server with AMD ROCm acceleration. For hosts with an AMD GPU.',
+      'llama.cpp inference server with AMD Vulkan acceleration. For hosts with an AMD GPU — uses /dev/dri, no ROCm runtime needed.',
     homepage: 'https://github.com/RakuenSoftware/smoothnas-plugin-llama-cpp',
-    tags: ['LLM', 'AMD ROCm'],
-    manifestYaml: llamaCppRocmManifest,
+    tags: ['LLM', 'AMD Vulkan'],
+    manifestYaml: llamaCppVulkanManifest,
   },
   {
     id: 'llama-cpp-cuda',
