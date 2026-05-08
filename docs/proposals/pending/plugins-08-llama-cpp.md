@@ -122,7 +122,7 @@ hardware we publish sibling manifests:
 
 ```
 smoothnas-plugin.yaml          # CUDA (default; gpu-nvidia profile)
-smoothnas-plugin-rocm.yaml     # AMD ROCm (gpu-amd profile, image: ...:server-rocm-...)
+smoothnas-plugin-vulkan.yaml   # AMD Vulkan (gpu-amd profile, image: ...:server-vulkan-...)
 smoothnas-plugin-cpu.yaml      # CPU-only (no GPU profile, image: ...:server-...)
 ```
 
@@ -213,7 +213,7 @@ phase).
 
 The repo's `.github/workflows/release.yml` on tag push:
 
-1. Builds the wrapper image for `cuda`, `rocm`, `cpu` variants.
+1. Builds the wrapper image for `cuda`, `vulkan`, `cpu` variants.
 2. Pushes to `ghcr.io/rakuensoftware/...`.
 3. Resolves digests and writes them into the matching manifest
    files.
