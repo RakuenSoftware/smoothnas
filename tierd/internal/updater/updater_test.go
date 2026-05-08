@@ -17,6 +17,62 @@ import (
 	sgauth "github.com/RakuenSoftware/smoothgui/auth"
 )
 
+func TestTierdAssetNameForArch(t *testing.T) {
+	cases := map[string]string{
+		"amd64": "tierd-amd64",
+		"arm64": "tierd-arm64",
+		"":      "tierd",
+		"riscv": "tierd", // unknown architectures fall back to legacy single-arch name
+	}
+	for arch, want := range cases {
+		if got := tierdAssetNameForArch(arch); got != want {
+			t.Errorf("tierdAssetNameForArch(%q) = %q, want %q", arch, got, want)
+		}
+	}
+}
+
+func TestManifestTierdSHAForArch(t *testing.T) {
+	multi := Manifest{TierdAmd64SHA: "AAA", TierdArm64SHA: "BBB"}
+	if got := multi.TierdSHAForArch("amd64"); got != "AAA" {
+		t.Errorf("multi.amd64 = %q, want AAA", got)
+	}
+	if got := multi.TierdSHAForArch("arm64"); got != "BBB" {
+		t.Errorf("multi.arm64 = %q, want BBB", got)
+	}
+	if got := multi.TierdSHAForArch("riscv"); got != "" {
+		t.Errorf("multi.riscv = %q, want \"\"", got)
+	}
+
+	// Legacy single-arch manifest (`tierd_sha256` only) — both arches
+	// fall through to the legacy hash.
+	legacy := Manifest{TierdSHA: "OLD"}
+	if got := legacy.TierdSHAForArch("amd64"); got != "OLD" {
+		t.Errorf("legacy.amd64 = %q, want OLD", got)
+	}
+	if got := legacy.TierdSHAForArch("arm64"); got != "OLD" {
+		t.Errorf("legacy.arm64 = %q, want OLD", got)
+	}
+
+	// Mixed: arch-specific takes precedence, legacy used only if arch field empty.
+	mixed := Manifest{TierdAmd64SHA: "AAA", TierdSHA: "OLD"}
+	if got := mixed.TierdSHAForArch("amd64"); got != "AAA" {
+		t.Errorf("mixed.amd64 = %q, want AAA", got)
+	}
+	if got := mixed.TierdSHAForArch("arm64"); got != "OLD" {
+		t.Errorf("mixed.arm64 (no arm64 field, has legacy) = %q, want OLD", got)
+	}
+
+	// Real-shape manifest decoded from JSON to lock the wire format.
+	raw := `{"version":"v1","tierd_amd64_sha256":"AAA","tierd_arm64_sha256":"BBB","ui_sha256":"UUU"}`
+	var m Manifest
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if m.TierdAmd64SHA != "AAA" || m.TierdArm64SHA != "BBB" || m.UISHA != "UUU" {
+		t.Fatalf("decoded manifest fields wrong: %+v", m)
+	}
+}
+
 func withChannelFilePath(t *testing.T, path string) {
 	t.Helper()
 	original := channelFilePath
