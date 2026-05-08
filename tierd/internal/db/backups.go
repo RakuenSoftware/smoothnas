@@ -23,7 +23,7 @@ type BackupConfig struct {
 	RemotePath  string `json:"remote_path"` // subdirectory on share/remote path, may be empty
 	Direction   string `json:"direction"`   // "push" or "pull"
 	Method      string `json:"method"`      // "cp" or "rsync"
-	Parallelism int    `json:"parallelism"` // retained for cp method; rsync always uses 1 stream
+	Parallelism int    `json:"parallelism"` // worker count for cp; partitioned worker count for rsync (mount path). 1 = single stream.
 	UseSSH      bool   `json:"use_ssh"`     // rsync transport: true=direct SSH, false=mount NFS/SMB and rsync locally (method=="rsync" only)
 	Compress    bool   `json:"compress"`    // rsync --compress when method=="rsync"
 	DeleteMode  bool   `json:"delete_mode"` // rsync --delete when method=="rsync"

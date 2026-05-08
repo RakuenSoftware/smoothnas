@@ -37,6 +37,22 @@ const placementQuiescentPeriod = 10 * time.Minute
 // don't evaporate, short enough that an old hot file cools within a day.
 const heatDecayEvery = 30
 
+// tierActiveWriteThreshold is the per-tier filesystem-usage delta-rate
+// (bytes/sec, sampled by statfs) above which the planner treats the tier
+// as actively written and skips the cycle. Value is conservative — well
+// above mdadm bitmap / XFS journal background traffic and ZFS metadata
+// activity, well below any meaningful ingest. The dest-side rate of a
+// rsync pull on a 1 GbE link is ≥ 100 MB/s, so this catches both that
+// case and any user-driven heavy IO.
+const tierActiveWriteThreshold = 5 * 1024 * 1024 // 5 MB/s
+
+// tierActivityProbeInterval is how long the planner waits between two
+// statfs samples of each tier mountpoint when checking whether any tier
+// is being actively written. A 2-second window is long enough that an
+// ongoing write stream registers a meaningful delta and short enough
+// that the once-per-2-min planner cycle barely notices the cost.
+const tierActivityProbeInterval = 2 * time.Second
+
 // sizeBucketStep is the multiplicative size ratio that moves a file one
 // tier slower under the pure-size heuristic. Every 16× in size demotes
 // one rank. Used as a starting preference for unpinned admissions — the
@@ -232,6 +248,12 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 	ranked := a.poolRankedTargets(ns.PoolName)
 	if len(ranked) < 2 {
 		balanceStatus.Reason = "target-balance placement skipped; pool has fewer than two tiers"
+		return
+	}
+	if mp, active := a.activeWritesOnAnyTier(ranked); active {
+		log.Printf("placement: pool %s skipped; active writes on tier mount %s above %d MB/s",
+			ns.PoolName, mp, tierActiveWriteThreshold>>20)
+		balanceStatus.Reason = "target-balance placement deferred; active tier writes detected"
 		return
 	}
 	store := a.metaStoreFor(ns.PoolName)
@@ -612,6 +634,64 @@ func (a *Adapter) poolIdleForPlacement(namespaceID string) bool {
 		return false
 	}
 	return true
+}
+
+// activeWritesOnAnyTier samples each tier's mountpoint twice with a small
+// gap and returns the first mountpoint whose used-bytes delta-rate exceeds
+// tierActiveWriteThreshold (in either direction — a tier shrinking fast
+// is also being actively rewritten or evicted from). The intent is to
+// suppress migrations whenever something is moving data on the pool, not
+// only when an explicit tierd-managed backup_run is registered. This
+// catches manual rsync, in-place dataset writes, and any other path that
+// bypasses the backup runner — `ListActiveBackupRuns` only knows about
+// jobs scheduled through the API.
+//
+// Returns ("", false) when every tier is quiet within threshold.
+func (a *Adapter) activeWritesOnAnyTier(targets []rankedPoolTarget) (string, bool) {
+	if len(targets) == 0 {
+		return "", false
+	}
+	type sample struct {
+		used int64
+		ts   time.Time
+	}
+	first := make(map[int]sample, len(targets))
+	for _, rt := range targets {
+		var st syscall.Statfs_t
+		if err := syscall.Statfs(rt.target.MountPath, &st); err != nil {
+			// If statfs fails here the main planner will hit the same
+			// error and report it cleanly; don't double-log.
+			return "", false
+		}
+		first[rt.rank] = sample{
+			used: int64(st.Blocks-st.Bavail) * int64(st.Bsize),
+			ts:   time.Now(),
+		}
+	}
+	time.Sleep(tierActivityProbeInterval)
+	for _, rt := range targets {
+		var st syscall.Statfs_t
+		if err := syscall.Statfs(rt.target.MountPath, &st); err != nil {
+			return "", false
+		}
+		used2 := int64(st.Blocks-st.Bavail) * int64(st.Bsize)
+		f, ok := first[rt.rank]
+		if !ok {
+			continue
+		}
+		dt := time.Since(f.ts).Seconds()
+		if dt < 0.5 {
+			continue
+		}
+		delta := float64(used2 - f.used)
+		if delta < 0 {
+			delta = -delta
+		}
+		if delta/dt > float64(tierActiveWriteThreshold) {
+			return rt.target.MountPath, true
+		}
+	}
+	return "", false
 }
 
 func max1(x, floor int) int {
