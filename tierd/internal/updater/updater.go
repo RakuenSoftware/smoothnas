@@ -129,6 +129,20 @@ type ApplyProgress struct {
 	Error string `json:"error,omitempty"`
 }
 
+// appliedVersionPath stores the manifest.Version of the most recent
+// successful update, so the UI and updater can show "what's actually
+// installed" rather than the compile-time string baked into the binary.
+//
+// Release pipelines sometimes inject a stable semver into the binary
+// shipped by a *testing* release (because the build records the latest
+// stable tag, not the prerelease tag), so the binary can self-report
+// `0.0.46` while the operator actually installed
+// `testing-2026.0508.1253-c7718a8`. That mismatch made cross-scheme
+// version comparison and the UI both lie. Persisting manifest.Version
+// here is authoritative — it's the version string of the release the
+// updater actually applied.
+var appliedVersionPath = "/var/lib/tierd/applied-version"
+
 // Updater checks for and applies SmoothNAS updates from GitHub Releases.
 type Updater struct {
 	currentVersion string
@@ -155,6 +169,39 @@ func New(currentVersion string) *Updater {
 	return &Updater{
 		currentVersion: currentVersion,
 		githubBaseURL:  "https://api.github.com",
+	}
+}
+
+// effectiveCurrentVersion returns the most authoritative current-version
+// string: the manifest.Version of the last successfully applied update
+// (read from appliedVersionPath) if present, otherwise the build-time
+// `currentVersion` baked into the running binary. See appliedVersionPath
+// docstring for why this matters.
+func (u *Updater) effectiveCurrentVersion() string {
+	if data, err := os.ReadFile(appliedVersionPath); err == nil {
+		if v := strings.TrimSpace(string(data)); v != "" {
+			return v
+		}
+	}
+	return u.currentVersion
+}
+
+// writeAppliedVersion persists `v` as the version of the most recent
+// successful update. Best-effort: a write failure is logged but does not
+// fail the update (the binary install already happened, and the only
+// downstream cost of a stale file is the UI showing the build-time
+// version until the next successful apply).
+func writeAppliedVersion(v string) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(appliedVersionPath), 0o755); err != nil {
+		log.Printf("updater: persist applied version: mkdir: %v", err)
+		return
+	}
+	if err := os.WriteFile(appliedVersionPath, []byte(v+"\n"), 0o644); err != nil {
+		log.Printf("updater: persist applied version: write: %v", err)
 	}
 }
 
@@ -302,7 +349,7 @@ func (u *Updater) Check() (*UpdateStatus, error) {
 	}
 
 	status := &UpdateStatus{
-		CurrentVersion: normalizeReleaseVersion(u.currentVersion),
+		CurrentVersion: normalizeReleaseVersion(u.effectiveCurrentVersion()),
 		Channel:        u.Channel(),
 	}
 
@@ -491,6 +538,11 @@ func (u *Updater) doApply() error {
 		return fmt.Errorf("replace UI: %w", err)
 	}
 
+	// Record the version we just applied so subsequent checks reflect
+	// what the operator actually installed, not whatever the binary's
+	// compile-time version string happens to say.
+	writeAppliedVersion(manifest.Version)
+
 	// Ensure required OS packages are present. apt-get install is a no-op
 	// for packages that are already installed, so this is safe to run every time.
 	EnsureSystemPackages()
@@ -591,6 +643,8 @@ func (u *Updater) doManualApply(manifestData, binaryData, uiData []byte) error {
 	if err := replaceUI(uiStagePath, uiPath); err != nil {
 		return fmt.Errorf("replace UI: %w", err)
 	}
+
+	writeAppliedVersion(manifest.Version)
 
 	EnsureSystemPackages()
 
