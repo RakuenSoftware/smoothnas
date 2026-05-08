@@ -18,9 +18,15 @@ type Detail = {
   manifest: string;
 };
 
-type Tab = 'overview' | 'logs' | 'config' | 'profiles' | 'danger';
+type Tab = 'overview' | 'logs' | 'config' | 'instances' | 'profiles' | 'danger';
 
-const tabs: Tab[] = ['overview', 'logs', 'config', 'profiles', 'danger'];
+// instancesTabVisible decides whether to render the Instances tab on
+// the detail header. Hidden for plugins that are single-instance and
+// not configurable — i.e. the parent doc's "small plugin" case where
+// scaling makes no sense and the tab would add visual noise.
+function instancesTabVisible(plugin: any): boolean {
+  return plugin?.instanceCount > 1 || !!plugin?.instanceConfigurable;
+}
 
 function stateClass(state: string): string {
   switch (state) {
@@ -110,15 +116,17 @@ export default function PluginDetail() {
       {error && <div className="alert error">{error}</div>}
 
       <nav className="plugin-detail-tabs">
-        {tabs.map(name => (
-          <button
-            key={name}
-            className={`${tab === name ? 'active' : ''}${name === 'danger' ? ' danger' : ''}`}
-            onClick={() => setTab(name)}
-          >
-            {t(`plugins.detail.tab.${name}`)}
-          </button>
-        ))}
+        {(['overview', 'logs', 'config', 'instances', 'profiles', 'danger'] as Tab[])
+          .filter(n => n !== 'instances' || instancesTabVisible(detail.plugin))
+          .map(n => (
+            <button
+              key={n}
+              className={`${tab === n ? 'active' : ''}${n === 'danger' ? ' danger' : ''}`}
+              onClick={() => setTab(n)}
+            >
+              {t(`plugins.detail.tab.${n}`)}
+            </button>
+          ))}
       </nav>
 
       <div className="plugin-detail-pane">
@@ -130,6 +138,17 @@ export default function PluginDetail() {
             initial={Object.fromEntries(detail.config.map(c => [c.key, c.value]))}
             manifest={detail.manifest}
             onSaved={refresh}
+          />
+        )}
+        {tab === 'instances' && (
+          <InstancesTab
+            name={name}
+            initial={{
+              count: detail.plugin.instanceCount,
+              configurable: !!detail.plugin.instanceConfigurable,
+              instances: detail.instances,
+            }}
+            onScaled={refresh}
           />
         )}
         {tab === 'profiles' && <ProfilesTab profiles={detail.plugin.resolvedProfiles ?? []} />}
@@ -538,6 +557,167 @@ function ProfilesTab({ profiles }: { profiles: string[] }) {
           <span key={name} className="chip">{name}</span>
         ))}
       </span>
+    </>
+  );
+}
+
+// InstancesTab renders the per-instance state table and (for
+// configurable plugins) the scale slider. Slider commits go through a
+// confirm dialog that enumerates which instance numbers will be
+// removed for scale-down operations — operators have asked for that
+// because uninstalling instance N also blows its workspace dir.
+//
+// The component re-fetches its own data (instead of relying on the
+// parent's detail payload) on mount and after every successful scale
+// so the table reflects the live state without a parent-level
+// roundtrip.
+function InstancesTab({
+  name,
+  initial,
+  onScaled,
+}: {
+  name: string;
+  initial: { count: number; configurable: boolean; instances: any[] };
+  onScaled: () => void;
+}) {
+  const { t } = useI18n();
+  const [count, setCount] = useState(initial.count);
+  const [configurable, setConfigurable] = useState(initial.configurable);
+  const [instances, setInstances] = useState(initial.instances);
+  const [target, setTarget] = useState(initial.count);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [pendingScale, setPendingScale] = useState<{ from: number; to: number; removed: number[] } | null>(null);
+
+  function refreshInstances() {
+    api.listPluginInstances(name)
+      .then(d => {
+        setCount(d.count);
+        setConfigurable(d.configurable);
+        setInstances(d.instances ?? []);
+        setTarget(d.count);
+      })
+      .catch(e => setError(extractError(e, t('plugins.detail.instances.error.list'))));
+  }
+
+  function requestScale(to: number) {
+    if (to === count) return;
+    if (to < count) {
+      const removed: number[] = [];
+      for (let i = count; i > to; i--) removed.push(i);
+      setPendingScale({ from: count, to, removed });
+      return;
+    }
+    // Scale-up needs no confirmation — no destructive side effects.
+    commitScale(to);
+  }
+
+  function commitScale(to: number) {
+    setBusy(true);
+    setError('');
+    setPendingScale(null);
+    api.scalePluginInstances(name, to)
+      .then(() => {
+        refreshInstances();
+        onScaled();
+      })
+      .catch(e => {
+        setError(extractError(e, t('plugins.detail.instances.error.scale')));
+        // Reset slider to the (still-current) count on failure.
+        setTarget(count);
+      })
+      .finally(() => setBusy(false));
+  }
+
+  // Min slider is 2 for a multi-instance plugin (we don't allow
+  // crossing the 1↔N boundary; the backend rejects with
+  // plugins.scale.boundary). Single-instance configurable plugins
+  // would have min 1, but those are uncommon and the slider gets a
+  // clearer story by clamping to ≥2 visibly.
+  const min = count > 1 ? 2 : 1;
+  const max = Math.max(min, 16); // arbitrary v1 cap
+
+  return (
+    <>
+      <h2>{t('plugins.detail.instances.heading')}</h2>
+      <p className="subtitle">{t('plugins.detail.instances.description')}</p>
+
+      {error && <div className="alert error"><pre>{error}</pre></div>}
+
+      <table>
+        <thead>
+          <tr>
+            <th>{t('plugins.detail.col.instance')}</th>
+            <th>{t('plugins.detail.col.state')}</th>
+            <th>{t('plugins.detail.col.container')}</th>
+            <th>{t('plugins.detail.col.bridge')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {instances.map(i => (
+            <tr key={i.Instance}>
+              <td>{i.Instance}</td>
+              <td>
+                <span className={`state-badge ${stateClass(i.State)}`}>
+                  {t(stateKey(i.State))}
+                </span>
+              </td>
+              <td className="mono">{i.ContainerID ? i.ContainerID.slice(0, 12) : '—'}</td>
+              <td className="mono">{i.BridgeIP || '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {configurable && (
+        <div className="plugin-detail-section">
+          <h3>{t('plugins.detail.instances.scale.heading')}</h3>
+          <p className="subtitle">{t('plugins.detail.instances.scale.description')}</p>
+          <div className="instance-scale-controls">
+            <input
+              type="range"
+              min={min}
+              max={max}
+              step={1}
+              value={target}
+              onChange={e => setTarget(parseInt(e.target.value, 10))}
+              disabled={busy}
+            />
+            <span className="instance-scale-value">
+              {t('plugins.detail.instances.scale.target', { count: target })}
+            </span>
+            <button
+              className="btn primary"
+              onClick={() => requestScale(target)}
+              disabled={busy || target === count}
+            >
+              {target > count
+                ? t('plugins.detail.instances.scale.action.up')
+                : target < count
+                  ? t('plugins.detail.instances.scale.action.down')
+                  : t('plugins.detail.instances.scale.action.same')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <ConfirmDialog
+        visible={!!pendingScale}
+        title={t('plugins.detail.instances.confirm.title')}
+        message={
+          pendingScale
+            ? t('plugins.detail.instances.confirm.body', {
+                from: pendingScale.from,
+                to: pendingScale.to,
+                removed: pendingScale.removed.join(', '),
+              })
+            : ''
+        }
+        confirmText={t('plugins.detail.instances.confirm.confirm')}
+        confirmClass="btn danger"
+        onConfirm={() => pendingScale && commitScale(pendingScale.to)}
+        onCancel={() => { setPendingScale(null); setTarget(count); }}
+      />
     </>
   );
 }

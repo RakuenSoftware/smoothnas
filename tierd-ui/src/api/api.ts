@@ -336,6 +336,17 @@ export const api = {
     apiFetch<any>('PUT', `/plugins/${name}/config`, { config }),
   rotatePluginToken: (name: string) =>
     apiFetch<{ name: string; token: string }>('POST', `/plugins/${name}/rotate-token`, {}),
+  // Phase 09: per-plugin instance scaling.
+  listPluginInstances: (name: string) =>
+    apiFetch<{
+      plugin: string;
+      count: number;
+      configurable: boolean;
+      instances: any[];
+    }>('GET', `/plugins/${name}/instances`),
+  scalePluginInstances: (name: string, count: number) =>
+    apiFetch<{ from: number; to: number; added?: number[]; removed?: number[]; noOp?: boolean }>(
+      'POST', `/plugins/${name}/instances`, { count }),
 
   // --- Plugin profiles (phase 05) ---
   listPluginProfiles: () => apiFetch<{ profiles: any[] }>('GET', '/plugin-profiles'),
