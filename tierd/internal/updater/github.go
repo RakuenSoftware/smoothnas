@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -16,13 +17,30 @@ import (
 var httpClient = newHTTPClient()
 var githubTokenFilePath = "/etc/tierd/github-token"
 
-// newHTTPClient creates an HTTP client with a custom DNS resolver that bypasses
-// the systemd-resolved stub. On systemd-networkd systems /etc/resolv.conf
-// points to the stub at [::1]:53 which may not be running, so we read the
-// actual upstream servers from /run/systemd/resolve/resolv.conf instead.
+// newHTTPClient creates the HTTP client used for all GitHub API access.
+//
+// DNS path:
+//   - If the systemd-resolved stub at 127.0.0.53 responds to a probe query,
+//     return a default-resolver client. The stub is the OS-recommended path,
+//     it honours configured search domains, and on most boxes Just Works.
+//   - Otherwise build a custom resolver that talks UDP directly to upstream
+//     nameservers from /run/systemd/resolve/resolv.conf. We probe each
+//     candidate before adding it to the dial list — one broken upstream
+//     (no responses, but with the routing table happy) used to make every
+//     fetch wait the full 10 s lookup budget and then give up, because
+//     UDP "connect" never fails and our failover loop only ran on Dial
+//     errors.
+//   - As a last resort, public 1.1.1.1 / 8.8.8.8.
+//
+// 15 s overall HTTP timeout matches the per-channel goroutines in Check().
 func newHTTPClient() *http.Client {
-	servers := upstreamDNSServers()
+	if probeDNSServer("127.0.0.53") {
+		return &http.Client{Timeout: 15 * time.Second}
+	}
+
+	servers := workingUpstreamDNSServers()
 	if len(servers) == 0 {
+		log.Printf("updater: no working DNS resolver found; falling back to default; update checks may fail")
 		return &http.Client{Timeout: 15 * time.Second}
 	}
 
@@ -55,24 +73,61 @@ func newHTTPClient() *http.Client {
 	}
 }
 
-// upstreamDNSServers reads the actual upstream DNS servers, preferring
-// systemd-resolved's upstream list over the stub resolv.conf.
-func upstreamDNSServers() []string {
-	servers := parseNameservers("/run/systemd/resolve/resolv.conf")
+// workingUpstreamDNSServers reads candidate upstream nameservers and returns
+// the subset that respond to a real DNS query. Order is preserved so the
+// caller's failover loop tries the operator-configured ones first, then
+// public fallbacks. Only called when the systemd-resolved stub is down.
+func workingUpstreamDNSServers() []string {
+	candidates := parseNameservers("/run/systemd/resolve/resolv.conf")
+	candidates = append(candidates, "1.1.1.1", "8.8.8.8")
 
-	var filtered []string
-	for _, s := range servers {
+	var working []string
+	for _, s := range candidates {
 		ip := net.ParseIP(s)
-		if ip != nil && !ip.IsLoopback() {
-			filtered = append(filtered, s)
+		if ip == nil || ip.IsLoopback() {
+			continue
 		}
+		if !probeDNSServer(s) {
+			continue
+		}
+		working = append(working, s)
 	}
+	return working
+}
 
-	if len(filtered) > 0 {
-		return filtered
+// probeDNSServer sends a minimal A query for example.com to the given server
+// over UDP and waits up to 1 s for a response. Returns true if any reply
+// arrived in time. Used to filter out misconfigured / firewalled upstreams
+// at startup so the resolver doesn't pick a black-hole server and stall
+// every lookup until Go's 10 s lookup-timeout kicks in.
+func probeDNSServer(server string) bool {
+	conn, err := net.DialTimeout("udp", server+":53", 1*time.Second)
+	if err != nil {
+		return false
 	}
-
-	return []string{"1.1.1.1", "8.8.8.8"}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(1 * time.Second)); err != nil {
+		return false
+	}
+	// Hand-rolled DNS query for "example.com." A IN, recursion desired.
+	// Cheaper than pulling in net/dns just for one query.
+	q := []byte{
+		0x12, 0x34, // ID
+		0x01, 0x00, // RD=1
+		0x00, 0x01, // QDCOUNT=1
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
+	for _, label := range []string{"example", "com"} {
+		q = append(q, byte(len(label)))
+		q = append(q, []byte(label)...)
+	}
+	q = append(q, 0x00, 0x00, 0x01, 0x00, 0x01) // root, A, IN
+	if _, err := conn.Write(q); err != nil {
+		return false
+	}
+	buf := make([]byte, 512)
+	_, err = conn.Read(buf)
+	return err == nil
 }
 
 // parseNameservers extracts nameserver entries from a resolv.conf-style file.
