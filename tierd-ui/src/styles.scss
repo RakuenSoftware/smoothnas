@@ -286,6 +286,116 @@
     resize: vertical;
   }
 
+  // Catalog/paste mode toggle for the install wizard's source step.
+  .wizard-source-modes {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid #e0e0e0;
+
+    .tab {
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      padding: 8px 14px;
+      font-size: 13px;
+      color: #666;
+      cursor: pointer;
+
+      &:hover { color: #222; }
+      &.active {
+        color: #222;
+        border-bottom-color: #2a6df4;
+      }
+      &:disabled { cursor: not-allowed; opacity: 0.6; }
+    }
+  }
+
+  .wizard-plugin-catalog {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+  }
+
+  .wizard-plugin-card {
+    border: 1px solid #d8d8d8;
+    border-radius: 6px;
+    background: #fafafa;
+    transition: border-color 120ms, background 120ms, box-shadow 120ms;
+
+    &.selected {
+      border-color: #2a6df4;
+      background: #eef4ff;
+      box-shadow: 0 0 0 1px #2a6df4 inset;
+    }
+  }
+
+  .wizard-plugin-card-button {
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    padding: 14px 16px;
+    cursor: pointer;
+    color: inherit;
+    font: inherit;
+
+    &:disabled { cursor: not-allowed; opacity: 0.5; }
+    &:focus-visible { outline: 2px solid #2a6df4; outline-offset: 2px; }
+  }
+
+  .wizard-plugin-card-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .wizard-plugin-card-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: #222;
+  }
+
+  .wizard-plugin-card-vendor {
+    font-size: 11px;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .wizard-plugin-card-description {
+    margin: 8px 0 0 0;
+    color: #555;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .wizard-plugin-card-tags {
+    margin-top: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .wizard-plugin-card-tag {
+    background: #e8eef9;
+    color: #2a4f9c;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .wizard-plugin-catalog-hint {
+    margin-top: 14px;
+    color: #2a6df4;
+    font-size: 12px;
+  }
+
   .wizard-fields {
     display: grid;
     grid-template-columns: 180px 1fr;

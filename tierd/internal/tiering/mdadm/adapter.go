@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -117,6 +118,31 @@ func (a *Adapter) ensureSmoothfsPoolMount(pool db.TierInstance, slots []db.TierS
 		if matches {
 			return nil
 		}
+		// Unit body drifted from the rendered template. The naive thing
+		// is to destroy + recreate the unit (which unmounts the pool),
+		// but most template churn is cosmetic — `TimeoutSec`, comments,
+		// `Description`, etc. — and re-mount is overkill. Re-mount is
+		// only required when the *mount semantics* change (the kernel
+		// mount() arguments themselves: `Options=`, `What=`, `Where=`,
+		// `Type=`). For everything else we can rewrite the unit file
+		// and `daemon-reload`, leaving the live mount up so backups
+		// and downstream services keep working through the update.
+		//
+		// Without this distinction, every tierd update that adjusts the
+		// rendered template (smoothfs#120 raising TimeoutSec was the
+		// trigger) caused a ~10s window where /mnt/{pool} was unmounted
+		// and any backup attempt failed with "local path resolves to
+		// the root filesystem".
+		mountSemanticsSame, err := smoothfsUnitMountSemanticsMatch(desired)
+		if err != nil {
+			return err
+		}
+		if mountSemanticsSame {
+			if err := softRewriteSmoothfsUnit(desired); err != nil {
+				return fmt.Errorf("rewrite smoothfs mount unit %s: %w", mountPoint, err)
+			}
+			return nil
+		}
 		if err := destroySmoothfsManagedPool(desired); err != nil {
 			return fmt.Errorf("repair stale smoothfs mount %s: %w", mountPoint, err)
 		}
@@ -162,6 +188,102 @@ func smoothfsUnitMatches(pool smoothfsclient.ManagedPool) (bool, error) {
 		return false, fmt.Errorf("read smoothfs unit %s: %w", pool.UnitPath, err)
 	}
 	return string(got) == want, nil
+}
+
+// smoothfsUnitMountSemanticsMatch reports whether the on-disk unit's
+// mount-syscall-relevant fields (Options=, What=, Where=, Type=) match
+// what we'd render now. Returns true when only cosmetic / pre-mount
+// directives drift (TimeoutSec, Description, Requires, comments) — in
+// that case the live mount is still correct and we don't need to
+// remount to apply the change.
+//
+// Returns (false, nil) when the on-disk file is missing or either
+// side has no recognisable [Mount] section, so the caller falls back
+// to the destroy+recreate path rather than soft-rewriting on
+// guesswork.
+func smoothfsUnitMountSemanticsMatch(pool smoothfsclient.ManagedPool) (bool, error) {
+	want, err := renderSmoothfsUnit(pool)
+	if err != nil {
+		return false, err
+	}
+	got, err := readSmoothfsUnitFile(pool.UnitPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read smoothfs unit %s: %w", pool.UnitPath, err)
+	}
+	gotSem, gotOK := mountSemanticsLines(string(got))
+	wantSem, wantOK := mountSemanticsLines(want)
+	if !gotOK || !wantOK {
+		return false, nil
+	}
+	return gotSem == wantSem, nil
+}
+
+// mountSemanticsLines extracts a deterministic, comparable string
+// containing only the [Mount] directives that determine kernel-side
+// mount() behaviour: What, Where, Type, Options. Order is normalised
+// so two semantically-identical units always produce the same value.
+// Returns ("", false) when the input has no [Mount] section — we
+// don't equate two well-formed-but-emptied results.
+func mountSemanticsLines(unit string) (string, bool) {
+	const mountSection = "[Mount]"
+	idx := strings.Index(unit, mountSection)
+	if idx < 0 {
+		return "", false
+	}
+	body := unit[idx+len(mountSection):]
+	if next := strings.Index(body, "\n["); next >= 0 {
+		body = body[:next]
+	}
+
+	wanted := map[string]string{
+		"What":    "",
+		"Where":   "",
+		"Type":    "",
+		"Options": "",
+	}
+	for _, raw := range strings.Split(body, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		if _, ok := wanted[key]; ok {
+			wanted[key] = strings.TrimSpace(line[eq+1:])
+		}
+	}
+	keys := []string{"What", "Where", "Type", "Options"}
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+wanted[k])
+	}
+	return strings.Join(parts, "\n"), true
+}
+
+// softRewriteSmoothfsUnit replaces the on-disk unit file with the
+// freshly-rendered body and runs `systemctl daemon-reload`. The
+// running mount is untouched — directives like TimeoutSec only
+// affect the next mount/unmount operation, so a daemon-reload picks
+// up the new value without disturbing in-flight workloads.
+var softRewriteSmoothfsUnit = func(pool smoothfsclient.ManagedPool) error {
+	body, err := renderSmoothfsUnit(pool)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(pool.UnitPath, []byte(body), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", pool.UnitPath, err)
+	}
+	out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("systemctl daemon-reload: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }
 
 // statfsUsedBytes returns (totalBytes - availBytes) for a mount point.
