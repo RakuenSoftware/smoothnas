@@ -3,7 +3,7 @@ module github.com/JBailes/SmoothNAS/tierd
 go 1.25.0
 
 require (
-	github.com/RakuenSoftware/smoothfs v0.0.0-20260426155549-ef630c660f1c
+	github.com/RakuenSoftware/smoothfs v0.0.0-20260508144945-26df046ea354
 	github.com/RakuenSoftware/smoothgui/auth v0.2.3
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/creack/pty/v2 v2.0.1

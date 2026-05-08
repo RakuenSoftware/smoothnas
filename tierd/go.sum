@@ -1,5 +1,5 @@
-github.com/RakuenSoftware/smoothfs v0.0.0-20260426155549-ef630c660f1c h1:/KXbwik+NpYgYWBwID4mvxh8kJStsAI2djfX2M4Sbl8=
-github.com/RakuenSoftware/smoothfs v0.0.0-20260426155549-ef630c660f1c/go.mod h1:7fnwelxPAkbfxCy2p9swHrq2SR2XaXetRomABLng8iw=
+github.com/RakuenSoftware/smoothfs v0.0.0-20260508144945-26df046ea354 h1:kpuqgPY391Cx9lyjbQGQqYwow0PKm0UALS79EFU9uHA=
+github.com/RakuenSoftware/smoothfs v0.0.0-20260508144945-26df046ea354/go.mod h1:ZL2l/hHg2lr7QnnGh6eL+ecawHSsosx5GYIrJGlDLWw=
 github.com/RakuenSoftware/smoothgui/auth v0.2.3 h1:sVGM6cFtleouPjn+CIDdlovKQBFBC7VUfGr0bfKaMb8=
 github.com/RakuenSoftware/smoothgui/auth v0.2.3/go.mod h1:xJgLebFDe/MZsFuQxyTsyee6Kqt5USx2K/2djjJRe9Y=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
