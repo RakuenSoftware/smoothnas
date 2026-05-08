@@ -30,6 +30,7 @@ function buildNavItems(t: ReturnType<typeof useI18n>['t']): NavItem[] {
     storage: t('nav.section.storage', undefined, 'Storage'),
     sharing: t('nav.section.sharing', undefined, 'Sharing'),
     system: t('nav.section.system', undefined, 'System'),
+    plugins: t('nav.section.plugins', undefined, 'Plugins'),
   };
   return [
     { label: t('nav.dashboard'),       icon: '■',  route: '/dashboard',      section: sec.overview },
@@ -43,6 +44,9 @@ function buildNavItems(t: ReturnType<typeof useI18n>['t']): NavItem[] {
 
     { label: t('nav.sharing'),         icon: '⇤',  route: '/sharing',        section: sec.sharing },
     { label: t('nav.backups'),         icon: '⬡',  route: '/backups',        section: sec.sharing },
+
+    { label: t('nav.plugins'),         icon: '◆',  route: '/plugins',        section: sec.plugins },
+
     { label: t('nav.benchmarks'),      icon: '⏱',  route: '/benchmarks',     section: sec.system },
     { label: t('nav.network'),         icon: '🌐', route: '/network',        section: sec.system },
     { label: t('nav.users'),           icon: '👤', route: '/users',          section: sec.system },

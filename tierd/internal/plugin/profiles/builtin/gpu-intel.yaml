@@ -1,0 +1,20 @@
+apiVersion: smoothnas.io/v1
+kind: PluginProfile
+metadata:
+  name: gpu-intel
+  description: |
+    Intel iGPU passthrough. Identical to gpu-amd in current
+    kernels (both use /dev/dri); separate profile name so plugin
+    manifests can declare hardware intent clearly and so the two
+    can diverge if Intel ever adds device nodes outside /dev/dri.
+container:
+  hostConfig:
+    devices:
+      - { path: /dev/dri, cgroupPermissions: rwm }
+lxc:
+  rawConfig:
+    - "lxc.cgroup2.devices.allow = c 226:* rwm"
+    - "lxc.mount.entry = /dev/dri dev/dri none bind,optional,create=dir 0 0"
+preflight:
+  hostHas:
+    - { path: /dev/dri, requirement: optional }

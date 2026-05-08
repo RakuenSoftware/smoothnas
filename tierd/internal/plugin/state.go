@@ -1,7 +1,10 @@
 package plugin
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -52,6 +55,12 @@ type PluginRow struct {
 	InstanceConfigurable bool
 	InstalledAt          string
 	UpdatedAt            string
+	// ResolvedProfiles is the profile-name list that was actually
+	// applied at install/materialise time (after default-limits
+	// auto-injection and operator overrides). Empty list = no
+	// profiles. The phase-1 install path leaves this empty;
+	// Lifecycle.Materialise populates it once profiles are wired.
+	ResolvedProfiles []string
 }
 
 // InstanceRow is the in-memory image of one plugin_instances row.
@@ -113,10 +122,15 @@ type InsertParams struct {
 	Manifest *Manifest
 	// Paths is keyed by (volume name) → (instance number → host path).
 	// Tier-bound volumes whose host path has not yet been resolved
-	// (phase 03 territory) MUST still appear in this map with their
-	// instance entries set to "" (empty string). The plugin_volumes
-	// row's tier_pool gets the sentinel "<unresolved>".
+	// (phase 1 callers without tier assignments) MUST still appear
+	// in this map with their instance entries set to "" (empty
+	// string). The plugin_volumes row's tier_pool gets the sentinel
+	// "<unresolved>" in that case.
 	Paths map[string]map[int]string
+	// Tiers maps volume name → tier pool name for tier-bound volumes
+	// that the caller has already resolved (phase 03+). Volumes not
+	// present in this map fall back to the "<unresolved>" sentinel.
+	Tiers map[string]string
 }
 
 // Insert persists a plugin atomically across all six tables. Returns
@@ -204,10 +218,15 @@ func (s *Store) Insert(p InsertParams) error {
 		var slot sql.NullString
 		if vol.Mode == VolumeModeTierBound {
 			slot = sql.NullString{String: vol.Slot, Valid: vol.Slot != ""}
-			// Phase 03 fills in the real tier pool. Phase 1 leaves
-			// it as a sentinel so callers can tell "not yet resolved"
-			// from "empty by design".
-			tierPool = sql.NullString{String: "<unresolved>", Valid: true}
+			// Phase 03 callers populate p.Tiers with the resolved
+			// tier pool name. Phase 1 callers (no tier assignments)
+			// land here with an empty entry; we record the sentinel
+			// so the row reads "I'm tier-bound but not yet placed".
+			if resolved, ok := p.Tiers[vol.Name]; ok && resolved != "" {
+				tierPool = sql.NullString{String: resolved, Valid: true}
+			} else {
+				tierPool = sql.NullString{String: "<unresolved>", Valid: true}
+			}
 		}
 		if _, err := tx.Exec(
 			`INSERT INTO plugin_volumes
@@ -340,7 +359,7 @@ func (s *Store) List() ([]PluginRow, error) {
 		`SELECT name, version, state, manifest, artifact_type,
 		        COALESCE(image_ref, ''), COALESCE(distro_summary, ''),
 		        instance_count, instance_configurable,
-		        installed_at, updated_at
+		        installed_at, updated_at, profiles_json
 		 FROM plugins
 		 ORDER BY name`,
 	)
@@ -366,6 +385,232 @@ func (s *Store) Delete(name string) error {
 	res, err := s.db.Exec(`DELETE FROM plugins WHERE name = ?`, name)
 	if err != nil {
 		return fmt.Errorf("delete plugin: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrPluginNotFound
+	}
+	return nil
+}
+
+// GetBearerToken returns the per-plugin bearer token issued for the
+// nginx auth-injection flow (phase 07). Returns empty string + nil
+// when the plugin has no token (auth=none plugins, plugins
+// installed before phase 07).
+func (s *Store) GetBearerToken(name string) (string, error) {
+	var token string
+	err := s.db.QueryRow(
+		`SELECT bearer_token FROM plugin_secrets WHERE plugin_name = ?`,
+		name,
+	).Scan(&token)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get bearer token: %w", err)
+	}
+	return token, nil
+}
+
+// IssueBearerToken generates a new 256-bit token, persists it,
+// and returns the value. Idempotent insert — called from Installer
+// after every install when the manifest declares
+// ui.embed.auth=bearer-injected. Calling twice for the same plugin
+// is allowed and rotates the token.
+func (s *Store) IssueBearerToken(name string) (string, error) {
+	// Verify plugin exists first so a typo doesn't insert an orphan
+	// (the FK would catch it but the error would be ugly).
+	if _, err := s.getPluginRow(name); err != nil {
+		return "", err
+	}
+	token, err := newBearerToken()
+	if err != nil {
+		return "", err
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO plugin_secrets (plugin_name, bearer_token)
+		 VALUES (?, ?)
+		 ON CONFLICT(plugin_name) DO UPDATE SET
+		   bearer_token = excluded.bearer_token,
+		   issued_at    = datetime('now')`,
+		name, token,
+	)
+	if err != nil {
+		return "", fmt.Errorf("upsert plugin_secrets: %w", err)
+	}
+	return token, nil
+}
+
+// DeleteBearerToken removes the per-plugin token row. Normally
+// unnecessary because the plugins-row FK cascades on uninstall;
+// exposed for the rare "operator wants to drop bearer auth without
+// uninstalling" path.
+func (s *Store) DeleteBearerToken(name string) error {
+	_, err := s.db.Exec(`DELETE FROM plugin_secrets WHERE plugin_name = ?`, name)
+	return err
+}
+
+// newBearerToken returns 32 random bytes as a hex string. 64 chars,
+// 256 bits of entropy — same shape Docker / k8s use for similar
+// tokens. crypto/rand panics never on Linux + /dev/urandom; bubble
+// the error up regardless to satisfy the spec.
+func newBearerToken() (string, error) {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("generate bearer token: %w", err)
+	}
+	return hex.EncodeToString(buf[:]), nil
+}
+
+// TierConsumers returns the names of every installed plugin that
+// has at least one volume bound to the given tier pool. The api
+// layer's tier-deletion handler consults this so an operator can't
+// destroy a tier out from under a running plugin.
+//
+// Returns an empty slice (not nil) when no plugins use the tier.
+func (s *Store) TierConsumers(poolName string) ([]string, error) {
+	if poolName == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(
+		`SELECT DISTINCT plugin_name
+		 FROM plugin_volumes
+		 WHERE tier_pool = ?
+		 ORDER BY plugin_name`,
+		poolName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query plugin tier consumers: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
+// RawDB returns the underlying db.Store. The api layer needs it to
+// satisfy the TierProvider interface for phase 03 preflight without
+// a second DB connection.
+func (s *Store) RawDB() *db.Store { return s.store }
+
+// ReplaceConfig wipes every existing plugin_config row for the
+// named plugin and inserts the supplied key→value map in one
+// transaction. Returns ErrPluginNotFound when the plugin does not
+// exist (cascades from the SELECT before the DELETE so a typo
+// doesn't silently no-op).
+func (s *Store) ReplaceConfig(name string, cfg map[string]string) error {
+	// Verify plugin exists first so a typo doesn't quietly return ok.
+	if _, err := s.getPluginRow(name); err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.Exec(`DELETE FROM plugin_config WHERE plugin_name = ?`, name); err != nil {
+		return fmt.Errorf("delete plugin_config: %w", err)
+	}
+	for k, v := range cfg {
+		if _, err := tx.Exec(
+			`INSERT INTO plugin_config (plugin_name, key, value) VALUES (?, ?, ?)`,
+			name, k, v,
+		); err != nil {
+			return fmt.Errorf("insert plugin_config[%s]: %w", k, err)
+		}
+	}
+	if _, err := tx.Exec(
+		`UPDATE plugins SET updated_at = datetime('now') WHERE name = ?`, name,
+	); err != nil {
+		return fmt.Errorf("touch plugin row: %w", err)
+	}
+	return tx.Commit()
+}
+
+// SetResolvedProfiles records the merged-profile-name list applied
+// at install/materialise time. Stored as a JSON array so a future
+// tierd doesn't have to re-resolve against a possibly-changed
+// catalog to know what the containers were created with.
+func (s *Store) SetResolvedProfiles(name string, profileNames []string) error {
+	if profileNames == nil {
+		profileNames = []string{}
+	}
+	encoded, err := json.Marshal(profileNames)
+	if err != nil {
+		return fmt.Errorf("encode profiles: %w", err)
+	}
+	res, err := s.db.Exec(
+		`UPDATE plugins SET profiles_json = ?, updated_at = datetime('now') WHERE name = ?`,
+		string(encoded), name,
+	)
+	if err != nil {
+		return fmt.Errorf("update plugins.profiles_json: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrPluginNotFound
+	}
+	return nil
+}
+
+// SetInstanceContainerID records the runtime daemon's container ID
+// for one instance. Phase 02's Lifecycle.Materialise calls this
+// after each successful POST /containers/create.
+func (s *Store) SetInstanceContainerID(name string, instance int, id string) error {
+	res, err := s.db.Exec(
+		`UPDATE plugin_instances
+		 SET container_id = ?, last_change = datetime('now')
+		 WHERE plugin_name = ? AND instance = ?`,
+		sqlNullable(id), name, instance,
+	)
+	if err != nil {
+		return fmt.Errorf("update plugin_instances.container_id: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrPluginNotFound
+	}
+	return nil
+}
+
+// SetImageRef updates the resolved image ref on the plugins row.
+// Lifecycle calls this after a successful pull so subsequent
+// operations don't have to re-resolve.
+func (s *Store) SetImageRef(name, ref string) error {
+	res, err := s.db.Exec(
+		`UPDATE plugins
+		 SET image_ref = ?, updated_at = datetime('now')
+		 WHERE name = ?`,
+		sqlNullable(ref), name,
+	)
+	if err != nil {
+		return fmt.Errorf("update plugins.image_ref: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrPluginNotFound
+	}
+	return nil
+}
+
+// SetInstanceBridgeIP records the per-instance bridge IP. Phase 04
+// will use this when generating the nginx route. Phase 02 wires the
+// setter so the call site exists; phase 04 reads it.
+func (s *Store) SetInstanceBridgeIP(name string, instance int, ip string) error {
+	res, err := s.db.Exec(
+		`UPDATE plugin_instances
+		 SET bridge_ip = ?, last_change = datetime('now')
+		 WHERE plugin_name = ? AND instance = ?`,
+		sqlNullable(ip), name, instance,
+	)
+	if err != nil {
+		return fmt.Errorf("update plugin_instances.bridge_ip: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
@@ -480,7 +725,7 @@ func (s *Store) getPluginRow(name string) (PluginRow, error) {
 		`SELECT name, version, state, manifest, artifact_type,
 		        COALESCE(image_ref, ''), COALESCE(distro_summary, ''),
 		        instance_count, instance_configurable,
-		        installed_at, updated_at
+		        installed_at, updated_at, profiles_json
 		 FROM plugins WHERE name = ?`,
 		name,
 	)
@@ -500,15 +745,22 @@ type rowScanner interface {
 func scanPluginRow(rs rowScanner) (PluginRow, error) {
 	var r PluginRow
 	var configurable int
+	var profilesJSON string
 	if err := rs.Scan(
 		&r.Name, &r.Version, &r.State, &r.ManifestYAML, &r.ArtifactType,
 		&r.ImageRef, &r.DistroSummary,
 		&r.InstanceCount, &configurable,
-		&r.InstalledAt, &r.UpdatedAt,
+		&r.InstalledAt, &r.UpdatedAt, &profilesJSON,
 	); err != nil {
 		return PluginRow{}, err
 	}
 	r.InstanceConfigurable = configurable != 0
+	if profilesJSON != "" {
+		// Default value from the migration is the empty array, so
+		// this should always succeed; tolerate the unlikely
+		// "old row with NULL" case by leaving ResolvedProfiles nil.
+		_ = json.Unmarshal([]byte(profilesJSON), &r.ResolvedProfiles)
+	}
 	return r, nil
 }
 

@@ -1,0 +1,20 @@
+apiVersion: smoothnas.io/v1
+kind: PluginProfile
+metadata:
+  name: gpu-amd
+  description: |
+    AMD GPU passthrough via /dev/dri. Binds the entire DRI tree
+    (card0/renderD128/etc.) and grants cgroup permissions for
+    char-major 226 (DRM). Same binds work for Intel iGPUs; use
+    the gpu-intel alias for clarity.
+container:
+  hostConfig:
+    devices:
+      - { path: /dev/dri, cgroupPermissions: rwm }
+lxc:
+  rawConfig:
+    - "lxc.cgroup2.devices.allow = c 226:* rwm"
+    - "lxc.mount.entry = /dev/dri dev/dri none bind,optional,create=dir 0 0"
+preflight:
+  hostHas:
+    - { path: /dev/dri, requirement: optional }
