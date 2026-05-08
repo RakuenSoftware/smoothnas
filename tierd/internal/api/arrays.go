@@ -47,6 +47,13 @@ type ArraysHandler struct {
 	// LVM teardown in destroyTierPool so the mount point is free and the
 	// teardown cannot race with a re-created smoothfs mount during / after destruction.
 	destroyPoolNamespaces func(poolName string) error
+	// pluginTierConsumers returns the names of every plugin holding a
+	// volume on the given tier pool. Called from tierConsumers so a
+	// pool with active plugin volumes can't be destroyed out from
+	// under them. Wired by the server at startup; defaults to a no-op
+	// so the api package does not depend on the plugin package
+	// directly.
+	pluginTierConsumers func(poolName string) ([]string, error)
 	// asyncDone is an optional channel signalled when an async goroutine
 	// (tier assign/delete) completes. Used by tests to wait for background
 	// work. Nil in production.
@@ -68,7 +75,17 @@ func NewArraysHandler(store *db.Store) *ArraysHandler {
 		ensureNamespace:         func(string) error { return nil },
 		purgeBackupsForPath:     func(string) (int, error) { return 0, nil },
 		destroyPoolNamespaces:   func(string) error { return nil },
+		pluginTierConsumers:     func(string) ([]string, error) { return nil, nil },
 	}
+}
+
+// SetPluginTierConsumers wires the plugin-subsystem callback used by
+// tier-deletion preflight. Called from server startup.
+func (h *ArraysHandler) SetPluginTierConsumers(fn func(poolName string) ([]string, error)) {
+	if fn == nil {
+		fn = func(string) ([]string, error) { return nil, nil }
+	}
+	h.pluginTierConsumers = fn
 }
 
 // SetEnsureNamespace sets the callback used to create a smoothfs-backed namespace

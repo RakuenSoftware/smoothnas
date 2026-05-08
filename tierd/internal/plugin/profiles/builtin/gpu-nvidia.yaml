@@ -1,0 +1,30 @@
+apiVersion: smoothnas.io/v1
+kind: PluginProfile
+metadata:
+  name: gpu-nvidia
+  description: |
+    NVIDIA GPU passthrough. Binds /dev/nvidia0..N (char-major 195),
+    /dev/nvidiactl, and /dev/nvidia-uvm/nvidia-uvm-tools (char-major
+    509). Does NOT use the nvidia-container-toolkit discovery dance
+    — SmoothNAS hosts have known hardware and tierd queries it
+    directly.
+container:
+  hostConfig:
+    devices:
+      - { path: /dev/nvidiactl,        cgroupPermissions: rwm }
+      - { path: /dev/nvidia-uvm,       cgroupPermissions: rwm }
+      - { path: /dev/nvidia-uvm-tools, cgroupPermissions: rwm }
+      - { path: /dev/nvidia0,          cgroupPermissions: rwm }
+lxc:
+  rawConfig:
+    - "lxc.cgroup2.devices.allow = c 195:* rwm"
+    - "lxc.cgroup2.devices.allow = c 509:* rwm"
+    - "lxc.mount.entry = /dev/nvidiactl        dev/nvidiactl        none bind,optional,create=file 0 0"
+    - "lxc.mount.entry = /dev/nvidia-uvm       dev/nvidia-uvm       none bind,optional,create=file 0 0"
+    - "lxc.mount.entry = /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file 0 0"
+    - "lxc.mount.entry = /dev/nvidia0          dev/nvidia0          none bind,optional,create=file 0 0"
+preflight:
+  hostHas:
+    - { path: /dev/nvidiactl,  requirement: optional }
+    - { path: /dev/nvidia-uvm, requirement: optional }
+    - { path: /dev/nvidia0,    requirement: optional }

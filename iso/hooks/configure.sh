@@ -2,6 +2,17 @@
 # Adds NAS-specific tuning, installs tierd, nginx, sysctl, udev, firewall on
 # top of the generic system configuration.
 
+# Persist the language selected during installation. firstboot.sh reads
+# this to write /etc/smoothnas/locale, which the web UI reads before login.
+_install_lang="${INSTALLER_LANG:-en}"
+case "$_install_lang" in
+    en|nl|en-*|nl-*) ;;
+    *) _install_lang="en" ;;
+esac
+mkdir -p "$TARGET/etc/smoothnas"
+printf '%s\n' "$_install_lang" > "$TARGET/etc/smoothnas/installer-lang"
+chmod 644 "$TARGET/etc/smoothnas/installer-lang"
+
 # Add admin to the tierd group so the daemon can run as the login user.
 chroot "$TARGET" groupadd --system tierd 2>/dev/null || true
 chroot "$TARGET" usermod -aG tierd admin 2>/dev/null || true

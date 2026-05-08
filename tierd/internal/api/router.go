@@ -11,6 +11,7 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/health"
 	"github.com/JBailes/SmoothNAS/tierd/internal/monitor"
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
 	"github.com/JBailes/SmoothNAS/tierd/internal/smart"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tiering"
 	"github.com/JBailes/SmoothNAS/tierd/internal/updater"
@@ -32,6 +33,36 @@ func NewRouterFull(store *db.Store, version string, startTime time.Time, history
 	disksHandler := NewDisksHandler(store, historyStore, alarmStore)
 	arraysHandler := NewArraysHandler(store)
 	arraysHandler.ResumeDestroyingPools()
+	// Plugin tier consumers — phase 03 of the plugin proposal.
+	// Tier-deletion preflight refuses to destroy a pool that has
+	// any plugin volumes pointing at it.
+	pluginStore := plugin.NewStore(store)
+	arraysHandler.SetPluginTierConsumers(pluginStore.TierConsumers)
+
+	// Plugin profile catalog — phase 05.
+	pluginCatalog, catalogErr := plugin.NewCatalog(plugin.DefaultOperatorProfilesDir)
+	if catalogErr != nil {
+		log.Printf("plugin profile catalog: %v (built-ins still loaded)", catalogErr)
+	}
+	pluginProfilesHandler := NewProfileHandler(pluginCatalog)
+
+	// Phase 06a: HTTP plugin handler. Shares the same plugin.Store
+	// + Installer + Lifecycle the tier-deletion blocker uses, so
+	// every plugin-aware code path sees one consistent view of state.
+	//
+	// Lifecycle is wired with no runtime client when the runtime
+	// daemon socket is unreachable (e.g. CI without smoothnas-runtime
+	// installed). The HTTP layer surfaces that as 503 on lifecycle
+	// verbs; install/uninstall still work since they don't need it.
+	pluginInstaller := plugin.NewInstaller(pluginStore)
+	pluginInstaller.SetTierProvider(store, plugin.StatAvail)
+	var pluginLifecycle *plugin.Lifecycle
+	// runtime/lifecycle wiring is left to a follow-up that owns the
+	// tierd ↔ smoothnas-runtime connection (the same wiring tierd-cli
+	// already does via openPluginLifecycle). For phase 06a the HTTP
+	// surface returns 503 from lifecycle verbs when this is nil,
+	// and install/list/uninstall still work fully.
+	pluginsHandler := NewPluginsHandler(pluginStore, pluginInstaller, pluginLifecycle, pluginCatalog, store)
 	zfsHandler := NewZFSHandler(store)
 	userPrefsHandler := NewUserPrefsHandler(store)
 	sharingHandler := NewSharingHandler(store)
@@ -167,6 +198,10 @@ func NewRouterFull(store *db.Store, version string, startTime time.Time, history
 			smoothfsHandler.Route(w, r)
 		case strings.HasPrefix(path, "/api/backup/"):
 			backupHandler.Route(w, r)
+		case strings.HasPrefix(path, "/api/plugin-profiles"):
+			pluginProfilesHandler.Route(w, r)
+		case strings.HasPrefix(path, "/api/plugins"):
+			pluginsHandler.Route(w, r)
 		default:
 			jsonNotFound(w)
 		}
