@@ -624,49 +624,51 @@ func rsyncMount(ctx context.Context, cfg Config, progress func(msg string, done,
 	return summary, nil
 }
 
-// runParallelRsyncMount partitions the top-level entries of src across
-// `parallelism` rsync workers and runs them concurrently against the same
-// dst. Each worker is given a --files-from list of entry names, so workers
-// don't overlap. Used when cfg.Parallelism > 1 on the rsync method.
+// runParallelRsyncMount enumerates the source tree into rsync-friendly
+// "work units" and processes them through a shared queue with N
+// concurrent rsync workers. Used when cfg.Parallelism > 1 on the rsync
+// method (mount path).
 //
-// Per-file metadata round-trips (lookup/open/setattr/close on NFS) serialise
-// per-stream and cap single-stream throughput well below network bandwidth
-// when the workload is dominated by small files. Splitting into N streams
-// hides that latency behind parallelism and recovers wire-rate throughput.
+// Per-file metadata round-trips (lookup/open/setattr/close on NFS)
+// serialise per-stream and cap single-stream throughput well below
+// network bandwidth when the workload is dominated by small files.
+// Splitting into N streams hides that latency behind parallelism and
+// recovers wire-rate throughput.
 //
-// Tradeoffs vs single-stream:
-//   - Aggregate progress is reported as "running N streams" and a stream
-//     count, not a single rate — runRsyncProcess's per-call rate parser
-//     is per-process and there's no clean way to combine N of them
-//     without inventing a coordinator that's larger than the feature.
-//   - --delete is incompatible (handled by the caller before dispatching).
-//   - On error from any worker, the others are cancelled via shared ctx
-//     and the first error is returned.
+// The earlier round-robin partition (top-level entries split N ways
+// across N permanent workers) had two flaws once one bucket was
+// noticeably smaller or finished faster than the others: the worker
+// holding the small bucket exited and stayed exited, dropping
+// effective parallelism for the rest of the run. Real workloads —
+// 10 GiB of "isos" alongside 8 TiB of "video" — hit this regularly.
+//
+// The queue model removes that asymmetry. enumerateRsyncWorkUnits
+// produces a fine-grained work list (depth-2 walk, with files-only
+// directories kept whole to avoid one-rsync-per-file startup cost);
+// workers pull the next unit when they finish their current one, so
+// all N stay busy until the queue drains.
+//
+// Other tradeoffs vs single-stream:
+//   - Aggregate progress is reported as "N streams, X work units",
+//     not a single rate — runRsyncProcess's per-call rate parser is
+//     per-process and there's no clean way to combine concurrent
+//     streams without inventing a coordinator larger than the
+//     feature.
+//   - --delete is incompatible (handled by the caller before
+//     dispatching) — each worker only sees its current unit and would
+//     erroneously delete files outside it.
+//   - On error from any worker, the others are cancelled via shared
+//     context and the first error is returned.
 func runParallelRsyncMount(ctx context.Context, src, dst string, parallelism int, targetType string, progress func(msg string, done, total int)) (string, error) {
-	entries, err := os.ReadDir(src)
+	units, err := enumerateRsyncWorkUnits(src)
 	if err != nil {
-		return "", fmt.Errorf("read source dir for parallel rsync: %w", err)
+		return "", fmt.Errorf("enumerate parallel rsync work units: %w", err)
 	}
-	// Filter to names rsync can take as relative paths — entries with a
-	// "/" prefix or "." / ".." would confuse --files-from.
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		n := e.Name()
-		if n == "." || n == ".." || strings.ContainsRune(n, '/') {
-			continue
-		}
-		names = append(names, n)
+	if len(units) == 0 {
+		return "", nil
 	}
-	if len(names) == 0 {
-		return "", nil // nothing to copy
-	}
-	if parallelism > len(names) {
-		parallelism = len(names)
-	}
-
-	parts := make([][]string, parallelism)
-	for i, n := range names {
-		parts[i%parallelism] = append(parts[i%parallelism], n)
+	if parallelism > len(units) {
+		parallelism = len(units)
 	}
 
 	listDir, err := os.MkdirTemp("", "smoothnas-rsync-parts-*")
@@ -675,58 +677,175 @@ func runParallelRsyncMount(ctx context.Context, src, dst string, parallelism int
 	}
 	defer os.RemoveAll(listDir)
 
-	listFiles := make([]string, parallelism)
-	for i, ns := range parts {
-		path := filepath.Join(listDir, fmt.Sprintf("p%d.list", i+1))
-		if err := os.WriteFile(path, []byte(strings.Join(ns, "\n")+"\n"), 0o600); err != nil {
-			return "", fmt.Errorf("write rsync partition list: %w", err)
-		}
-		listFiles[i] = path
-	}
-
-	progress(fmt.Sprintf("Running rsync over %s mount with %d parallel streams...", strings.ToUpper(targetType), parallelism), -1, -1)
+	progress(fmt.Sprintf("Running rsync over %s mount: %d parallel streams across %d work units...",
+		strings.ToUpper(targetType), parallelism, len(units)), -1, -1)
 
 	workerCtx, cancelAll := context.WithCancel(ctx)
 	defer cancelAll()
 
+	queue := make(chan rsyncWorkUnit, len(units))
+	for _, u := range units {
+		queue <- u
+	}
+	close(queue)
+
 	type result struct {
-		idx int
 		err error
+		rel string
 		out string
 	}
-	results := make(chan result, parallelism)
-
-	for i, listPath := range listFiles {
-		i, listPath := i, listPath
+	results := make(chan result, len(units))
+	var wg sync.WaitGroup
+	for i := 1; i <= parallelism; i++ {
+		workerID := i
+		wg.Add(1)
 		go func() {
-			args := append([]string{}, rsyncMountArgs(dst)...)
-			args = append(args, "--files-from="+listPath, src, dst)
-			cmd := exec.CommandContext(workerCtx, "rsync", args...)
-			out, err := cmd.CombinedOutput()
-			results <- result{idx: i, err: err, out: string(out)}
+			defer wg.Done()
+			listFile := filepath.Join(listDir, fmt.Sprintf("w%d.list", workerID))
+			for {
+				select {
+				case <-workerCtx.Done():
+					return
+				case u, ok := <-queue:
+					if !ok {
+						return
+					}
+					if err := os.WriteFile(listFile, []byte(u.rel+"\n"), 0o600); err != nil {
+						results <- result{err: fmt.Errorf("write %s: %w", listFile, err), rel: u.rel}
+						return
+					}
+					args := append([]string{}, rsyncMountArgs(dst)...)
+					args = append(args, "--files-from="+listFile, src, dst)
+					cmd := exec.CommandContext(workerCtx, "rsync", args...)
+					out, err := cmd.CombinedOutput()
+					results <- result{err: err, rel: u.rel, out: string(out)}
+					if err != nil {
+						return
+					}
+				}
+			}
 		}()
 	}
 
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
 	var firstErr error
-	var summary strings.Builder
-	for done := 0; done < parallelism; done++ {
-		r := <-results
+	completed := 0
+	for r := range results {
 		if r.err != nil {
 			if firstErr == nil {
-				firstErr = fmt.Errorf("parallel rsync stream %d: %w: %s",
-					r.idx+1, r.err, strings.TrimSpace(r.out))
-				cancelAll() // bring the other workers down
+				firstErr = fmt.Errorf("parallel rsync unit %q: %w: %s",
+					r.rel, r.err, strings.TrimSpace(r.out))
+				cancelAll()
 			}
 			continue
 		}
-		summary.WriteString(fmt.Sprintf("[stream %d]\n%s\n",
-			r.idx+1, parsersyncSummary(r.out)))
+		completed++
 	}
 	if firstErr != nil {
 		return "", firstErr
 	}
-	progress("rsync complete", -1, -1)
-	return summary.String(), nil
+	progress(fmt.Sprintf("rsync complete: %d work units across %d streams", completed, parallelism), -1, -1)
+	return fmt.Sprintf("[parallel] %d work units across %d streams\n", completed, parallelism), nil
+}
+
+// rsyncWorkUnit is a single chunk of source-tree to copy. The path is
+// relative to the rsync source root and is fed to rsync via
+// --files-from so rsync replicates it under the destination root.
+type rsyncWorkUnit struct {
+	rel string
+}
+
+// enumerateRsyncWorkUnits walks the source root and returns a list of
+// independent units a worker can dispatch in any order. Walks two
+// levels deep so a typical NAS layout with ~10 top-level dirs each
+// holding tens of subdirectories yields enough units for N-way work
+// stealing across realistic parallelism settings (1-16 workers).
+//
+// Files-only directories are emitted as a single unit rather than one
+// unit per file: rsync invocation startup is non-trivial and one
+// rsync per file at the leaves would dominate the wall clock for
+// directories like asset trees full of small images. Top-level
+// emission falls back to per-entry when the source root happens to
+// have no subdirectories at all (synthetic benchmarks, tests).
+func enumerateRsyncWorkUnits(src string) ([]rsyncWorkUnit, error) {
+	var units []rsyncWorkUnit
+	if err := walkRsyncWorkUnits(src, "", 2, 0, &units); err != nil {
+		return nil, err
+	}
+	return units, nil
+}
+
+func walkRsyncWorkUnits(absSrc, rel string, maxDepth, depth int, out *[]rsyncWorkUnit) error {
+	if depth >= maxDepth {
+		if rel != "" {
+			*out = append(*out, rsyncWorkUnit{rel: rel})
+		}
+		return nil
+	}
+	full := absSrc
+	if rel != "" {
+		full = filepath.Join(absSrc, rel)
+	}
+	entries, err := os.ReadDir(full)
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		if rel != "" {
+			*out = append(*out, rsyncWorkUnit{rel: rel})
+		}
+		return nil
+	}
+
+	hasSubdir := false
+	for _, e := range entries {
+		if e.IsDir() {
+			hasSubdir = true
+			break
+		}
+	}
+	if !hasSubdir {
+		// Files-only directory at this level. Emit it whole — we don't
+		// want one rsync invocation per file, the startup overhead would
+		// dominate wall clock. The exception is the source root itself
+		// (rel == ""): falling back to a single unit there would mean
+		// "the entire source tree as one unit", which collapses the
+		// parallel runner into a single-stream worker.
+		if rel != "" {
+			*out = append(*out, rsyncWorkUnit{rel: rel})
+			return nil
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if name == "." || name == ".." || strings.ContainsRune(name, '/') {
+				continue
+			}
+			*out = append(*out, rsyncWorkUnit{rel: name})
+		}
+		return nil
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if name == "." || name == ".." || strings.ContainsRune(name, '/') {
+			continue
+		}
+		childRel := name
+		if rel != "" {
+			childRel = filepath.Join(rel, name)
+		}
+		if e.IsDir() {
+			if err := walkRsyncWorkUnits(absSrc, childRel, maxDepth, depth+1, out); err != nil {
+				return err
+			}
+		} else {
+			*out = append(*out, rsyncWorkUnit{rel: childRel})
+		}
+	}
+	return nil
 }
 
 // runCP mounts the remote NFS or SMB share, copies the tree with sha256
