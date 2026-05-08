@@ -1,0 +1,14 @@
+apiVersion: smoothnas.io/v1
+kind: PluginProfile
+metadata:
+  name: default-limits
+  description: |
+    Sane resource limits applied to every plugin unless explicitly
+    opted out via "!default-limits". MemoryMax: unlimited (operators
+    cap per-plugin via custom profiles), PidsLimit: 1024, OOMScoreAdj:
+    100 (more likely to be killed under host pressure than tierd or
+    smoothfs).
+container:
+  hostConfig:
+    pidsLimit: 1024
+    oomScoreAdj: 100

@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/iscsi"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/runtime"
 )
 
 const exTempFail = 75
@@ -33,6 +35,7 @@ Usage:
   tierd-cli smoothfs <subcommand> --pool <uuid> [args...]
   tierd-cli iscsi    <subcommand> [args...]
   tierd-cli plugin   <subcommand> [args...]
+  tierd-cli profile  <subcommand> [args...]
 
 Subcommands (smoothfs):
   create-pool  --name <n> --tiers <a:b:c> [--uuid <u>] [--mount-base <path>]
@@ -57,19 +60,38 @@ Subcommands (iscsi):
                                                     names a smoothfs-backed path.
 
 Subcommands (plugin):
-  install   <manifest.yaml>                       Parse and validate the manifest, record the plugin
-                                                    in tierd's database, and create flat-volume
-                                                    directories. Phase 1 — does not create or run
-                                                    any container; that lands in phase 02.
+  install   [--tier <pool>] [--volume-tier <vol>=<pool> ...] <manifest.yaml>
+                                                  Parse + validate the manifest, run tier-bound
+                                                    preflight, create the flat- and tier-bound
+                                                    volume directories, record the plugin in
+                                                    tierd's database. --tier sets the default
+                                                    tier pool for tier-bound volumes; per-volume
+                                                    overrides via --volume-tier (repeatable).
+                                                    Materialise/start happens in a separate verb.
   list                                            List installed plugins.
   show      <name>                                Print full per-instance state, volumes, ports,
                                                     and config for one plugin.
   uninstall <name>                                Remove flat-volume directories and DB rows for
-                                                    a plugin. Tier-bound volume teardown lands in
-                                                    phase 03; container teardown lands in phase 02.
-  start | stop | restart  <name>                  Stub — prints the phase that will implement it.
+                                                    a plugin. With a running smoothnas-runtime,
+                                                    also stops/removes containers and drops the
+                                                    cached image. Tier-bound volume teardown
+                                                    lands in phase 03.
+  materialise <name>                              Pull the image (and run lxc-distro setup),
+                                                    then create per-instance containers. Most
+                                                    operators run this before 'start'.
+  start | stop | restart  <name>                  Lifecycle verbs against an installed plugin.
+                                                    Honours SMOOTHNAS_RUNTIME_SOCKET (default
+                                                    /run/smoothnas-runtime/docker.sock).
 
 Plugin commands honour the TIERD_DB env var (default /var/lib/tierd/tierd.db).
+
+Subcommands (profile):
+  list                                            List built-in + operator profiles. Operator
+                                                    profiles live in /etc/smoothnas/plugin-profiles.d/.
+  show     <name>                                 Print one profile's resolved fields.
+  validate <path-to-yaml>                         Parse + validate an operator profile YAML
+                                                    without installing it. Useful for editor
+                                                    save-hooks.
 
 The promote/demote subcommands send a MOVE_PLAN; tierd's worker pool
 runs copy/verify/cutover/cleanup. Use 'inspect' to follow progress.
@@ -91,9 +113,99 @@ func main() {
 		iscsiCmd(args[1:])
 	case "plugin":
 		pluginCmd(args[1:])
+	case "profile":
+		profileCmd(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "tierd-cli: unknown command %q\n", args[0])
 		usage()
+		os.Exit(2)
+	}
+}
+
+// profileCmd handles `tierd-cli profile <subcommand>`. Catalog is
+// loaded fresh per invocation; tierd's own profile lifetime is
+// bounded by the long-running daemon, the CLI just reads.
+func profileCmd(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "tierd-cli profile: subcommand required (list | show <name> | validate <path>)")
+		os.Exit(2)
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "list":
+		cat, err := plugin.NewCatalog(plugin.DefaultOperatorProfilesDir)
+		if err != nil {
+			// Operator-profile errors are non-fatal — still print
+			// the catalog we did load, but warn so the operator can
+			// fix the bad file.
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		}
+		profiles := cat.List()
+		if len(profiles) == 0 {
+			fmt.Println("no profiles in catalog")
+			return
+		}
+		fmt.Printf("%-20s %-10s %s\n", "NAME", "SOURCE", "DESCRIPTION")
+		for _, p := range profiles {
+			desc := strings.SplitN(strings.TrimSpace(p.Metadata.Description), "\n", 2)[0]
+			fmt.Printf("%-20s %-10s %s\n", p.Metadata.Name, p.Source, desc)
+		}
+	case "show":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "tierd-cli profile show <name>")
+			os.Exit(2)
+		}
+		cat, _ := plugin.NewCatalog(plugin.DefaultOperatorProfilesDir)
+		p, ok := cat.Get(rest[0])
+		if !ok {
+			fmt.Fprintf(os.Stderr, "profile %q not in catalog\n", rest[0])
+			os.Exit(1)
+		}
+		fmt.Printf("name:        %s\n", p.Metadata.Name)
+		fmt.Printf("source:      %s\n", p.Source)
+		fmt.Printf("description: %s\n", strings.TrimSpace(p.Metadata.Description))
+		if len(p.Container.HostConfig.Devices) > 0 {
+			fmt.Println("devices:")
+			for _, d := range p.Container.HostConfig.Devices {
+				fmt.Printf("  %s (%s)\n", d.Path, d.CgroupPermissions)
+			}
+		}
+		if len(p.LXC.RawConfig) > 0 {
+			fmt.Println("lxc.rawConfig:")
+			for _, r := range p.LXC.RawConfig {
+				fmt.Printf("  %s\n", r)
+			}
+		}
+		if len(p.Preflight.HostHas) > 0 {
+			fmt.Println("preflight.hostHas:")
+			for _, c := range p.Preflight.HostHas {
+				fmt.Printf("  %s (%s)\n", c.Path, c.Requirement)
+			}
+		}
+		if p.Container.HostConfig.PidsLimit != 0 {
+			fmt.Printf("pidsLimit:   %d\n", p.Container.HostConfig.PidsLimit)
+		}
+		if p.Container.HostConfig.OomScoreAdj != nil {
+			fmt.Printf("oomScoreAdj: %d\n", *p.Container.HostConfig.OomScoreAdj)
+		}
+	case "validate":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "tierd-cli profile validate <path-to-yaml>")
+			os.Exit(2)
+		}
+		data, err := os.ReadFile(rest[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read: %v\n", err)
+			os.Exit(1)
+		}
+		if _, err := plugin.ParseProfile(data); err != nil {
+			fmt.Fprintf(os.Stderr, "invalid: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("ok: %s\n", rest[0])
+	default:
+		fmt.Fprintf(os.Stderr, "tierd-cli profile: unknown subcommand %q\n", sub)
 		os.Exit(2)
 	}
 }
@@ -118,6 +230,170 @@ func openPluginInstaller() (*plugin.Installer, *db.Store, error) {
 	return plugin.NewInstaller(plugin.NewStore(store)), store, nil
 }
 
+// openPluginLifecycle opens the tierd database and a runtime client
+// pointed at smoothnas-runtime, and returns a Lifecycle that
+// composes them with a production nginx Proxy attached.
+// SMOOTHNAS_RUNTIME_SOCKET overrides the socket path (default
+// runtime.DefaultSocketPath); TIERD_DB overrides the DB path same
+// as openPluginInstaller. Caller defers store.Close().
+func openPluginLifecycle() (*plugin.Lifecycle, *db.Store, error) {
+	dbPath := os.Getenv("TIERD_DB")
+	if dbPath == "" {
+		dbPath = "/var/lib/tierd/tierd.db"
+	}
+	sock := os.Getenv("SMOOTHNAS_RUNTIME_SOCKET")
+	if sock == "" {
+		sock = runtime.DefaultSocketPath
+	}
+	store, err := db.Open(dbPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open db at %s: %w", dbPath, err)
+	}
+	if err := store.Migrate(); err != nil {
+		store.Close()
+		return nil, nil, fmt.Errorf("migrate: %w", err)
+	}
+	rt := runtime.NewClient(sock)
+	lc := plugin.NewLifecycle(plugin.NewStore(store), rt)
+	lc.SetProxy(plugin.NewProxy())
+	cat, err := plugin.NewCatalog(plugin.DefaultOperatorProfilesDir)
+	if err != nil {
+		// Operator-profile errors are surfaced but don't block —
+		// CLI lifecycle still works with the built-ins.
+		fmt.Fprintf(os.Stderr, "warning: profile catalog: %v\n", err)
+	}
+	if cat != nil {
+		lc.SetCatalog(cat)
+	}
+	return lc, store, nil
+}
+
+// volumeTierFlags is a flag.Value implementation that captures
+// repeated --volume-tier flags into a map of (volume name → tier
+// pool name). The CLI uses this for plugins where different volumes
+// land on different tiers.
+type volumeTierFlags map[string]string
+
+func (f *volumeTierFlags) String() string { return "" }
+func (f *volumeTierFlags) Set(v string) error {
+	i := -1
+	for j, c := range v {
+		if c == '=' {
+			i = j
+			break
+		}
+	}
+	if i <= 0 || i == len(v)-1 {
+		return fmt.Errorf("--volume-tier must be <volume>=<tier> (got %q)", v)
+	}
+	if *f == nil {
+		*f = volumeTierFlags{}
+	}
+	(*f)[v[:i]] = v[i+1:]
+	return nil
+}
+
+// pluginInstall handles `tierd-cli plugin install`. The flag set is
+// local to this verb so the CLI's other subcommands stay free of
+// install-only flags.
+func pluginInstall(args []string) {
+	fs := flag.NewFlagSet("plugin install", flag.ContinueOnError)
+	defaultTier := fs.String("tier", "", "default tier pool for tier-bound volumes (override per-volume with --volume-tier)")
+	var perVol volumeTierFlags
+	fs.Var(&perVol, "volume-tier", "per-volume tier override, repeatable: --volume-tier models=media")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	rest := fs.Args()
+	if len(rest) != 1 {
+		fmt.Fprintln(os.Stderr, "tierd-cli plugin install [--tier <pool>] [--volume-tier <vol>=<pool> ...] <manifest.yaml>")
+		os.Exit(2)
+	}
+	yamlBytes, err := os.ReadFile(rest[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read manifest: %v\n", err)
+		os.Exit(1)
+	}
+
+	inst, store, err := openPluginInstallerWithTiers()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	rec, err := inst.InstallWithOptions(yamlBytes, plugin.InstallOptions{
+		Tiers: plugin.TierAssignments{
+			Default:   *defaultTier,
+			PerVolume: map[string]string(perVol),
+		},
+	})
+	if err != nil {
+		// PreflightError surfaces per-volume detail; let it print as-is
+		// since its Error() already lists the offending volumes.
+		fmt.Fprintf(os.Stderr, "install: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("installed %s@%s (%s, %d instance%s)\n",
+		rec.Plugin.Name, rec.Plugin.Version, rec.Plugin.ArtifactType,
+		rec.Plugin.InstanceCount, plural(rec.Plugin.InstanceCount))
+}
+
+// openPluginInstallerWithTiers opens the tierd database and returns
+// an Installer with the TierProvider wired so tier-bound preflight
+// runs. The Demolisher is intentionally NOT attached here — install
+// doesn't need to talk to the runtime daemon.
+func openPluginInstallerWithTiers() (*plugin.Installer, *db.Store, error) {
+	dbPath := os.Getenv("TIERD_DB")
+	if dbPath == "" {
+		dbPath = "/var/lib/tierd/tierd.db"
+	}
+	store, err := db.Open(dbPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open db at %s: %w", dbPath, err)
+	}
+	if err := store.Migrate(); err != nil {
+		store.Close()
+		return nil, nil, fmt.Errorf("migrate: %w", err)
+	}
+	inst := plugin.NewInstaller(plugin.NewStore(store))
+	inst.SetTierProvider(store, plugin.StatAvail)
+	return inst, store, nil
+}
+
+// openPluginInstallerWithRuntime is the install/uninstall variant
+// that also wires a Lifecycle as the Demolisher. With this on, the
+// CLI's `plugin uninstall` will stop and remove containers + drop
+// the cached image before deleting the DB rows.
+func openPluginInstallerWithRuntime() (*plugin.Installer, *db.Store, error) {
+	dbPath := os.Getenv("TIERD_DB")
+	if dbPath == "" {
+		dbPath = "/var/lib/tierd/tierd.db"
+	}
+	sock := os.Getenv("SMOOTHNAS_RUNTIME_SOCKET")
+	if sock == "" {
+		sock = runtime.DefaultSocketPath
+	}
+	store, err := db.Open(dbPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open db at %s: %w", dbPath, err)
+	}
+	if err := store.Migrate(); err != nil {
+		store.Close()
+		return nil, nil, fmt.Errorf("migrate: %w", err)
+	}
+	pluginStore := plugin.NewStore(store)
+	rt := runtime.NewClient(sock)
+	lc := plugin.NewLifecycle(pluginStore, rt)
+	lc.SetProxy(plugin.NewProxy())
+	if cat, err := plugin.NewCatalog(plugin.DefaultOperatorProfilesDir); err == nil && cat != nil {
+		lc.SetCatalog(cat)
+	}
+	inst := plugin.NewInstaller(pluginStore)
+	inst.SetDemolisher(lc)
+	return inst, store, nil
+}
+
 func pluginCmd(args []string) {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "tierd-cli plugin: subcommand required")
@@ -129,29 +405,7 @@ func pluginCmd(args []string) {
 
 	switch sub {
 	case "install":
-		if len(rest) != 1 {
-			fmt.Fprintln(os.Stderr, "tierd-cli plugin install <manifest.yaml>")
-			os.Exit(2)
-		}
-		yamlBytes, err := os.ReadFile(rest[0])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "read manifest: %v\n", err)
-			os.Exit(1)
-		}
-		inst, store, err := openPluginInstaller()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%v\n", err)
-			os.Exit(1)
-		}
-		defer store.Close()
-		rec, err := inst.Install(yamlBytes)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "install: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("installed %s@%s (%s, %d instance%s)\n",
-			rec.Plugin.Name, rec.Plugin.Version, rec.Plugin.ArtifactType,
-			rec.Plugin.InstanceCount, plural(rec.Plugin.InstanceCount))
+		pluginInstall(rest)
 
 	case "list":
 		_, store, err := openPluginInstaller()
@@ -200,7 +454,7 @@ func pluginCmd(args []string) {
 			fmt.Fprintln(os.Stderr, "tierd-cli plugin uninstall <name>")
 			os.Exit(2)
 		}
-		inst, store, err := openPluginInstaller()
+		inst, store, err := openPluginInstallerWithRuntime()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
@@ -212,15 +466,62 @@ func pluginCmd(args []string) {
 		}
 		fmt.Printf("uninstalled %s\n", rest[0])
 
-	case "start", "stop", "restart":
-		fmt.Fprintf(os.Stderr, "tierd-cli plugin %s: lifecycle requires phase 02 (LXC2Docker integration); not yet implemented\n", sub)
-		os.Exit(1)
+	case "materialise", "materialize":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "tierd-cli plugin materialise <name>")
+			os.Exit(2)
+		}
+		lc, store, err := openPluginLifecycle()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		defer store.Close()
+		if err := lc.Materialise(context.Background(), rest[0]); err != nil {
+			fmt.Fprintf(os.Stderr, "materialise: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("materialised %s\n", rest[0])
+
+	case "start":
+		runLifecycleVerb("start", "started", rest, func(lc *plugin.Lifecycle, name string) error {
+			return lc.Start(context.Background(), name)
+		})
+	case "stop":
+		runLifecycleVerb("stop", "stopped", rest, func(lc *plugin.Lifecycle, name string) error {
+			return lc.Stop(context.Background(), name)
+		})
+	case "restart":
+		runLifecycleVerb("restart", "restarted", rest, func(lc *plugin.Lifecycle, name string) error {
+			return lc.Restart(context.Background(), name)
+		})
 
 	default:
 		fmt.Fprintf(os.Stderr, "tierd-cli plugin: unknown subcommand %q\n", sub)
 		usage()
 		os.Exit(2)
 	}
+}
+
+// runLifecycleVerb is the shared start/stop/restart shell. Past tense
+// is what gets printed since the verb has happened by the time we
+// print.
+func runLifecycleVerb(verb, past string, rest []string, fn func(*plugin.Lifecycle, string) error) {
+	if len(rest) != 1 {
+		fmt.Fprintf(os.Stderr, "tierd-cli plugin %s <name>\n", verb)
+		os.Exit(2)
+	}
+	lc, store, err := openPluginLifecycle()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+	if err := fn(lc, rest[0]); err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", verb, err)
+		os.Exit(1)
+	}
+	fmt.Printf("%s %s\n", past, rest[0])
 }
 
 func plural(n int) string {
