@@ -60,16 +60,19 @@ ACTION=="add|change", KERNEL=="md*", ATTR{queue/scheduler}="bfq"
 UDEV
 
 # Extend GRUB cmdline (last assignment wins when /etc/default/grub is sourced).
-# - drop console=tty0 so kernel printk does not go to the framebuffer VT;
-#   the operator interacts with the appliance through the tierd web UI,
-#   SSH, or the serial console (ttyS0). tty1 stays clean and only shows
-#   the getty login prompt.
-# - quiet + loglevel=3 + systemd.show_status=false suppress what little
-#   kernel/init noise still reaches the framebuffer before getty starts.
+# Keep the login VT clean by relying on quiet + loglevel=3 +
+# systemd.show_status=false. Do NOT pin the kernel console to ttyS0:
+# on hardware where the serial port has no reader (USB-serial adapter
+# with flow control, qemu socket without a connected client, or just
+# a box with no serial hardware at all) the kernel blocks during
+# initramfs init waiting for serial output to drain — boot wedges at
+# "Loading Linux ..." for many minutes. Operators who actually want
+# serial console boot can opt in via smoothiso's
+# SMOOTHISO_SERIAL_CONSOLE=1 install env var.
 cat >> "$TARGET/etc/default/grub" << 'GRUBCFG'
 
 # SmoothNAS: NAS-tuning kernel cmdline. Login VT stays clean.
-GRUB_CMDLINE_LINUX="console=ttyS0,115200n8 quiet loglevel=3 systemd.show_status=false transparent_hugepage=madvise numa_balancing=disable"
+GRUB_CMDLINE_LINUX="quiet loglevel=3 systemd.show_status=false transparent_hugepage=madvise numa_balancing=disable"
 GRUBCFG
 
 # journald: don't forward messages to /dev/console so the login VT is
