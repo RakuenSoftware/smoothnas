@@ -279,7 +279,7 @@ func (h *BackupHandler) createConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Parallelism < 1 {
-		req.Parallelism = 1
+		req.Parallelism = db.DefaultBackupParallelism
 	} else if req.Parallelism > 16 {
 		req.Parallelism = 16
 	}
@@ -355,7 +355,7 @@ func (h *BackupHandler) updateConfig(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	if req.Parallelism < 1 {
-		req.Parallelism = 1
+		req.Parallelism = db.DefaultBackupParallelism
 	} else if req.Parallelism > 16 {
 		req.Parallelism = 16
 	}
