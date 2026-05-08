@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useI18n } from '@rakuensoftware/smoothgui';
 import { api } from '../../api/api';
 import { extractError } from '../../utils/errors';
@@ -52,6 +53,7 @@ function stateKey(state: string): string {
 
 export default function Plugins() {
   const { t } = useI18n();
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [plugins, setPlugins] = useState<PluginRow[]>([]);
   const [error, setError] = useState('');
@@ -115,8 +117,7 @@ export default function Plugins() {
           </button>
           <button
             className="btn primary"
-            title={t('plugins.placeholder.installSoon')}
-            disabled
+            onClick={() => navigate('/plugins/install')}
           >
             {t('plugins.action.install')}
           </button>
