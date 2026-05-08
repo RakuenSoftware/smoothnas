@@ -58,6 +58,8 @@ func NewPluginsHandler(
 //	POST   /api/plugins/<name>/restart        lifecycle
 //	POST   /api/plugins/<name>/materialise    pull image + create containers
 //	PUT    /api/plugins/<name>/config         update plugin_config
+//	GET    /api/plugins/<name>/instances      per-instance state (phase 09)
+//	POST   /api/plugins/<name>/instances      scale to {count: N}    (phase 09)
 //	GET    /api/plugins/<name>/logs           SSE stream
 //	GET    /api/plugins/<name>/events         SSE stream
 func (h *PluginsHandler) Route(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +135,15 @@ func (h *PluginsHandler) routeNamed(w http.ResponseWriter, r *http.Request, rest
 			return
 		}
 		h.updateConfig(w, r, name)
+	case "instances":
+		switch r.Method {
+		case http.MethodGet:
+			h.listInstances(w, r, name)
+		case http.MethodPost:
+			h.scaleInstances(w, r, name)
+		default:
+			jsonMethodNotAllowed(w)
+		}
 	case "logs":
 		if r.Method != http.MethodGet {
 			jsonMethodNotAllowed(w)
@@ -603,5 +614,81 @@ func (h *PluginsHandler) streamLogs(w http.ResponseWriter, r *http.Request, name
 func (h *PluginsHandler) streamEvents(w http.ResponseWriter, _ *http.Request, _ string) {
 	jsonErrorCoded(w, "event stream not yet wired (follow-up)",
 		http.StatusNotImplemented, "plugins.events_not_implemented")
+}
+
+// listInstancesResponse mirrors what the UI needs for the Instances
+// tab — the per-instance rows plus the aggregate count and the flag
+// that tells the UI whether to render the scale slider.
+type listInstancesResponse struct {
+	Plugin       string               `json:"plugin"`
+	Count        int                  `json:"count"`
+	Configurable bool                 `json:"configurable"`
+	Instances    []plugin.InstanceRow `json:"instances"`
+}
+
+// listInstances returns the per-instance state for one plugin. The
+// data is already in the detail payload, but exposing a dedicated
+// endpoint keeps the UI's Instances tab from having to refetch the
+// whole detail (manifest + volumes + ports + config + …) just to
+// render a small table.
+func (h *PluginsHandler) listInstances(w http.ResponseWriter, _ *http.Request, name string) {
+	rec, err := h.store.Get(name)
+	if err != nil {
+		if errors.Is(err, plugin.ErrPluginNotFound) {
+			jsonErrorCoded(w, "plugin not found", http.StatusNotFound, "plugins.not_found")
+			return
+		}
+		serverError(w, err)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(listInstancesResponse{
+		Plugin:       rec.Plugin.Name,
+		Count:        rec.Plugin.InstanceCount,
+		Configurable: rec.Plugin.InstanceConfigurable,
+		Instances:    rec.Instances,
+	})
+}
+
+// scaleInstancesRequest is the body of POST /api/plugins/<name>/instances.
+type scaleInstancesRequest struct {
+	Count int `json:"count"`
+}
+
+// scaleInstances runs Lifecycle.Scale and returns the result. Errors
+// from the lifecycle map to stable codes the UI can localise:
+//
+//	plugins.scale.not_configurable           — manifest forbids scaling
+//	plugins.scale.boundary                   — refused to cross 1↔N
+//	plugins.scale.invalid_target             — target < 1 / missing
+//	plugins.scale.failed                     — runtime error during scale
+//	plugins.runtime_unavailable              — no Lifecycle wired
+//	plugins.not_found                        — typo'd plugin name
+func (h *PluginsHandler) scaleInstances(w http.ResponseWriter, r *http.Request, name string) {
+	if h.lifecycle == nil {
+		jsonErrorCoded(w, "runtime not configured", http.StatusServiceUnavailable, "plugins.runtime_unavailable")
+		return
+	}
+	var req scaleInstancesRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonInvalidRequestBody(w)
+		return
+	}
+	res, err := h.lifecycle.Scale(r.Context(), name, req.Count)
+	if err != nil {
+		switch {
+		case errors.Is(err, plugin.ErrPluginNotFound):
+			jsonErrorCoded(w, "plugin not found", http.StatusNotFound, "plugins.not_found")
+		case errors.Is(err, plugin.ErrPluginNotConfigurable):
+			jsonErrorCoded(w, err.Error(), http.StatusConflict, "plugins.scale.not_configurable")
+		case errors.Is(err, plugin.ErrScaleAcrossSingletonBoundary):
+			jsonErrorCoded(w, err.Error(), http.StatusBadRequest, "plugins.scale.boundary")
+		case errors.Is(err, plugin.ErrScaleTargetInvalid):
+			jsonErrorCoded(w, err.Error(), http.StatusBadRequest, "plugins.scale.invalid_target")
+		default:
+			jsonErrorCoded(w, err.Error(), http.StatusInternalServerError, "plugins.scale.failed")
+		}
+		return
+	}
+	_ = json.NewEncoder(w).Encode(res)
 }
 
