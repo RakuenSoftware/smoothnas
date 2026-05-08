@@ -4,6 +4,7 @@ import { useI18n } from '@rakuensoftware/smoothgui';
 import { api } from '../../api/api';
 import { extractError } from '../../utils/errors';
 import Spinner from '../../components/Spinner/Spinner';
+import { pluginCatalog, type CatalogEntry } from '../../data/pluginCatalog';
 
 // ParsedManifest matches the JSON shape POST /api/plugins/parse
 // returns. Loose typing — the backend validates and the wizard
@@ -307,18 +308,99 @@ function SourceStep({
   text, onChange, busy,
 }: { text: string; onChange: (v: string) => void; busy: boolean }) {
   const { t } = useI18n();
+  // 'catalog' is the default — point and click on a known plugin.
+  // 'paste' is the fallback for manifests we don't ship a tile for
+  // (private builds, sideloaded forks, in-development plugins).
+  // Toggling to 'paste' preserves any text the operator typed; toggling
+  // back to 'catalog' clears the textarea so a subsequent tile click
+  // doesn't merge into stale paste content.
+  const [mode, setMode] = useState<'catalog' | 'paste'>('catalog');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  function chooseCatalogEntry(entry: CatalogEntry) {
+    setSelectedId(entry.id);
+    onChange(entry.manifestYaml);
+  }
+
   return (
     <>
-      <h2>{t('plugins.install.source.heading')}</h2>
-      <p>{t('plugins.install.source.description')}</p>
-      <textarea
-        className="wizard-textarea"
-        value={text}
-        onChange={e => onChange(e.target.value)}
-        placeholder={t('plugins.install.source.placeholder')}
-        spellCheck={false}
-        disabled={busy}
-      />
+      <div className="wizard-source-modes">
+        <button
+          type="button"
+          className={mode === 'catalog' ? 'tab active' : 'tab'}
+          onClick={() => setMode('catalog')}
+          disabled={busy}
+        >
+          {t('plugins.install.source.modeCatalog')}
+        </button>
+        <button
+          type="button"
+          className={mode === 'paste' ? 'tab active' : 'tab'}
+          onClick={() => {
+            setMode('paste');
+            setSelectedId(null);
+          }}
+          disabled={busy}
+        >
+          {t('plugins.install.source.modePaste')}
+        </button>
+      </div>
+
+      {mode === 'catalog' ? (
+        <>
+          <h2>{t('plugins.install.source.catalog.heading')}</h2>
+          <p>{t('plugins.install.source.catalog.description')}</p>
+          <ul className="wizard-plugin-catalog">
+            {pluginCatalog.map(entry => (
+              <li
+                key={entry.id}
+                className={
+                  'wizard-plugin-card' +
+                  (selectedId === entry.id ? ' selected' : '')
+                }
+              >
+                <button
+                  type="button"
+                  className="wizard-plugin-card-button"
+                  onClick={() => chooseCatalogEntry(entry)}
+                  disabled={busy}
+                >
+                  <div className="wizard-plugin-card-header">
+                    <span className="wizard-plugin-card-name">{entry.name}</span>
+                    <span className="wizard-plugin-card-vendor">{entry.vendor}</span>
+                  </div>
+                  <p className="wizard-plugin-card-description">{entry.description}</p>
+                  {entry.tags && entry.tags.length > 0 && (
+                    <div className="wizard-plugin-card-tags">
+                      {entry.tags.map(tag => (
+                        <span key={tag} className="wizard-plugin-card-tag">{tag}</span>
+                      ))}
+                    </div>
+                  )}
+                </button>
+              </li>
+            ))}
+          </ul>
+          {selectedId && (
+            <p className="wizard-plugin-catalog-hint">
+              {t('plugins.install.source.catalog.selectedHint')}
+            </p>
+          )}
+        </>
+      ) : (
+        <>
+          <h2>{t('plugins.install.source.heading')}</h2>
+          <p>{t('plugins.install.source.description')}</p>
+          <textarea
+            className="wizard-textarea"
+            value={text}
+            onChange={e => onChange(e.target.value)}
+            placeholder={t('plugins.install.source.placeholder')}
+            spellCheck={false}
+            disabled={busy}
+          />
+        </>
+      )}
     </>
   );
 }
