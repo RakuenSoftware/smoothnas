@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -49,11 +50,52 @@ const (
 )
 
 // Manifest matches the manifest.json uploaded with each release.
+//
+// Releases are multi-arch: a single release tag ships both `tierd-amd64`
+// and `tierd-arm64`, plus arch-independent UI assets. The manifest
+// carries one SHA-256 per architecture. The legacy single-arch field
+// (`tierd_sha256`) is preserved for back-compat with old manuals
+// produced before the multi-arch split — `TierdSHAForArch` falls
+// back to it when an arch-specific field is empty.
 type Manifest struct {
-	Version  string `json:"version"`
-	Channel  string `json:"channel"`
-	TierdSHA string `json:"tierd_sha256"`
-	UISHA    string `json:"ui_sha256"`
+	Version       string `json:"version"`
+	Channel       string `json:"channel"`
+	TierdAmd64SHA string `json:"tierd_amd64_sha256,omitempty"`
+	TierdArm64SHA string `json:"tierd_arm64_sha256,omitempty"`
+	TierdSHA      string `json:"tierd_sha256,omitempty"` // legacy single-arch fallback
+	UISHA         string `json:"ui_sha256"`
+}
+
+// TierdSHAForArch returns the manifest's SHA-256 for the given GOARCH,
+// or the legacy single-arch hash if the arch-specific field is empty.
+// Returns "" if the manifest has neither, which lets the caller fail
+// with a clear "no checksum for arch" error rather than silently
+// passing a verify against an empty digest.
+func (m *Manifest) TierdSHAForArch(arch string) string {
+	switch arch {
+	case "amd64":
+		if m.TierdAmd64SHA != "" {
+			return m.TierdAmd64SHA
+		}
+	case "arm64":
+		if m.TierdArm64SHA != "" {
+			return m.TierdArm64SHA
+		}
+	}
+	return m.TierdSHA
+}
+
+// tierdAssetNameForArch returns the release-asset filename to download
+// for the given GOARCH. Multi-arch releases ship `tierd-amd64` /
+// `tierd-arm64`; older single-arch releases shipped just `tierd`.
+// Callers should try the arch-specific name first and fall back to
+// the legacy name when running against an old release.
+func tierdAssetNameForArch(arch string) string {
+	switch arch {
+	case "amd64", "arm64":
+		return "tierd-" + arch
+	}
+	return "tierd"
 }
 
 // ReleaseInfo is the public-facing release metadata.
@@ -87,6 +129,20 @@ type ApplyProgress struct {
 	Error string `json:"error,omitempty"`
 }
 
+// appliedVersionPath stores the manifest.Version of the most recent
+// successful update, so the UI and updater can show "what's actually
+// installed" rather than the compile-time string baked into the binary.
+//
+// Release pipelines sometimes inject a stable semver into the binary
+// shipped by a *testing* release (because the build records the latest
+// stable tag, not the prerelease tag), so the binary can self-report
+// `0.0.46` while the operator actually installed
+// `testing-2026.0508.1253-c7718a8`. That mismatch made cross-scheme
+// version comparison and the UI both lie. Persisting manifest.Version
+// here is authoritative — it's the version string of the release the
+// updater actually applied.
+var appliedVersionPath = "/var/lib/tierd/applied-version"
+
 // Updater checks for and applies SmoothNAS updates from GitHub Releases.
 type Updater struct {
 	currentVersion string
@@ -113,6 +169,39 @@ func New(currentVersion string) *Updater {
 	return &Updater{
 		currentVersion: currentVersion,
 		githubBaseURL:  "https://api.github.com",
+	}
+}
+
+// effectiveCurrentVersion returns the most authoritative current-version
+// string: the manifest.Version of the last successfully applied update
+// (read from appliedVersionPath) if present, otherwise the build-time
+// `currentVersion` baked into the running binary. See appliedVersionPath
+// docstring for why this matters.
+func (u *Updater) effectiveCurrentVersion() string {
+	if data, err := os.ReadFile(appliedVersionPath); err == nil {
+		if v := strings.TrimSpace(string(data)); v != "" {
+			return v
+		}
+	}
+	return u.currentVersion
+}
+
+// writeAppliedVersion persists `v` as the version of the most recent
+// successful update. Best-effort: a write failure is logged but does not
+// fail the update (the binary install already happened, and the only
+// downstream cost of a stale file is the UI showing the build-time
+// version until the next successful apply).
+func writeAppliedVersion(v string) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(appliedVersionPath), 0o755); err != nil {
+		log.Printf("updater: persist applied version: mkdir: %v", err)
+		return
+	}
+	if err := os.WriteFile(appliedVersionPath, []byte(v+"\n"), 0o644); err != nil {
+		log.Printf("updater: persist applied version: write: %v", err)
 	}
 }
 
@@ -260,7 +349,7 @@ func (u *Updater) Check() (*UpdateStatus, error) {
 	}
 
 	status := &UpdateStatus{
-		CurrentVersion: normalizeReleaseVersion(u.currentVersion),
+		CurrentVersion: normalizeReleaseVersion(u.effectiveCurrentVersion()),
 		Channel:        u.Channel(),
 	}
 
@@ -372,12 +461,18 @@ func (u *Updater) doApply() error {
 		return fmt.Errorf("fetch release: %w", err)
 	}
 
-	// Find assets.
+	// Find assets. Multi-arch releases ship `tierd-{amd64,arm64}`;
+	// older single-arch releases shipped `tierd`. Try the arch-specific
+	// name first, fall back to the legacy name.
+	arch := runtime.GOARCH
 	manifestAsset := findAsset(rel.Assets, "manifest.json")
-	binaryAsset := findAsset(rel.Assets, "tierd")
+	binaryAsset := findAsset(rel.Assets, tierdAssetNameForArch(arch))
+	if binaryAsset == nil {
+		binaryAsset = findAsset(rel.Assets, "tierd")
+	}
 	uiAsset := findAsset(rel.Assets, "tierd-ui.tar.gz")
 	if manifestAsset == nil || binaryAsset == nil || uiAsset == nil {
-		return fmt.Errorf("release is missing required assets (need manifest.json, tierd, tierd-ui.tar.gz)")
+		return fmt.Errorf("release is missing required assets (need manifest.json, tierd-%s or tierd, tierd-ui.tar.gz)", arch)
 	}
 
 	// Prepare staging directory.
@@ -417,8 +512,13 @@ func (u *Updater) doApply() error {
 		return fmt.Errorf("parse manifest: %w", err)
 	}
 
-	// Verify checksums.
-	if err := verifyChecksum(binaryStagePath, manifest.TierdSHA); err != nil {
+	// Verify checksums against the per-arch manifest entry.
+	binarySHA := manifest.TierdSHAForArch(arch)
+	if binarySHA == "" {
+		return fmt.Errorf("manifest carries no checksum for arch %q (have amd64=%t arm64=%t legacy=%t)",
+			arch, manifest.TierdAmd64SHA != "", manifest.TierdArm64SHA != "", manifest.TierdSHA != "")
+	}
+	if err := verifyChecksum(binaryStagePath, binarySHA); err != nil {
 		return fmt.Errorf("binary checksum: %w", err)
 	}
 	if err := verifyChecksum(uiStagePath, manifest.UISHA); err != nil {
@@ -437,6 +537,11 @@ func (u *Updater) doApply() error {
 	if err := replaceUI(uiStagePath, uiPath); err != nil {
 		return fmt.Errorf("replace UI: %w", err)
 	}
+
+	// Record the version we just applied so subsequent checks reflect
+	// what the operator actually installed, not whatever the binary's
+	// compile-time version string happens to say.
+	writeAppliedVersion(manifest.Version)
 
 	// Ensure required OS packages are present. apt-get install is a no-op
 	// for packages that are already installed, so this is safe to run every time.
@@ -513,8 +618,16 @@ func (u *Updater) doManualApply(manifestData, binaryData, uiData []byte) error {
 		return fmt.Errorf("write UI archive: %w", err)
 	}
 
-	// Verify checksums.
-	if err := verifyChecksum(binaryStagePath, manifest.TierdSHA); err != nil {
+	// Verify checksums against the per-arch manifest entry. The caller
+	// is expected to have uploaded the binary matching this host's arch;
+	// we don't try to detect mismatch here, only validate the digest.
+	arch := runtime.GOARCH
+	binarySHA := manifest.TierdSHAForArch(arch)
+	if binarySHA == "" {
+		return fmt.Errorf("manifest carries no checksum for arch %q (have amd64=%t arm64=%t legacy=%t)",
+			arch, manifest.TierdAmd64SHA != "", manifest.TierdArm64SHA != "", manifest.TierdSHA != "")
+	}
+	if err := verifyChecksum(binaryStagePath, binarySHA); err != nil {
 		return fmt.Errorf("binary checksum: %w", err)
 	}
 	if err := verifyChecksum(uiStagePath, manifest.UISHA); err != nil {
@@ -530,6 +643,8 @@ func (u *Updater) doManualApply(manifestData, binaryData, uiData []byte) error {
 	if err := replaceUI(uiStagePath, uiPath); err != nil {
 		return fmt.Errorf("replace UI: %w", err)
 	}
+
+	writeAppliedVersion(manifest.Version)
 
 	EnsureSystemPackages()
 

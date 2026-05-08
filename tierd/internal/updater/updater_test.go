@@ -17,6 +17,120 @@ import (
 	sgauth "github.com/RakuenSoftware/smoothgui/auth"
 )
 
+func withAppliedVersionPath(t *testing.T, path string) {
+	t.Helper()
+	original := appliedVersionPath
+	appliedVersionPath = path
+	t.Cleanup(func() { appliedVersionPath = original })
+}
+
+func TestEffectiveCurrentVersionFallsBackToBuildTime(t *testing.T) {
+	withAppliedVersionPath(t, filepath.Join(t.TempDir(), "applied-version"))
+	u := New("0.0.0-dev")
+	if got := u.effectiveCurrentVersion(); got != "0.0.0-dev" {
+		t.Fatalf("missing file: got %q, want build-time fallback %q", got, "0.0.0-dev")
+	}
+}
+
+func TestEffectiveCurrentVersionPrefersAppliedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "applied-version")
+	withAppliedVersionPath(t, path)
+
+	if err := os.WriteFile(path, []byte("  2026.0508.1253-c7718a8\n  "), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	u := New("0.0.0-dev")
+	if got := u.effectiveCurrentVersion(); got != "2026.0508.1253-c7718a8" {
+		t.Fatalf("with file: got %q, want trimmed file content", got)
+	}
+
+	// Empty file → fall back to build-time.
+	if err := os.WriteFile(path, []byte("\n"), 0o644); err != nil {
+		t.Fatalf("seed empty: %v", err)
+	}
+	if got := u.effectiveCurrentVersion(); got != "0.0.0-dev" {
+		t.Fatalf("empty file: got %q, want build-time fallback", got)
+	}
+}
+
+func TestWriteAppliedVersionCreatesParentDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nested", "deeper", "applied-version")
+	withAppliedVersionPath(t, path)
+
+	writeAppliedVersion("v0.0.46")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(data)), "v0.0.46"; got != want {
+		t.Fatalf("file content: got %q, want %q", got, want)
+	}
+
+	// Empty input is a no-op (don't clobber any existing record).
+	writeAppliedVersion("")
+	if data, _ := os.ReadFile(path); strings.TrimSpace(string(data)) != "v0.0.46" {
+		t.Fatal("empty input clobbered existing applied-version file")
+	}
+}
+
+func TestTierdAssetNameForArch(t *testing.T) {
+	cases := map[string]string{
+		"amd64": "tierd-amd64",
+		"arm64": "tierd-arm64",
+		"":      "tierd",
+		"riscv": "tierd", // unknown architectures fall back to legacy single-arch name
+	}
+	for arch, want := range cases {
+		if got := tierdAssetNameForArch(arch); got != want {
+			t.Errorf("tierdAssetNameForArch(%q) = %q, want %q", arch, got, want)
+		}
+	}
+}
+
+func TestManifestTierdSHAForArch(t *testing.T) {
+	multi := Manifest{TierdAmd64SHA: "AAA", TierdArm64SHA: "BBB"}
+	if got := multi.TierdSHAForArch("amd64"); got != "AAA" {
+		t.Errorf("multi.amd64 = %q, want AAA", got)
+	}
+	if got := multi.TierdSHAForArch("arm64"); got != "BBB" {
+		t.Errorf("multi.arm64 = %q, want BBB", got)
+	}
+	if got := multi.TierdSHAForArch("riscv"); got != "" {
+		t.Errorf("multi.riscv = %q, want \"\"", got)
+	}
+
+	// Legacy single-arch manifest (`tierd_sha256` only) — both arches
+	// fall through to the legacy hash.
+	legacy := Manifest{TierdSHA: "OLD"}
+	if got := legacy.TierdSHAForArch("amd64"); got != "OLD" {
+		t.Errorf("legacy.amd64 = %q, want OLD", got)
+	}
+	if got := legacy.TierdSHAForArch("arm64"); got != "OLD" {
+		t.Errorf("legacy.arm64 = %q, want OLD", got)
+	}
+
+	// Mixed: arch-specific takes precedence, legacy used only if arch field empty.
+	mixed := Manifest{TierdAmd64SHA: "AAA", TierdSHA: "OLD"}
+	if got := mixed.TierdSHAForArch("amd64"); got != "AAA" {
+		t.Errorf("mixed.amd64 = %q, want AAA", got)
+	}
+	if got := mixed.TierdSHAForArch("arm64"); got != "OLD" {
+		t.Errorf("mixed.arm64 (no arm64 field, has legacy) = %q, want OLD", got)
+	}
+
+	// Real-shape manifest decoded from JSON to lock the wire format.
+	raw := `{"version":"v1","tierd_amd64_sha256":"AAA","tierd_arm64_sha256":"BBB","ui_sha256":"UUU"}`
+	var m Manifest
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if m.TierdAmd64SHA != "AAA" || m.TierdArm64SHA != "BBB" || m.UISHA != "UUU" {
+		t.Fatalf("decoded manifest fields wrong: %+v", m)
+	}
+}
+
 func withChannelFilePath(t *testing.T, path string) {
 	t.Helper()
 	original := channelFilePath
