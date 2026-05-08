@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -258,37 +259,42 @@ func fetchLatestPrerelease(baseURL, owner, repo string) (*ghRelease, error) {
 // three updater artifacts needed for direct installation. It prefers testing
 // prereleases so the JBailes channel tracks the fork's testing line, and falls
 // back to any artifact-bearing release if no such prerelease exists.
+//
+// Multi-arch releases ship `tierd-amd64` / `tierd-arm64`; older single-arch
+// releases shipped `tierd`. We accept either as long as one matches this
+// host's architecture.
 func fetchLatestArtifactRelease(baseURL, owner, repo string) (*ghRelease, error) {
 	releases, err := fetchReleases(baseURL, owner, repo, true)
 	if err != nil {
 		return nil, err
 	}
+	hasArtifacts := func(assets []ghAsset) bool {
+		if findAssetURL(assets, "manifest.json") == "" {
+			return false
+		}
+		if findAssetURL(assets, "tierd-ui.tar.gz") == "" {
+			return false
+		}
+		// Accept a multi-arch release that includes this host's binary
+		// or a legacy single-arch release that includes plain `tierd`.
+		archAsset := tierdAssetNameForArch(runtime.GOARCH)
+		if findAssetURL(assets, archAsset) == "" && findAssetURL(assets, "tierd") == "" {
+			return false
+		}
+		return true
+	}
 	for i := range releases {
 		if !releases[i].Prerelease || !strings.HasPrefix(releases[i].TagName, "testing-") {
 			continue
 		}
-		if findAssetURL(releases[i].Assets, "manifest.json") == "" {
-			continue
+		if hasArtifacts(releases[i].Assets) {
+			return &releases[i], nil
 		}
-		if findAssetURL(releases[i].Assets, "tierd") == "" {
-			continue
-		}
-		if findAssetURL(releases[i].Assets, "tierd-ui.tar.gz") == "" {
-			continue
-		}
-		return &releases[i], nil
 	}
 	for i := range releases {
-		if findAssetURL(releases[i].Assets, "manifest.json") == "" {
-			continue
+		if hasArtifacts(releases[i].Assets) {
+			return &releases[i], nil
 		}
-		if findAssetURL(releases[i].Assets, "tierd") == "" {
-			continue
-		}
-		if findAssetURL(releases[i].Assets, "tierd-ui.tar.gz") == "" {
-			continue
-		}
-		return &releases[i], nil
 	}
 	return nil, fmt.Errorf("no release with update artifacts found")
 }
