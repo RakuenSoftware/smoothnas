@@ -146,6 +146,8 @@ func (h *SharingHandler) Route(w http.ResponseWriter, r *http.Request) {
 		h.routeISCSI(w, r)
 	case path == "/api/filesystem/paths" || path == "/api/filesystem/paths/":
 		h.listFilesystemPaths(w, r)
+	case path == "/api/filesystem/tier-paths" || path == "/api/filesystem/tier-paths/":
+		h.listFilesystemTierPaths(w, r)
 	case path == "/api/filesystem/browse" || path == "/api/filesystem/browse/":
 		h.browseFilesystem(w, r)
 	default:
@@ -396,7 +398,7 @@ func (h *SharingHandler) createSMBShare(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	path, err := h.resolveDirectorySharePath(req.Path, req.Name)
+	path, err := h.resolveNewSMBSharePath(req.Path, req.Name)
 	if err != nil {
 		jsonErrorCoded(w, err.Error(), http.StatusBadRequest, "sharing.tier_root_not_shareable")
 		return
@@ -799,6 +801,23 @@ func (h *SharingHandler) resolveDirectorySharePath(path, preferredName string) (
 	}
 
 	return "", fmt.Errorf("tier root %s is internal and cannot be shared directly; choose a subdirectory", clean)
+}
+
+func (h *SharingHandler) resolveNewSMBSharePath(path, shareName string) (string, error) {
+	clean := filepath.Clean(path)
+	roots, err := h.internalTierRoots()
+	if err != nil {
+		return "", err
+	}
+	if _, ok := roots[clean]; !ok {
+		return clean, nil
+	}
+
+	child := filepath.Join(clean, shareName)
+	if err := os.MkdirAll(child, 0o775); err != nil {
+		return "", fmt.Errorf("create SMB share directory %s: %w", child, err)
+	}
+	return child, nil
 }
 
 func (h *SharingHandler) validateFileBackingNotInTierRoot(path string) error {
@@ -1422,6 +1441,70 @@ type filesystemPath struct {
 	Path   string `json:"path"`
 	Source string `json:"source"` // "zfs", "mdadm", or "tier"
 	Name   string `json:"name"`   // dataset, array, or tier name
+}
+
+func (h *SharingHandler) listFilesystemTierPaths(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonMethodNotAllowed(w)
+		return
+	}
+
+	paths, err := h.filesystemTierPaths()
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if paths == nil {
+		paths = []filesystemPath{}
+	}
+	json.NewEncoder(w).Encode(paths)
+}
+
+func (h *SharingHandler) filesystemTierPaths() ([]filesystemPath, error) {
+	var paths []filesystemPath
+	seen := map[string]struct{}{}
+	add := func(path, source, name string) {
+		if path == "" {
+			return
+		}
+		path = filepath.Clean(path)
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, filesystemPath{
+			Path:   path,
+			Source: source,
+			Name:   name,
+		})
+	}
+
+	tiers, err := h.store.ListTierInstances()
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range tiers {
+		if t.State != db.TierPoolStateHealthy && t.State != db.TierPoolStateDegraded {
+			continue
+		}
+		add(t.MountPoint, "tier", t.Name)
+	}
+
+	pools, err := h.store.ListSmoothfsPools()
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range pools {
+		add(p.Mountpoint, "tier", p.Name)
+	}
+
+	sort.Slice(paths, func(i, j int) bool {
+		if paths[i].Name == paths[j].Name {
+			return paths[i].Path < paths[j].Path
+		}
+		return paths[i].Name < paths[j].Name
+	})
+	return paths, nil
 }
 
 func (h *SharingHandler) listFilesystemPaths(w http.ResponseWriter, r *http.Request) {
