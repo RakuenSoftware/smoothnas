@@ -68,6 +68,35 @@ func TestFilesystemPathsExposeTierChildrenNotTierRoot(t *testing.T) {
 	}
 }
 
+func TestFilesystemTierPathsExposeTierRootsOnly(t *testing.T) {
+	h := newTestSharingHandler(t)
+	root, dataPath := seedHealthyTierRoot(t, h, "media", "storage")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/filesystem/tier-paths", nil)
+	w := httptest.NewRecorder()
+	h.Route(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var paths []filesystemPath
+	if err := json.NewDecoder(w.Body).Decode(&paths); err != nil {
+		t.Fatalf("decode paths: %v", err)
+	}
+	foundRoot := false
+	for _, p := range paths {
+		if p.Path == dataPath {
+			t.Fatalf("tier path selector exposed share child instead of tier root: %#v", paths)
+		}
+		if p.Path == root && p.Source == "tier" && p.Name == "media" {
+			foundRoot = true
+		}
+	}
+	if !foundRoot {
+		t.Fatalf("tier paths = %#v, want tier root %s", paths, root)
+	}
+}
+
 func TestSMBShareOnTierRootResolvesToDataChild(t *testing.T) {
 	h := newTestSharingHandler(t)
 	root, dataPath := seedHealthyTierRoot(t, h, "media", "storage")
@@ -114,6 +143,45 @@ func TestSMBShareOnTierRootResolvesToDataChild(t *testing.T) {
 	}
 	if len(listed) != 1 || listed[0].Path != dataPath {
 		t.Fatalf("listed SMB shares = %#v, want effective path %q", listed, dataPath)
+	}
+}
+
+func TestSMBShareOnTierRootCreatesNamedChild(t *testing.T) {
+	h := newTestSharingHandler(t)
+	root, _ := seedHealthyTierRoot(t, h, "media", "storage")
+	pbsPath := filepath.Join(root, "PBS")
+
+	origWrite := writeSMBConfig
+	t.Cleanup(func() { writeSMBConfig = origWrite })
+	var generated []smb.Share
+	writeSMBConfig = func(shares []smb.Share, hostname string, opts smb.Options) error {
+		generated = append([]smb.Share(nil), shares...)
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/smb/shares", strings.NewReader(`{
+		"name":"PBS",
+		"path":"`+root+`",
+		"guest_ok":true
+	}`))
+	w := httptest.NewRecorder()
+	h.Route(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var created db.SmbShare
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created share: %v", err)
+	}
+	if created.Path != pbsPath {
+		t.Fatalf("created path = %q, want %q", created.Path, pbsPath)
+	}
+	if st, err := os.Stat(pbsPath); err != nil || !st.IsDir() {
+		t.Fatalf("created SMB share directory stat = %#v, %v; want directory", st, err)
+	}
+	if len(generated) != 1 || generated[0].Name != "PBS" || generated[0].Path != pbsPath {
+		t.Fatalf("generated SMB shares = %#v, want PBS path %q", generated, pbsPath)
 	}
 }
 

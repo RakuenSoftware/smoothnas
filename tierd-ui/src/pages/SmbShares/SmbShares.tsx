@@ -15,7 +15,7 @@ export default function SmbShares() {
   const [updatingConfig, setUpdatingConfig] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [newShare, setNewShare] = useState({ name: '', path: '', read_only: false, guest_ok: false });
-  const [paths, setPaths] = useState<any[]>([]);
+  const [tiers, setTiers] = useState<any[]>([]);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadData(); loadPaths(); }, []);
@@ -32,7 +32,7 @@ export default function SmbShares() {
   }
 
   function loadPaths() {
-    api.getFilesystemPaths().then(setPaths).catch(() => {});
+    api.getFilesystemTierPaths().then(setTiers).catch(() => {});
   }
 
   function toggleProtocol() {
@@ -102,10 +102,10 @@ export default function SmbShares() {
           <h3>{t('smb.create.title')}</h3>
           <div className="form-row">
             <label>{t('smb.field.shareName')} <input value={newShare.name} onChange={e => setNewShare(p => ({ ...p, name: e.target.value }))} /></label>
-            <label>{t('smb.field.path')}
+            <label>{t('smb.field.tier')}
               <select value={newShare.path} onChange={e => setNewShare(p => ({ ...p, path: e.target.value }))}>
-                <option value="">{t('smb.field.pathPlaceholder')}</option>
-                {paths.map((p: any) => <option key={p.path} value={p.path}>{p.name} ({p.path})</option>)}
+                <option value="">{t('smb.field.tierPlaceholder')}</option>
+                {tiers.map((p: any) => <option key={p.path} value={p.path}>{p.name} ({p.path})</option>)}
               </select>
             </label>
           </div>

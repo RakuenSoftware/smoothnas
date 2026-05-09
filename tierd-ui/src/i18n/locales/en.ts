@@ -405,6 +405,8 @@ const en: LanguageTranslations = {
   'smb.field.shareName': 'Share Name',
   'smb.field.path': 'Path',
   'smb.field.pathPlaceholder': '— select path —',
+  'smb.field.tier': 'Tier',
+  'smb.field.tierPlaceholder': '— select tier —',
   'smb.field.readOnly': 'Read Only',
   'smb.field.guestOk': 'Guest OK',
   'smb.col.readOnly': 'Read Only',
