@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+func section(config, name string) string {
+	header := "[" + name + "]\n"
+	start := strings.Index(config, header)
+	if start == -1 {
+		return ""
+	}
+	rest := config[start:]
+	next := strings.Index(rest[len(header):], "\n[")
+	if next == -1 {
+		return rest
+	}
+	return rest[:len(header)+next]
+}
+
 func TestValidateShareName(t *testing.T) {
 	valid := []string{"data", "Media", "share-1", "backup_2026"}
 	for _, name := range valid {
@@ -126,6 +140,8 @@ func TestGenerateConfigWithShares(t *testing.T) {
 	}
 
 	config := GenerateConfigWithOptions(shares, "mynas", Options{SmoothFSVFS: true})
+	dataSection := section(config, "data")
+	publicSection := section(config, "public")
 
 	// Check global section.
 	if !strings.Contains(config, "[global]") {
@@ -136,29 +152,32 @@ func TestGenerateConfigWithShares(t *testing.T) {
 	}
 
 	// Check data share.
-	if !strings.Contains(config, "[data]") {
+	if dataSection == "" {
 		t.Error("missing [data] section")
 	}
-	if !strings.Contains(config, "path = /mnt/data") {
+	if !strings.Contains(dataSection, "path = /mnt/data") {
 		t.Error("missing data path")
 	}
-	if !strings.Contains(config, "read only = no") {
+	if !strings.Contains(dataSection, "read only = no") {
 		t.Error("data should be read-write")
 	}
-	if !strings.Contains(config, "guest ok = no") {
+	if !strings.Contains(dataSection, "guest ok = no") {
 		t.Error("data should not allow guests")
 	}
-	if !strings.Contains(config, "comment = Main data share") {
+	if strings.Contains(dataSection, "force user = root") {
+		t.Error("non-guest shares should not force root")
+	}
+	if !strings.Contains(dataSection, "comment = Main data share") {
 		t.Error("missing data comment")
 	}
-	if !strings.Contains(config, "vfs objects = smoothfs") {
+	if !strings.Contains(dataSection, "vfs objects = smoothfs") {
 		t.Error("shares should load the smoothfs Samba VFS module")
 	}
-	if !strings.Contains(config, "smoothfs:lease watcher = no") ||
-		!strings.Contains(config, "smoothfs:stable fileid = no") {
+	if !strings.Contains(dataSection, "smoothfs:lease watcher = no") ||
+		!strings.Contains(dataSection, "smoothfs:stable fileid = no") {
 		t.Error("smoothfs VFS expensive metadata features should be opt-in")
 	}
-	if !strings.Contains(config, "ea support = yes") {
+	if !strings.Contains(dataSection, "ea support = yes") {
 		t.Error("shares should enable extended attributes for smoothfs metadata")
 	}
 	if !strings.Contains(config, "kernel oplocks = no") {
@@ -166,16 +185,19 @@ func TestGenerateConfigWithShares(t *testing.T) {
 	}
 
 	// Check public share.
-	if !strings.Contains(config, "[public]") {
+	if publicSection == "" {
 		t.Error("missing [public] section")
 	}
-	if !strings.Contains(config, "read only = yes") {
+	if !strings.Contains(publicSection, "read only = yes") {
 		t.Error("public should be read-only")
 	}
-	if !strings.Contains(config, "guest ok = yes") {
+	if !strings.Contains(publicSection, "guest ok = yes") {
 		t.Error("public should allow guests")
 	}
-	if !strings.Contains(config, "valid users = alice bob") {
+	if !strings.Contains(publicSection, "force user = root") {
+		t.Error("guest shares should force root so appliance-owned mount paths remain accessible")
+	}
+	if !strings.Contains(publicSection, "valid users = alice bob") {
 		t.Error("missing valid users")
 	}
 }
@@ -186,8 +208,8 @@ func TestGenerateConfigSecurity(t *testing.T) {
 	if !strings.Contains(config, "security = user") {
 		t.Error("missing security = user")
 	}
-	if !strings.Contains(config, "map to guest = never") {
-		t.Error("missing map to guest = never")
+	if !strings.Contains(config, "map to guest = Bad User") {
+		t.Error("missing map to guest = Bad User")
 	}
 	if strings.Contains(config, "vfs objects = smoothfs") {
 		t.Error("config should not reference smoothfs VFS when the module is unavailable")
