@@ -85,7 +85,7 @@ func GenerateConfigWithOptions(shares []Share, hostname string, opts Options) st
 	b.WriteString("   workgroup = WORKGROUP\n")
 	fmt.Fprintf(&b, "   server string = %s\n", hostname)
 	b.WriteString("   security = user\n")
-	b.WriteString("   map to guest = never\n")
+	b.WriteString("   map to guest = Bad User\n")
 	b.WriteString("   log file = /var/log/samba/log.%m\n")
 	b.WriteString("   max log size = 1000\n")
 	b.WriteString("   server role = standalone server\n")
@@ -146,6 +146,7 @@ func GenerateConfigWithOptions(shares []Share, hostname string, opts Options) st
 		}
 		if share.GuestOK {
 			b.WriteString("   guest ok = yes\n")
+			b.WriteString("   force user = root\n")
 		} else {
 			b.WriteString("   guest ok = no\n")
 		}
