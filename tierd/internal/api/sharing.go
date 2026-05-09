@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -44,7 +45,7 @@ type iscsiLUNMoveIntent struct {
 //
 // Forward path:
 //
-//   planned → executing → unpinned → moving → cutover → repinning → completed
+//	planned → executing → unpinned → moving → cutover → repinning → completed
 //
 // Any error transitions to `failed` with a recorded reason. Operators
 // can `abort` from any non-terminal state to drop back to `planned`.
@@ -100,6 +101,7 @@ var (
 )
 
 const smbCompatibilityModeConfigKey = "smb.compatibility_mode"
+const defaultTierDataDirName = "storage"
 
 func NewSharingHandler(store *db.Store) *SharingHandler {
 	return &SharingHandler{
@@ -365,6 +367,14 @@ func (h *SharingHandler) listSMBShares(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
+	for i := range shares {
+		path, err := h.resolveDirectorySharePath(shares[i].Path, shares[i].Name)
+		if err != nil {
+			serverError(w, err)
+			return
+		}
+		shares[i].Path = path
+	}
 	if shares == nil {
 		shares = []db.SmbShare{}
 	}
@@ -384,6 +394,25 @@ func (h *SharingHandler) createSMBShare(w http.ResponseWriter, r *http.Request) 
 	}
 	if err := smb.ValidateSharePath(req.Path); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	path, err := h.resolveDirectorySharePath(req.Path, req.Name)
+	if err != nil {
+		jsonErrorCoded(w, err.Error(), http.StatusBadRequest, "sharing.tier_root_not_shareable")
+		return
+	}
+	req.Path = path
+	st, err := os.Stat(req.Path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			jsonError(w, fmt.Sprintf("share path does not exist: %s", req.Path), http.StatusBadRequest)
+			return
+		}
+		serverError(w, fmt.Errorf("stat share path: %w", err))
+		return
+	}
+	if !st.IsDir() {
+		jsonError(w, fmt.Sprintf("share path is not a directory: %s", req.Path), http.StatusBadRequest)
 		return
 	}
 
@@ -436,9 +465,13 @@ func (h *SharingHandler) regenerateSmbConf() error {
 
 	var smbShares []smb.Share
 	for _, s := range shares {
+		path, err := h.resolveDirectorySharePath(s.Path, s.Name)
+		if err != nil {
+			return err
+		}
 		sh := smb.Share{
 			Name:     s.Name,
-			Path:     s.Path,
+			Path:     path,
 			ReadOnly: s.ReadOnly,
 			GuestOK:  s.GuestOK,
 			Comment:  s.Comment,
@@ -491,6 +524,14 @@ func (h *SharingHandler) listNFSExports(w http.ResponseWriter, r *http.Request) 
 		serverError(w, err)
 		return
 	}
+	for i := range exports {
+		path, err := h.resolveDirectorySharePath(exports[i].Path, "")
+		if err != nil {
+			serverError(w, err)
+			return
+		}
+		exports[i].Path = path
+	}
 	if exports == nil {
 		exports = []db.NfsExport{}
 	}
@@ -514,6 +555,12 @@ func (h *SharingHandler) createNFSExport(w http.ResponseWriter, r *http.Request)
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	path, err := h.resolveDirectorySharePath(req.Path, "")
+	if err != nil {
+		jsonErrorCoded(w, err.Error(), http.StatusBadRequest, "sharing.tier_root_not_shareable")
+		return
+	}
+	req.Path = path
 	for _, net := range req.Networks {
 		if err := nfs.ValidateNetwork(net); err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
@@ -629,6 +676,13 @@ func (h *SharingHandler) regenerateExports() error {
 	if err != nil {
 		return err
 	}
+	for i := range dbExports {
+		path, err := h.resolveDirectorySharePath(dbExports[i].Path, "")
+		if err != nil {
+			return err
+		}
+		dbExports[i].Path = path
+	}
 
 	pools, err := h.store.ListSmoothfsPools()
 	if err != nil {
@@ -657,6 +711,110 @@ func buildNFSExports(dbExports []db.NfsExport, pools []db.SmoothfsPool) []nfs.Ex
 		exports = append(exports, exp)
 	}
 	return exports
+}
+
+func (h *SharingHandler) internalTierRoots() (map[string]struct{}, error) {
+	roots := map[string]struct{}{}
+
+	tiers, err := h.store.ListTierInstances()
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range tiers {
+		if t.MountPoint != "" {
+			roots[filepath.Clean(t.MountPoint)] = struct{}{}
+		}
+	}
+
+	pools, err := h.store.ListSmoothfsPools()
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range pools {
+		if p.Mountpoint != "" {
+			roots[filepath.Clean(p.Mountpoint)] = struct{}{}
+		}
+	}
+
+	return roots, nil
+}
+
+func visibleSubdirs(path string) ([]string, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	dirs := []string{}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		dirs = append(dirs, name)
+	}
+	sort.Strings(dirs)
+	return dirs, nil
+}
+
+func shareableChildForTierRoot(root, preferredName string) (string, bool, error) {
+	dirs, err := visibleSubdirs(root)
+	if err != nil {
+		return "", false, err
+	}
+	if preferredName != "" {
+		for _, name := range dirs {
+			if strings.EqualFold(name, preferredName) {
+				return filepath.Join(root, name), true, nil
+			}
+		}
+	}
+	for _, name := range dirs {
+		if strings.EqualFold(name, defaultTierDataDirName) {
+			return filepath.Join(root, name), true, nil
+		}
+	}
+	if len(dirs) == 1 {
+		return filepath.Join(root, dirs[0]), true, nil
+	}
+	return "", false, nil
+}
+
+func (h *SharingHandler) resolveDirectorySharePath(path, preferredName string) (string, error) {
+	clean := filepath.Clean(path)
+	roots, err := h.internalTierRoots()
+	if err != nil {
+		return "", err
+	}
+	if _, ok := roots[clean]; !ok {
+		return clean, nil
+	}
+
+	if child, ok, err := shareableChildForTierRoot(clean, preferredName); err != nil {
+		return "", fmt.Errorf("cannot inspect tier root %s: %w", clean, err)
+	} else if ok {
+		return child, nil
+	}
+
+	return "", fmt.Errorf("tier root %s is internal and cannot be shared directly; choose a subdirectory", clean)
+}
+
+func (h *SharingHandler) validateFileBackingNotInTierRoot(path string) error {
+	clean := filepath.Clean(path)
+	roots, err := h.internalTierRoots()
+	if err != nil {
+		return err
+	}
+	if _, ok := roots[clean]; ok {
+		return fmt.Errorf("tier root %s is internal and cannot be shared directly; choose a subdirectory", clean)
+	}
+	parent := filepath.Dir(clean)
+	if _, ok := roots[parent]; ok {
+		return fmt.Errorf("file-backed iSCSI LUN %s is directly under internal tier root %s; place it in a subdirectory", clean, parent)
+	}
+	return nil
 }
 
 // --- iSCSI ---
@@ -833,6 +991,10 @@ func (h *SharingHandler) createISCSITarget(w http.ResponseWriter, r *http.Reques
 		backingPath = req.BackingFile
 		if err := iscsi.ValidateBackingFilePath(req.BackingFile); err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := h.validateFileBackingNotInTierRoot(req.BackingFile); err != nil {
+			jsonErrorCoded(w, err.Error(), http.StatusBadRequest, "sharing.tier_root_not_shareable")
 			return
 		}
 	} else {
@@ -1303,17 +1465,25 @@ func (h *SharingHandler) listFilesystemPaths(w http.ResponseWriter, r *http.Requ
 	// Tier pools — include any healthy or degraded tier; trust the DB state
 	// rather than re-checking the mount point so that a transient findmnt
 	// failure doesn't silently hide the target.
+	// The tier mount root itself is internal: smoothfs metadata directories
+	// live there. Only expose visible child directories as protocol targets.
 	tiers, err := h.store.ListTierInstances()
 	if err == nil {
 		for _, t := range tiers {
 			if t.State != db.TierPoolStateHealthy && t.State != db.TierPoolStateDegraded {
 				continue
 			}
-			paths = append(paths, filesystemPath{
-				Path:   t.MountPoint,
-				Source: "tier",
-				Name:   t.Name,
-			})
+			children, err := visibleSubdirs(t.MountPoint)
+			if err != nil {
+				continue
+			}
+			for _, child := range children {
+				paths = append(paths, filesystemPath{
+					Path:   filepath.Join(t.MountPoint, child),
+					Source: "tier",
+					Name:   t.Name + "/" + child,
+				})
+			}
 		}
 	}
 
