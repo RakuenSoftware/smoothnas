@@ -230,6 +230,7 @@ export const api = {
 
   // --- Filesystem ---
   getFilesystemPaths: () => apiFetch<any[]>('GET', '/filesystem/paths'),
+  getFilesystemTierPaths: () => apiFetch<any[]>('GET', '/filesystem/tier-paths'),
 
   // --- Network ---
   getInterfaces: () => apiFetch<any[]>('GET', '/network/interfaces'),

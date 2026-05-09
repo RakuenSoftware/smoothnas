@@ -425,6 +425,8 @@ const nl: LanguageTranslations = {
   'smb.field.shareName': 'Sharenaam',
   'smb.field.path': 'Pad',
   'smb.field.pathPlaceholder': '— pad selecteren —',
+  'smb.field.tier': 'Tier',
+  'smb.field.tierPlaceholder': '— tier selecteren —',
   'smb.field.readOnly': 'Alleen-lezen',
   'smb.field.guestOk': 'Gast toegestaan',
   'smb.col.readOnly': 'Alleen-lezen',
