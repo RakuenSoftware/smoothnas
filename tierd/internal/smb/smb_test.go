@@ -1,6 +1,7 @@
 package smb
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -226,5 +227,65 @@ func TestGenerateConfigCompatibilityMode(t *testing.T) {
 	}
 	if strings.Contains(config, "case sensitive = yes") || strings.Contains(config, "mangled names = no") {
 		t.Error("compatibility mode should not emit performance-only case settings")
+	}
+}
+
+func TestSharePathsParsesShareSections(t *testing.T) {
+	config := `
+# comment
+[global]
+   path = /not/a/share
+
+[storage]
+   comment = Main share
+   path = /mnt/media/storage
+
+[public]
+   PATH = /mnt/media/public
+`
+	got := sharePaths(config)
+	if got["storage"] != "/mnt/media/storage" {
+		t.Fatalf("storage path = %q, want /mnt/media/storage", got["storage"])
+	}
+	if got["public"] != "/mnt/media/public" {
+		t.Fatalf("public path = %q, want /mnt/media/public", got["public"])
+	}
+	if _, ok := got["global"]; ok {
+		t.Fatalf("global section should not be treated as a share: %#v", got)
+	}
+}
+
+func TestSharesRequiringDisconnect(t *testing.T) {
+	oldConfig := `
+[global]
+
+[storage]
+   path = /mnt/media
+
+[backup]
+   path = /mnt/backup
+
+[clean]
+   path = /mnt/clean/.
+
+[removed]
+   path = /mnt/removed
+`
+	newConfig := `
+[global]
+
+[storage]
+   path = /mnt/media/storage
+
+[backup]
+   path = /mnt/backup/
+
+[clean]
+   path = /mnt/clean
+`
+	got := sharesRequiringDisconnect(oldConfig, newConfig)
+	want := []string{"removed", "storage"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("sharesRequiringDisconnect() = %#v, want %#v", got, want)
 	}
 }

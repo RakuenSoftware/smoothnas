@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -38,6 +39,8 @@ type Options struct {
 }
 
 var shareNameRegex = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,63}$`)
+
+const smbConfigPath = "/etc/samba/smb.conf"
 
 // ValidateShareName checks that a share name is safe for smb.conf.
 func ValidateShareName(name string) error {
@@ -193,18 +196,32 @@ func WriteConfig(shares []Share, hostname string) error {
 func WriteConfigWithOptions(shares []Share, hostname string, opts Options) error {
 	config := GenerateConfigWithOptions(shares, hostname, opts)
 
-	if err := os.MkdirAll("/etc/samba", 0755); err != nil {
+	oldConfig, err := os.ReadFile(smbConfigPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read smb.conf: %w", err)
+	}
+	sharesToClose := sharesRequiringDisconnect(string(oldConfig), config)
+
+	if err := os.MkdirAll(filepath.Dir(smbConfigPath), 0755); err != nil {
 		return fmt.Errorf("create samba dir: %w", err)
 	}
 
-	if err := os.WriteFile("/etc/samba/smb.conf", []byte(config), 0644); err != nil {
+	if err := os.WriteFile(smbConfigPath, []byte(config), 0644); err != nil {
 		return fmt.Errorf("write smb.conf: %w", err)
 	}
 
 	if !IsEnabled() {
 		return nil
 	}
-	return Reload()
+	if err := Reload(); err != nil {
+		return err
+	}
+	for _, name := range sharesToClose {
+		if err := CloseShare(name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Reload tells Samba to re-read its configuration.
@@ -214,6 +231,63 @@ func Reload() error {
 		return fmt.Errorf("smbcontrol reload: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+// CloseShare forcibly disconnects active clients from a single Samba share.
+func CloseShare(name string) error {
+	cmd := exec.Command("smbcontrol", "smbd", "close-share", name)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("smbcontrol close-share %s: %s: %w", name, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func sharesRequiringDisconnect(oldConfig, newConfig string) []string {
+	oldPaths := sharePaths(oldConfig)
+	newPaths := sharePaths(newConfig)
+	var shares []string
+	for name, oldPath := range oldPaths {
+		newPath, ok := newPaths[name]
+		if !ok || cleanConfigPath(oldPath) != cleanConfigPath(newPath) {
+			shares = append(shares, name)
+		}
+	}
+	sort.Strings(shares)
+	return shares
+}
+
+func sharePaths(config string) map[string]string {
+	paths := make(map[string]string)
+	section := ""
+	for _, line := range strings.Split(config, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			if end := strings.Index(line, "]"); end > 0 {
+				section = strings.TrimSpace(line[1:end])
+			}
+			continue
+		}
+		if section == "" || strings.EqualFold(section, "global") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(key), "path") {
+			continue
+		}
+		paths[section] = strings.TrimSpace(value)
+	}
+	return paths
+}
+
+func cleanConfigPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	return filepath.Clean(path)
 }
 
 // SyncUser syncs a system user's password to Samba's password database.
