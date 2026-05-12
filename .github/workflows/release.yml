@@ -34,6 +34,7 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
       name: ${{ steps.meta.outputs.name }}
       smoothkernel_tag: ${{ steps.smoothkernel.outputs.tag }}
+      smoothfs_ref: ${{ steps.smoothfs_ref.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -125,6 +126,15 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Pinned to SmoothKernel release: $TAG"
 
+      - name: Read pinned smoothfs ref
+        id: smoothfs_ref
+        run: |
+          set -euo pipefail
+          REF="$(grep '^SMOOTHFS_REPO_REF=' iso/build-iso.sh | grep -oE '[0-9a-f]{40}' | head -n1)"
+          [ -n "$REF" ] || { echo "Could not extract SMOOTHFS_REPO_REF from iso/build-iso.sh" >&2; exit 1; }
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "Pinned to smoothfs ref: $REF"
+
   build:
     needs: meta
     strategy:
@@ -215,12 +225,15 @@ jobs:
           cp "iso/output/smoothnas-${{ needs.meta.outputs.version }}-${{ matrix.deb_arch }}.iso" \
              "stage/smoothnas-${{ needs.meta.outputs.version }}-${{ matrix.deb_arch }}.iso"
           cp bin/tierd "stage/tierd-${{ matrix.deb_arch }}"
-          # Frontend bundle is arch-independent; stage it from amd64 only so
-          # the release job has exactly one copy to upload.
+          # Arch-independent assets are staged from amd64 only so the release
+          # job has exactly one copy of each to upload.
           if [ "${{ matrix.deb_arch }}" = "amd64" ]; then
             mkdir -p dist
             tar -czf dist/tierd-ui.tar.gz -C tierd-ui/dist/smoothnas-ui .
             cp dist/tierd-ui.tar.gz stage/tierd-ui.tar.gz
+            # Package the smoothfs DKMS source (src/smoothfs/ contents) so the
+            # in-product updater can rebuild the kernel module on installed systems.
+            tar -czf stage/smoothfs-src.tar.gz -C iso/cache/smoothfs-src/src/smoothfs .
           fi
           ls -lh stage/
 
@@ -260,13 +273,16 @@ jobs:
           TIERD_AMD64_SHA=$(sha256sum dist/tierd-amd64 | awk '{print $1}')
           TIERD_ARM64_SHA=$(sha256sum dist/tierd-arm64 | awk '{print $1}')
           UI_SHA=$(sha256sum dist/tierd-ui.tar.gz | awk '{print $1}')
+          SMOOTHFS_SRC_SHA=$(sha256sum dist/smoothfs-src.tar.gz | awk '{print $1}')
           cat > dist/manifest.json <<EOFM
           {
             "version": "${{ needs.meta.outputs.version }}",
             "channel": "${{ needs.meta.outputs.channel }}",
             "tierd_amd64_sha256": "${TIERD_AMD64_SHA}",
             "tierd_arm64_sha256": "${TIERD_ARM64_SHA}",
-            "ui_sha256": "${UI_SHA}"
+            "ui_sha256": "${UI_SHA}",
+            "smoothfs_ref": "${{ needs.meta.outputs.smoothfs_ref }}",
+            "smoothfs_src_sha256": "${SMOOTHFS_SRC_SHA}"
           }
           EOFM
           ls -lh dist/
@@ -284,5 +300,6 @@ jobs:
             dist/tierd-amd64
             dist/tierd-arm64
             dist/tierd-ui.tar.gz
+            dist/smoothfs-src.tar.gz
             dist/manifest.json
           generate_release_notes: true

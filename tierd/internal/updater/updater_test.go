@@ -1,6 +1,9 @@
 package updater
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1175,5 +1178,143 @@ func TestFindAssetURL(t *testing.T) {
 	}
 	if got := findAssetURL(assets, "missing"); got != "" {
 		t.Errorf("findAssetURL(missing) = %q, want empty", got)
+	}
+}
+
+func withSmoothfsInstalledRefPath(t *testing.T, path string) {
+	t.Helper()
+	original := smoothfsInstalledRefPath
+	smoothfsInstalledRefPath = path
+	t.Cleanup(func() { smoothfsInstalledRefPath = original })
+}
+
+func withSmoothfsSrcPath(t *testing.T, p string) {
+	t.Helper()
+	original := smoothfsSrcPath
+	smoothfsSrcPath = p
+	t.Cleanup(func() { smoothfsSrcPath = original })
+}
+
+func TestParseDKMSVersion(t *testing.T) {
+	cases := []struct {
+		conf    string
+		want    string
+		wantErr bool
+	}{
+		{`PACKAGE_NAME=smoothfs` + "\n" + `PACKAGE_VERSION=1.2.3` + "\n", "1.2.3", false},
+		{`PACKAGE_VERSION="2.0.0"`, "2.0.0", false},
+		{`PACKAGE_VERSION='3.1.4'`, "3.1.4", false},
+		{`# comment` + "\n" + `PACKAGE_NAME=smoothfs`, "", true},
+		{``, "", true},
+	}
+	for _, tc := range cases {
+		got, err := parseDKMSVersion(tc.conf)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("parseDKMSVersion(%q): want error, got %q", tc.conf, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseDKMSVersion(%q): unexpected error: %v", tc.conf, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("parseDKMSVersion(%q) = %q, want %q", tc.conf, got, tc.want)
+		}
+	}
+}
+
+func TestReadSmoothfsVersionFromTar(t *testing.T) {
+	// Build a minimal tar.gz with a dkms.conf at the root.
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "smoothfs-src.tar.gz")
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	dkmsConf := []byte("PACKAGE_NAME=smoothfs\nPACKAGE_VERSION=1.2.3\n")
+	_ = tw.WriteHeader(&tar.Header{
+		Name: "dkms.conf",
+		Mode: 0644,
+		Size: int64(len(dkmsConf)),
+	})
+	tw.Write(dkmsConf)
+	tw.Close()
+	gz.Close()
+	os.WriteFile(tarPath, buf.Bytes(), 0644)
+
+	got, err := readSmoothfsVersionFromTar(tarPath)
+	if err != nil {
+		t.Fatalf("readSmoothfsVersionFromTar: %v", err)
+	}
+	if got != "1.2.3" {
+		t.Errorf("got %q, want 1.2.3", got)
+	}
+}
+
+func TestEnsureSmoothfsModuleNoopForEmptyRef(t *testing.T) {
+	var cmds []string
+	withExecCommand(t, func(name string, args ...string) *exec.Cmd {
+		cmds = append(cmds, name)
+		return exec.Command("bash", "-lc", "true")
+	})
+	if err := ensureSmoothfsModule("/dev/null", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cmds) > 0 {
+		t.Errorf("expected no commands for empty ref, got: %v", cmds)
+	}
+}
+
+func TestEnsureSmoothfsModuleSkipsWhenRefMatches(t *testing.T) {
+	dir := t.TempDir()
+	refFile := filepath.Join(dir, "smoothfs-ref")
+	withSmoothfsInstalledRefPath(t, refFile)
+
+	const ref = "82aa4365c56b0f79a525c2f0cf458d9a3c3311a0"
+	os.WriteFile(refFile, []byte(ref+"\n"), 0644)
+
+	var cmds []string
+	withExecCommand(t, func(name string, args ...string) *exec.Cmd {
+		cmds = append(cmds, name)
+		return exec.Command("bash", "-lc", "true")
+	})
+
+	if err := ensureSmoothfsModule("/dev/null", ref); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cmds) > 0 {
+		t.Errorf("expected no commands when ref already installed, got: %v", cmds)
+	}
+}
+
+func TestManifestSmoothfsFields(t *testing.T) {
+	raw := `{
+		"version":"v1",
+		"tierd_amd64_sha256":"AAA",
+		"ui_sha256":"UUU",
+		"smoothfs_ref":"82aa4365c56b0f79a525c2f0cf458d9a3c3311a0",
+		"smoothfs_src_sha256":"CCC"
+	}`
+	var m Manifest
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if m.SmoothfsRef != "82aa4365c56b0f79a525c2f0cf458d9a3c3311a0" {
+		t.Errorf("SmoothfsRef = %q", m.SmoothfsRef)
+	}
+	if m.SmoothfsSrcSHA != "CCC" {
+		t.Errorf("SmoothfsSrcSHA = %q", m.SmoothfsSrcSHA)
+	}
+
+	// Old manifests without smoothfs fields decode cleanly with zero values.
+	old := `{"version":"v0","tierd_sha256":"OLD","ui_sha256":"UUU"}`
+	var m2 Manifest
+	if err := json.Unmarshal([]byte(old), &m2); err != nil {
+		t.Fatalf("decode old: %v", err)
+	}
+	if m2.SmoothfsRef != "" || m2.SmoothfsSrcSHA != "" {
+		t.Errorf("old manifest should have empty smoothfs fields, got ref=%q sha=%q", m2.SmoothfsRef, m2.SmoothfsSrcSHA)
 	}
 }
