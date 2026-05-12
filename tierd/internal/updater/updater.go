@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -40,6 +41,14 @@ var aptSecurityRules = "/etc/apt/apt.conf.d/52smoothnas-security-upgrades"
 var execCommand = exec.Command
 var isPackageInstalled = packageInstalled
 
+// smoothfsInstalledRefPath records the git ref of the currently installed
+// smoothfs DKMS module so rebuild is skipped when the ref hasn't changed.
+var smoothfsInstalledRefPath = "/var/lib/tierd/smoothfs-ref"
+
+// smoothfsSrcPath is where the smoothfs DKMS source tree lives on the
+// installed system; firstboot seeds it from the ISO, updates refresh it.
+var smoothfsSrcPath = "/opt/smoothnas/smoothfs-src"
+
 // Channel represents an update channel.
 type Channel string
 
@@ -64,6 +73,8 @@ type Manifest struct {
 	TierdArm64SHA string `json:"tierd_arm64_sha256,omitempty"`
 	TierdSHA      string `json:"tierd_sha256,omitempty"` // legacy single-arch fallback
 	UISHA         string `json:"ui_sha256"`
+	SmoothfsRef   string `json:"smoothfs_ref,omitempty"`
+	SmoothfsSrcSHA string `json:"smoothfs_src_sha256,omitempty"`
 }
 
 // TierdSHAForArch returns the manifest's SHA-256 for the given GOARCH,
@@ -471,6 +482,7 @@ func (u *Updater) doApply() error {
 		binaryAsset = findAsset(rel.Assets, "tierd")
 	}
 	uiAsset := findAsset(rel.Assets, "tierd-ui.tar.gz")
+	smoothfsSrcAsset := findAsset(rel.Assets, "smoothfs-src.tar.gz") // optional, nil on older releases
 	if manifestAsset == nil || binaryAsset == nil || uiAsset == nil {
 		return fmt.Errorf("release is missing required assets (need manifest.json, tierd-%s or tierd, tierd-ui.tar.gz)", arch)
 	}
@@ -488,14 +500,23 @@ func (u *Updater) doApply() error {
 	// Only use authenticated API downloads for the private JBailes channel;
 	// public releases use browser_download_url to avoid 403s from scoped tokens.
 	authenticated := u.Channel() == ChannelJBailes
-	for _, dl := range []struct {
+
+	smoothfsSrcStagePath := filepath.Join(stagingDir, "smoothfs-src.tar.gz")
+	downloads := []struct {
 		asset *ghAsset
 		dest  string
 	}{
 		{manifestAsset, manifestPath},
 		{binaryAsset, binaryStagePath},
 		{uiAsset, uiStagePath},
-	} {
+	}
+	if smoothfsSrcAsset != nil {
+		downloads = append(downloads, struct {
+			asset *ghAsset
+			dest  string
+		}{smoothfsSrcAsset, smoothfsSrcStagePath})
+	}
+	for _, dl := range downloads {
 		if err := downloadAsset(dl.asset, dl.dest, authenticated); err != nil {
 			return err
 		}
@@ -547,6 +568,17 @@ func (u *Updater) doApply() error {
 	// for packages that are already installed, so this is safe to run every time.
 	EnsureSystemPackages()
 
+	// Rebuild the smoothfs DKMS kernel module if the release carries updated source.
+	// Non-fatal: tierd is still restarted even if the module build fails.
+	if manifest.SmoothfsRef != "" && smoothfsSrcAsset != nil {
+		u.setStage("rebuilding kernel module")
+		if err := verifySmoothfsTarball(smoothfsSrcStagePath, manifest.SmoothfsSrcSHA); err != nil {
+			log.Printf("updater: smoothfs source check failed (skipping module rebuild): %v", err)
+		} else if err := ensureSmoothfsModule(smoothfsSrcStagePath, manifest.SmoothfsRef); err != nil {
+			log.Printf("updater: smoothfs module rebuild failed (non-fatal): %v", err)
+		}
+	}
+
 	// Clean up staging directory.
 	os.RemoveAll(stagingDir)
 
@@ -568,8 +600,9 @@ func (u *Updater) doApply() error {
 
 // StartManualApply begins the update from locally provided artifacts.
 // The caller provides the raw contents of manifest.json, the tierd binary,
-// and the tierd-ui.tar.gz archive. Returns an error if already applying.
-func (u *Updater) StartManualApply(manifest, binary, ui []byte) error {
+// the tierd-ui.tar.gz archive, and optionally the smoothfs-src.tar.gz
+// (nil skips the kernel module rebuild). Returns an error if already applying.
+func (u *Updater) StartManualApply(manifest, binary, ui, smoothfsSrc []byte) error {
 	u.mu.Lock()
 	if u.applying || u.packageApplying {
 		u.mu.Unlock()
@@ -586,7 +619,7 @@ func (u *Updater) StartManualApply(manifest, binary, ui []byte) error {
 			u.mu.Unlock()
 		}()
 
-		if err := u.doManualApply(manifest, binary, ui); err != nil {
+		if err := u.doManualApply(manifest, binary, ui, smoothfsSrc); err != nil {
 			log.Printf("manual update failed: %v", err)
 			u.mu.Lock()
 			u.progress = &ApplyProgress{Stage: "failed", Error: err.Error()}
@@ -597,7 +630,7 @@ func (u *Updater) StartManualApply(manifest, binary, ui []byte) error {
 	return nil
 }
 
-func (u *Updater) doManualApply(manifestData, binaryData, uiData []byte) error {
+func (u *Updater) doManualApply(manifestData, binaryData, uiData, smoothfsSrcData []byte) error {
 	var manifest Manifest
 	if err := json.Unmarshal(manifestData, &manifest); err != nil {
 		return fmt.Errorf("parse manifest: %w", err)
@@ -647,6 +680,18 @@ func (u *Updater) doManualApply(manifestData, binaryData, uiData []byte) error {
 	writeAppliedVersion(manifest.Version)
 
 	EnsureSystemPackages()
+
+	if manifest.SmoothfsRef != "" && len(smoothfsSrcData) > 0 {
+		u.setStage("rebuilding kernel module")
+		smoothfsTarPath := filepath.Join(stagingDir, "smoothfs-src.tar.gz")
+		if err := os.WriteFile(smoothfsTarPath, smoothfsSrcData, 0644); err != nil {
+			log.Printf("updater: smoothfs: stage tarball: %v", err)
+		} else if err := verifySmoothfsTarball(smoothfsTarPath, manifest.SmoothfsSrcSHA); err != nil {
+			log.Printf("updater: smoothfs source check failed (skipping module rebuild): %v", err)
+		} else if err := ensureSmoothfsModule(smoothfsTarPath, manifest.SmoothfsRef); err != nil {
+			log.Printf("updater: smoothfs module rebuild failed (non-fatal): %v", err)
+		}
+	}
 
 	os.RemoveAll(stagingDir)
 
@@ -935,6 +980,226 @@ func replaceUI(archivePath, destDir string) error {
 	}
 
 	return nil
+}
+
+// verifySmoothfsTarball verifies the tarball's SHA-256 if expectedSHA is set;
+// a no-op (returns nil) when expectedSHA is empty, allowing graceful handling
+// of manifests that predate the smoothfs_src_sha256 field.
+func verifySmoothfsTarball(path, expectedSHA string) error {
+	if expectedSHA == "" {
+		return nil
+	}
+	return verifyChecksum(path, expectedSHA)
+}
+
+// parseDKMSVersion extracts the PACKAGE_VERSION value from dkms.conf content.
+func parseDKMSVersion(dkmsConf string) (string, error) {
+	for _, line := range strings.Split(dkmsConf, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "PACKAGE_VERSION") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		ver := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+		if ver != "" {
+			return ver, nil
+		}
+	}
+	return "", fmt.Errorf("PACKAGE_VERSION not found in dkms.conf")
+}
+
+// readSmoothfsVersionFromTar opens a smoothfs-src.tar.gz and extracts the
+// PACKAGE_VERSION from the dkms.conf entry without fully extracting the archive.
+func readSmoothfsVersionFromTar(tarPath string) (string, error) {
+	f, err := os.Open(tarPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return "", fmt.Errorf("gzip open: %w", err)
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("tar read: %w", err)
+		}
+		clean := path.Clean(hdr.Name)
+		if clean != "dkms.conf" && !strings.HasSuffix(clean, "/dkms.conf") {
+			continue
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			return "", fmt.Errorf("read dkms.conf: %w", err)
+		}
+		return parseDKMSVersion(string(data))
+	}
+	return "", fmt.Errorf("dkms.conf not found in smoothfs-src archive")
+}
+
+// extractTarGzTo extracts a .tar.gz archive into destDir, which must already
+// exist. Path traversal entries are silently skipped.
+func extractTarGzTo(tarPath, destDir string) error {
+	f, err := os.Open(tarPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("gzip open: %w", err)
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	cleanDest := filepath.Clean(destDir) + string(os.PathSeparator)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("tar read: %w", err)
+		}
+		target := filepath.Join(destDir, filepath.FromSlash(path.Clean("/"+hdr.Name)))
+		if target != filepath.Clean(destDir) && !strings.HasPrefix(target, cleanDest) {
+			continue
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return fmt.Errorf("mkdir %s: %w", target, err)
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return fmt.Errorf("mkdir parent %s: %w", target, err)
+			}
+			out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, hdr.FileInfo().Mode())
+			if err != nil {
+				return fmt.Errorf("create %s: %w", target, err)
+			}
+			_, writeErr := io.Copy(out, tr)
+			out.Close()
+			if writeErr != nil {
+				return fmt.Errorf("write %s: %w", target, writeErr)
+			}
+		}
+	}
+	return nil
+}
+
+// ensureSmoothfsModule rebuilds and installs the smoothfs DKMS kernel module
+// from the provided source tarball. It is a no-op when the installed ref
+// already matches, so it is safe to call on every update.
+//
+// The rebuild runs dkms remove/add/build/install for the running kernel.
+// After a successful build it attempts a hot-reload (modprobe -r / modprobe);
+// this succeeds only when no smoothfs filesystems are mounted, which is
+// unlikely on a live NAS. In the common case the new module loads on the
+// next pool remount or system reboot.
+//
+// Failures are propagated to the caller; callers should log and treat them
+// as non-fatal so the rest of the update (tierd binary + UI) still applies.
+func ensureSmoothfsModule(srcTarPath, ref string) error {
+	if ref == "" {
+		return nil
+	}
+
+	if installed, _ := os.ReadFile(smoothfsInstalledRefPath); strings.TrimSpace(string(installed)) == ref {
+		log.Printf("updater: smoothfs ref %.12s already installed, skipping rebuild", ref)
+		return nil
+	}
+
+	version, err := readSmoothfsVersionFromTar(srcTarPath)
+	if err != nil {
+		return fmt.Errorf("read smoothfs version: %w", err)
+	}
+
+	kernelOut, err := exec.Command("uname", "-r").Output()
+	if err != nil {
+		return fmt.Errorf("uname -r: %w", err)
+	}
+	kver := strings.TrimSpace(string(kernelOut))
+
+	dkmsSrc := fmt.Sprintf("/usr/src/smoothfs-%s", version)
+	if err := os.RemoveAll(dkmsSrc); err != nil {
+		return fmt.Errorf("remove old DKMS src %s: %w", dkmsSrc, err)
+	}
+	if err := os.MkdirAll(dkmsSrc, 0755); err != nil {
+		return fmt.Errorf("create DKMS src dir: %w", err)
+	}
+	if err := extractTarGzTo(srcTarPath, dkmsSrc); err != nil {
+		return fmt.Errorf("extract smoothfs source: %w", err)
+	}
+
+	// Remove any stale DKMS entry; ignore errors (entry may not exist yet).
+	execCommand("dkms", "remove", "-m", "smoothfs", "-v", version, "--all").Run()
+
+	if out, err := execCommand("dkms", "add", "-m", "smoothfs", "-v", version).CombinedOutput(); err != nil {
+		return fmt.Errorf("dkms add: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := execCommand("dkms", "build", "-m", "smoothfs", "-v", version, "-k", kver).CombinedOutput(); err != nil {
+		return fmt.Errorf("dkms build: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := execCommand("dkms", "install", "-m", "smoothfs", "-v", version, "-k", kver).CombinedOutput(); err != nil {
+		return fmt.Errorf("dkms install: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	// Update /opt/smoothnas/smoothfs-src so it reflects the new version.
+	os.RemoveAll(smoothfsSrcPath)
+	if err := os.MkdirAll(smoothfsSrcPath, 0755); err == nil {
+		if err := extractTarGzTo(srcTarPath, smoothfsSrcPath); err != nil {
+			log.Printf("updater: smoothfs: update %s (non-fatal): %v", smoothfsSrcPath, err)
+		}
+	}
+
+	// Ensure /etc/modules entry exists for boot persistence.
+	if err := appendModulesEntryIfMissing("/etc/modules", "smoothfs"); err != nil {
+		log.Printf("updater: smoothfs: /etc/modules entry: %v", err)
+	}
+
+	// Persist the installed ref before attempting hot-reload so a reload
+	// failure doesn't cause a spurious rebuild on the next update.
+	if err := os.MkdirAll(filepath.Dir(smoothfsInstalledRefPath), 0755); err == nil {
+		os.WriteFile(smoothfsInstalledRefPath, []byte(ref+"\n"), 0644)
+	}
+
+	// Hot-reload: succeeds only if no smoothfs filesystems are currently mounted.
+	// Failure is expected and silently ignored on a live NAS.
+	if execCommand("modprobe", "-r", "smoothfs").Run() == nil {
+		if out, err := execCommand("modprobe", "smoothfs").CombinedOutput(); err != nil {
+			log.Printf("updater: smoothfs: modprobe (non-fatal): %v: %s", err, strings.TrimSpace(string(out)))
+		}
+	}
+
+	log.Printf("updater: smoothfs: installed version %s (ref %.12s)", version, ref)
+	return nil
+}
+
+func appendModulesEntryIfMissing(path, module string) error {
+	data, _ := os.ReadFile(path)
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == module {
+			return nil
+		}
+	}
+	entry := module + "\n"
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		entry = "\n" + entry
+	}
+	return appendToFile(path, entry)
 }
 
 // requiredPackages lists OS packages that tierd features depend on.
