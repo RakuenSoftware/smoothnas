@@ -346,6 +346,10 @@ func writeZfsParam(name, value string) error {
 	if err := os.WriteFile(path, []byte(value), 0644); err != nil {
 		return fmt.Errorf("write %s: %w", name, err)
 	}
+	if name == "zfs_arc_max" {
+		content := fmt.Sprintf("options zfs zfs_arc_max=%s\n", value)
+		_ = os.WriteFile("/etc/modprobe.d/smoothnas-zfs.conf", []byte(content), 0644)
+	}
 	return nil
 }
 

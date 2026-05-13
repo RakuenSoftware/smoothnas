@@ -1,6 +1,7 @@
 package nfs
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -147,6 +148,53 @@ func TestGenerateExportsMultipleNetworks(t *testing.T) {
 	}
 	if exportLines != 3 {
 		t.Errorf("expected 3 export lines, got %d in:\n%s", exportLines, content)
+	}
+}
+
+func TestGenerateExportsEmptyNetworksBecomesWildcard(t *testing.T) {
+	// Empty networks (from a DB row with networks="") must produce a valid
+	// wildcard export line, not a malformed line with no host specifier.
+	exports := []Export{
+		{Path: "/mnt/data", Networks: []string{""}},
+		{Path: "/mnt/share", Networks: nil},
+	}
+	content := GenerateExports(exports)
+	if !strings.Contains(content, "/mnt/data *(") {
+		t.Errorf("empty-string network should render as *, got:\n%s", content)
+	}
+	if !strings.Contains(content, "/mnt/share *(") {
+		t.Errorf("nil networks should render as *, got:\n%s", content)
+	}
+	// Make sure there are no bare-space entries like "/mnt/data (" without a host.
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, "/") && strings.Contains(line, " (") {
+			t.Errorf("export line has no host specifier: %q", line)
+		}
+	}
+}
+
+func TestReloadExportsPathNotFoundNonFatal(t *testing.T) {
+	// Simulate exportfs returning exit 1 with only "Failed to stat" lines.
+	orig := reloadExportsCmd
+	defer func() { reloadExportsCmd = orig }()
+
+	reloadExportsCmd = func() ([]byte, error) {
+		return []byte("exportfs: Failed to stat /mnt/media/pbs: No such file or directory"), fmt.Errorf("exit status 1")
+	}
+	if err := ReloadExports(); err != nil {
+		t.Errorf("path-not-found from exportfs should be non-fatal, got: %v", err)
+	}
+}
+
+func TestReloadExportsHardErrorPropagated(t *testing.T) {
+	orig := reloadExportsCmd
+	defer func() { reloadExportsCmd = orig }()
+
+	reloadExportsCmd = func() ([]byte, error) {
+		return []byte("exportfs: invalid export line 5"), fmt.Errorf("exit status 1")
+	}
+	if err := ReloadExports(); err == nil {
+		t.Error("hard exportfs error should be propagated")
 	}
 }
 
