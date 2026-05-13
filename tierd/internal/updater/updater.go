@@ -38,6 +38,9 @@ const (
 var channelFilePath = "/etc/tierd/update-channel"
 var aptAutoUpgrades = "/etc/apt/apt.conf.d/20auto-upgrades"
 var aptSecurityRules = "/etc/apt/apt.conf.d/52smoothnas-security-upgrades"
+var aptBcachefsKeyPath = "/etc/apt/trusted.gpg.d/apt.bcachefs.org.asc"
+var aptBcachefsSourcesPath = "/etc/apt/sources.list.d/apt.bcachefs.org.sources"
+var osReleasePath = "/etc/os-release"
 var execCommand = exec.Command
 var isPackageInstalled = packageInstalled
 
@@ -1221,8 +1224,9 @@ var requiredPackages = []string{
 }
 
 var optionalPackages = []string{
-	"bcachefs-tools",     // bcachefs format/mount tooling when available from configured repos
-	"smoothfs-samba-vfs", // exact-version Samba VFS module; install if the release repo provides it
+	"bcachefs-tools",       // bcachefs format/mount tooling from the bcachefs APT repo
+	"bcachefs-kernel-dkms", // bcachefs out-of-tree kernel module
+	"smoothfs-samba-vfs",   // exact-version Samba VFS module; install if the release repo provides it
 }
 
 // EnsureSystemPackages installs any missing OS-level dependencies.
@@ -1239,6 +1243,7 @@ func EnsureSystemPackages() {
 	if err := EnsureAutomaticSecurityUpdates(); err != nil {
 		log.Printf("ensureSystemPackages: failed to configure automatic security updates: %v", err)
 	}
+	ensureBcachefsRepo()
 	ensureOptionalPackages(optionalPackages)
 	EnsureSambaVFSUpgradeGuard()
 	ensureOoklaSpeedtest()
@@ -1256,6 +1261,72 @@ func ensureOptionalPackages(pkgs []string) {
 			log.Printf("ensureOptionalPackages: install %s skipped: %v: %s", pkg, err, strings.TrimSpace(string(out)))
 		}
 	}
+}
+
+func ensureBcachefsRepo() {
+	if !packageListContains(optionalPackages, "bcachefs-tools") && !packageListContains(optionalPackages, "bcachefs-kernel-dkms") {
+		return
+	}
+	codename := debianCodename()
+	if codename == "" {
+		log.Printf("ensureBcachefsRepo: could not detect Debian codename, skipping")
+		return
+	}
+
+	changed := false
+	if _, err := os.Stat(aptBcachefsKeyPath); err != nil {
+		if err := os.MkdirAll(filepath.Dir(aptBcachefsKeyPath), 0755); err != nil {
+			log.Printf("ensureBcachefsRepo: mkdir key dir: %v", err)
+			return
+		}
+		cmd := execCommand("curl", "-fsSL", "-o", aptBcachefsKeyPath, "https://apt.bcachefs.org/apt.bcachefs.org.asc")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("ensureBcachefsRepo: download key: %v: %s", err, strings.TrimSpace(string(out)))
+			return
+		}
+		changed = true
+	}
+
+	content := fmt.Sprintf("Types: deb\nURIs: https://apt.bcachefs.org/%s/\nSuites: bcachefs-tools-release\nComponents: main\nSigned-By: %s\n", codename, aptBcachefsKeyPath)
+	if data, err := os.ReadFile(aptBcachefsSourcesPath); err != nil || string(data) != content {
+		if err := os.MkdirAll(filepath.Dir(aptBcachefsSourcesPath), 0755); err != nil {
+			log.Printf("ensureBcachefsRepo: mkdir sources dir: %v", err)
+			return
+		}
+		if err := os.WriteFile(aptBcachefsSourcesPath, []byte(content), 0644); err != nil {
+			log.Printf("ensureBcachefsRepo: write %s: %v", aptBcachefsSourcesPath, err)
+			return
+		}
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	if out, err := execCommand("apt-get", "update", "-qq").CombinedOutput(); err != nil {
+		log.Printf("ensureBcachefsRepo: apt-get update: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+}
+
+func packageListContains(pkgs []string, name string) bool {
+	for _, pkg := range pkgs {
+		if pkg == name {
+			return true
+		}
+	}
+	return false
+}
+
+func debianCodename() string {
+	data, err := os.ReadFile(osReleasePath)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "VERSION_CODENAME=") {
+			return strings.Trim(strings.TrimPrefix(line, "VERSION_CODENAME="), `"`)
+		}
+	}
+	return ""
 }
 
 // ensureDebianContrib ensures the Debian contrib component is present in apt
@@ -1281,16 +1352,7 @@ func ensureDebianContrib() {
 		}
 	}
 
-	// Detect the Debian codename from /etc/os-release.
-	codename := ""
-	if data, err := os.ReadFile("/etc/os-release"); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.HasPrefix(line, "VERSION_CODENAME=") {
-				codename = strings.Trim(strings.TrimPrefix(line, "VERSION_CODENAME="), `"`)
-				break
-			}
-		}
-	}
+	codename := debianCodename()
 	if codename == "" {
 		log.Printf("ensureDebianContrib: could not detect Debian codename, skipping")
 		return
