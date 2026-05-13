@@ -133,7 +133,7 @@ echo "  Installing DKMS toolchain and storage utilities..."
 DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get install -y -qq \
     dkms build-essential initramfs-tools libelf-dev kmod dpkg-dev \
     xfsprogs mokutil openssl \
-    thin-provisioning-tools smartmontools hdparm nvme-cli gdisk fio psmisc rsync \
+    thin-provisioning-tools smartmontools hdparm nvme-cli gdisk fio psmisc rsync sshpass \
     iperf3 \
     2>/dev/null || true
 
