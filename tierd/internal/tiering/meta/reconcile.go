@@ -68,12 +68,26 @@ func (p *PoolMetaStore) Reconcile(ctx context.Context, namespaceID string, sourc
 	if !stats.Aborted {
 		p.sweepDead(ctx, nsID, live, &stats)
 	}
+	if !stats.Aborted {
+		p.writeReconcileStamp()
+	}
 
 	stats.Duration = time.Since(start)
-	log.Printf("meta: reconcile ns=%q walked=%d enqueued=%d dead=%d errs=%d in %s",
-		namespaceID, stats.FilesWalked, stats.RecordsEnqueued, stats.DeadRecords,
+	status := "complete"
+	if stats.Aborted {
+		status = "aborted"
+	}
+	log.Printf("meta: reconcile ns=%q status=%s walked=%d enqueued=%d dead=%d errs=%d in %s",
+		namespaceID, status, stats.FilesWalked, stats.RecordsEnqueued, stats.DeadRecords,
 		stats.Errors, stats.Duration)
 	return stats
+}
+
+func (p *PoolMetaStore) writeReconcileStamp() {
+	if root := p.FastestRoot(); root != "" {
+		_ = os.WriteFile(filepath.Join(root, "last-reconcile"),
+			[]byte(time.Now().UTC().Format(time.RFC3339)), 0o644)
+	}
 }
 
 // sweepDead removes any record whose (tier, inode) was not observed
@@ -170,11 +184,4 @@ func (p *PoolMetaStore) walkTier(ctx context.Context, nsID uint64, src Reconcile
 		atomic.AddInt64(&stats.RecordsEnqueued, 1)
 		return nil
 	})
-	// Mark completion (best-effort): touch a stamp file inside the meta root.
-	// We don't use it for anything yet; it's here so operators can see when
-	// the last reconcile finished.
-	if root := p.FastestRoot(); root != "" {
-		_ = os.WriteFile(filepath.Join(root, "last-reconcile"),
-			[]byte(time.Now().UTC().Format(time.RFC3339)), 0o644)
-	}
 }

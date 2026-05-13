@@ -17,6 +17,7 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/api"
 	"github.com/JBailes/SmoothNAS/tierd/internal/backup"
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
+	"github.com/JBailes/SmoothNAS/tierd/internal/iopressure"
 	"github.com/JBailes/SmoothNAS/tierd/internal/lvm"
 	"github.com/JBailes/SmoothNAS/tierd/internal/mdadm"
 	"github.com/JBailes/SmoothNAS/tierd/internal/monitor"
@@ -44,6 +45,14 @@ The daemon listens on 127.0.0.1:8420. For operator commands use tierd-cli.
 `
 
 const defaultAddr = "127.0.0.1:8420"
+
+const (
+	metaReconcileIOPressureThreshold = 5.0
+	metaReconcileIdleProbeInterval   = 30 * time.Second
+	metaReconcileMonitorInterval     = 10 * time.Second
+	metaReconcileRetryDelay          = 5 * time.Minute
+	metaReconcilePeriod              = time.Hour
+)
 
 // systemd-networkd config dir + sysfs root for the default-bond
 // policy. Match the NetworkHandler defaults so all writes land in
@@ -403,19 +412,75 @@ func openPoolMetaStores(store *db.Store, adapter *mdadmadapter.Adapter) error {
 		if len(sources) == 0 {
 			continue
 		}
-		go func(store *meta.PoolMetaStore, namespace string, srcs []meta.ReconcileSource) {
-			// First reconcile right at startup.
-			store.Reconcile(context.Background(), namespace, srcs)
-			// Then once an hour: catches files placed outside of smoothfs and
-			// sweeps ghost records left behind by dropped delete enqueues.
-			t := time.NewTicker(time.Hour)
-			defer t.Stop()
-			for range t.C {
-				store.Reconcile(context.Background(), namespace, srcs)
-			}
-		}(ms, nsID, sources)
+		go runMetaReconcileLoop(ms, nsID, sources)
 	}
 	return nil
+}
+
+func runMetaReconcileLoop(store *meta.PoolMetaStore, namespace string, sources []meta.ReconcileSource) {
+	for {
+		runMetaReconcileWhenIdle(store, namespace, sources)
+
+		t := time.NewTimer(metaReconcilePeriod)
+		<-t.C
+	}
+}
+
+func runMetaReconcileWhenIdle(store *meta.PoolMetaStore, namespace string, sources []meta.ReconcileSource) {
+	for {
+		for metaReconcileHostBusy(namespace) {
+			time.Sleep(metaReconcileIdleProbeInterval)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		monitorDone := make(chan struct{})
+		go monitorMetaReconcileIO(ctx, cancel, namespace, monitorDone)
+
+		stats := store.Reconcile(ctx, namespace, sources)
+		cancel()
+		<-monitorDone
+		if !stats.Aborted {
+			return
+		}
+		log.Printf("meta: reconcile ns=%q retrying after %s; host IO became active",
+			namespace, metaReconcileRetryDelay)
+		time.Sleep(metaReconcileRetryDelay)
+	}
+}
+
+func monitorMetaReconcileIO(ctx context.Context, cancel context.CancelFunc, namespace string, done chan<- struct{}) {
+	defer close(done)
+	t := time.NewTicker(metaReconcileMonitorInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			sample, err := iopressure.ReadDefault()
+			if err != nil || !sample.High(metaReconcileIOPressureThreshold) {
+				continue
+			}
+			log.Printf("meta: reconcile ns=%q aborting; host IO pressure %s above %.1f",
+				namespace, sample.Short(), metaReconcileIOPressureThreshold)
+			cancel()
+			return
+		}
+	}
+}
+
+func metaReconcileHostBusy(namespace string) bool {
+	sample, err := iopressure.ReadDefault()
+	if err != nil {
+		log.Printf("meta: reconcile ns=%q IO pressure unavailable: %v", namespace, err)
+		return false
+	}
+	if !sample.High(metaReconcileIOPressureThreshold) {
+		return false
+	}
+	log.Printf("meta: reconcile ns=%q deferred; host IO pressure %s above %.1f",
+		namespace, sample.Short(), metaReconcileIOPressureThreshold)
+	return true
 }
 
 // openZFSPoolMetaStores opens per-pool meta stores for every ZFS-managed
