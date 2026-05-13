@@ -51,7 +51,27 @@ func (h *DisksHandler) ListDisks(w http.ResponseWriter, r *http.Request) {
 	if disks == nil {
 		disks = []disk.Disk{}
 	}
+	h.markNonRaidAssignments(disks)
 	json.NewEncoder(w).Encode(disks)
+}
+
+func (h *DisksHandler) markNonRaidAssignments(disks []disk.Disk) {
+	if h.store == nil {
+		return
+	}
+	devices, err := h.store.ListNonRaidDevices("")
+	if err != nil {
+		return
+	}
+	assigned := make(map[string]struct{}, len(devices))
+	for _, dev := range devices {
+		assigned[disk.BaseDiskPath(dev.DevicePath)] = struct{}{}
+	}
+	for i := range disks {
+		if _, ok := assigned[disk.BaseDiskPath(disks[i].Path)]; ok {
+			disks[i].Assignment = "nonraid-array"
+		}
+	}
 }
 
 // GetSMART handles GET /api/disks/{id}/smart.
