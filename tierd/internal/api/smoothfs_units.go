@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
@@ -27,6 +28,8 @@ var runSystemctl = func(args ...string) error {
 var createManagedPoolForSystem = createManagedPool
 var destroyManagedPoolForSystem = destroyManagedPool
 var managedSmoothfsTierUsable = isPathMounted
+
+const defaultSmoothfsAdmissionFullPct = 95
 
 func renderManagedPoolUnit(p smoothfsclient.ManagedPool) (string, error) {
 	return smoothfsclient.RenderMountUnit(p)
@@ -128,6 +131,70 @@ func rewriteManagedPoolUnit(pool db.SmoothfsPool) error {
 	return runSystemctl("daemon-reload")
 }
 
+func managedSmoothfsAdmissionFullThreshold(store *db.Store, poolName string) (int, error) {
+	slots, err := store.ListTierSlots(poolName)
+	if err != nil {
+		return 0, err
+	}
+
+	slowestRank := 0
+	for _, slot := range slots {
+		if slot.State != db.TierSlotStateAssigned {
+			continue
+		}
+		if slot.Rank > slowestRank {
+			slowestRank = slot.Rank
+		}
+	}
+
+	threshold := 0
+	for _, slot := range slots {
+		if slot.State != db.TierSlotStateAssigned || slot.Rank == slowestRank {
+			continue
+		}
+		if slot.FullThresholdPct <= 0 {
+			continue
+		}
+		if threshold == 0 || slot.FullThresholdPct < threshold {
+			threshold = slot.FullThresholdPct
+		}
+	}
+	if threshold == 0 {
+		threshold = defaultSmoothfsAdmissionFullPct
+	}
+	if threshold < 1 {
+		return 1, nil
+	}
+	if threshold > 100 {
+		return 100, nil
+	}
+	return threshold, nil
+}
+
+func syncManagedSmoothfsAdmissionThreshold(store *db.Store, poolName string) error {
+	pool, err := store.GetSmoothfsPool(poolName)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	threshold, err := managedSmoothfsAdmissionFullThreshold(store, poolName)
+	if err != nil {
+		return err
+	}
+	root := smoothfsWriteStagingRoot(pool.UUID)
+	if !sysfsBool(filepath.Join(root, "write_staging_supported")) {
+		return nil
+	}
+	path := filepath.Join(root, "write_staging_full_pct")
+	if sysfsUint(path) == uint64(threshold) {
+		return nil
+	}
+	data := []byte(strconv.Itoa(threshold) + "\n")
+	return writeSmoothfsWriteStagingFile(path, data, 0o644)
+}
+
 func isPathMounted(path string) bool {
 	return exec.Command("findmnt", "-M", path).Run() == nil
 }
@@ -155,6 +222,9 @@ func ensureManagedSmoothfsPool(store *db.Store, poolName string) error {
 			}
 			if err := runSystemctl("enable", "--now", filepath.Base(existing.UnitPath)); err != nil {
 				return fmt.Errorf("start existing smoothfs pool %s: %w", poolName, err)
+			}
+			if err := syncManagedSmoothfsAdmissionThreshold(store, poolName); err != nil {
+				return fmt.Errorf("sync smoothfs admission threshold for %s: %w", poolName, err)
 			}
 		}
 		return nil
@@ -244,10 +314,13 @@ func createManagedSmoothfsPoolRow(store *db.Store, poolName string, poolUUID uui
 	}
 	if _, err := store.CreateSmoothfsPool(row); err != nil {
 		if errors.Is(err, db.ErrDuplicate) {
-			return nil
+			return syncManagedSmoothfsAdmissionThreshold(store, poolName)
 		}
 		_ = destroyManagedPoolForSystem(*mp)
 		return err
+	}
+	if err := syncManagedSmoothfsAdmissionThreshold(store, poolName); err != nil {
+		return fmt.Errorf("sync smoothfs admission threshold for %s: %w", poolName, err)
 	}
 	return nil
 }
