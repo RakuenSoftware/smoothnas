@@ -40,6 +40,7 @@ var aptAutoUpgrades = "/etc/apt/apt.conf.d/20auto-upgrades"
 var aptSecurityRules = "/etc/apt/apt.conf.d/52smoothnas-security-upgrades"
 var aptBcachefsKeyPath = "/etc/apt/trusted.gpg.d/apt.bcachefs.org.asc"
 var aptBcachefsSourcesPath = "/etc/apt/sources.list.d/apt.bcachefs.org.sources"
+var smoothKernelHeadersProviderBuildRoot = "/var/lib/tierd/smoothkernel-headers-virtual"
 var osReleasePath = "/etc/os-release"
 var execCommand = exec.Command
 var isPackageInstalled = packageInstalled
@@ -1244,6 +1245,7 @@ func EnsureSystemPackages() {
 		log.Printf("ensureSystemPackages: failed to configure automatic security updates: %v", err)
 	}
 	ensureBcachefsRepo()
+	ensureLinuxHeadersVirtualProvider()
 	ensureOptionalPackages(optionalPackages)
 	EnsureSambaVFSUpgradeGuard()
 	ensureOoklaSpeedtest()
@@ -1260,6 +1262,52 @@ func ensureOptionalPackages(pkgs []string) {
 		if out, err := cmd.CombinedOutput(); err != nil {
 			log.Printf("ensureOptionalPackages: install %s skipped: %v: %s", pkg, err, strings.TrimSpace(string(out)))
 		}
+	}
+}
+
+func ensureLinuxHeadersVirtualProvider() {
+	if !packageListContains(optionalPackages, "bcachefs-kernel-dkms") {
+		return
+	}
+	if isPackageInstalled("smoothkernel-headers-virtual") {
+		return
+	}
+	out, err := execCommand("uname", "-r").Output()
+	if err != nil {
+		log.Printf("ensureLinuxHeadersVirtualProvider: uname -r: %v", err)
+		return
+	}
+	kver := strings.TrimSpace(string(out))
+	if !strings.Contains(kver, "smoothkernel") && !strings.Contains(kver, "smoothnas") {
+		return
+	}
+	headersPkg := "linux-headers-" + kver
+	headersVersion, ok := packageVersion(headersPkg)
+	if !ok {
+		log.Printf("ensureLinuxHeadersVirtualProvider: %s is not installed", headersPkg)
+		return
+	}
+
+	buildDir := filepath.Join(smoothKernelHeadersProviderBuildRoot, "pkg")
+	debianDir := filepath.Join(buildDir, "DEBIAN")
+	debPath := filepath.Join(smoothKernelHeadersProviderBuildRoot, "smoothkernel-headers-virtual.deb")
+	_ = os.RemoveAll(smoothKernelHeadersProviderBuildRoot)
+	if err := os.MkdirAll(debianDir, 0755); err != nil {
+		log.Printf("ensureLinuxHeadersVirtualProvider: mkdir %s: %v", debianDir, err)
+		return
+	}
+	control := fmt.Sprintf("Package: smoothkernel-headers-virtual\nVersion: %s\nArchitecture: all\nMaintainer: SmoothNAS <root@localhost>\nProvides: linux-headers (= %s)\nDepends: %s (= %s)\nDescription: SmoothKernel linux-headers virtual provider\n Allows DKMS packages that depend on the generic linux-headers virtual package\n to use the installed SmoothKernel headers package.\n",
+		headersVersion, headersVersion, headersPkg, headersVersion)
+	if err := os.WriteFile(filepath.Join(debianDir, "control"), []byte(control), 0644); err != nil {
+		log.Printf("ensureLinuxHeadersVirtualProvider: write control: %v", err)
+		return
+	}
+	if out, err := execCommand("dpkg-deb", "--build", buildDir, debPath).CombinedOutput(); err != nil {
+		log.Printf("ensureLinuxHeadersVirtualProvider: dpkg-deb: %v: %s", err, strings.TrimSpace(string(out)))
+		return
+	}
+	if out, err := execCommand("dpkg", "-i", debPath).CombinedOutput(); err != nil {
+		log.Printf("ensureLinuxHeadersVirtualProvider: dpkg -i: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 }
 
