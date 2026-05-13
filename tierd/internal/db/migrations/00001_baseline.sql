@@ -58,7 +58,8 @@ CREATE TABLE mdadm_arrays (
 CREATE TABLE tier_pools (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     name                TEXT NOT NULL UNIQUE,
-    filesystem          TEXT NOT NULL DEFAULT 'xfs' CHECK (filesystem IN ('xfs')),
+    filesystem          TEXT NOT NULL DEFAULT 'xfs'
+        CHECK (filesystem IN ('xfs','ext4','btrfs','bcachefs')),
     state               TEXT NOT NULL CHECK (state IN ('provisioning','healthy','degraded','unmounted','error','destroying')),
     error_reason        TEXT,
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),

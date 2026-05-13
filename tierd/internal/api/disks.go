@@ -59,6 +59,26 @@ func (h *DisksHandler) markNonRaidAssignments(disks []disk.Disk) {
 	if h.store == nil {
 		return
 	}
+	fsDevices, err := h.store.ListFilesystemArrayDevices("")
+	if err == nil {
+		fsRows, _ := h.store.ListFilesystemArrays()
+		kindByID := map[int64]string{}
+		for _, row := range fsRows {
+			kindByID[row.ID] = row.Kind
+		}
+		for _, dev := range fsDevices {
+			kind := kindByID[dev.ArrayID]
+			if kind == "" {
+				kind = "filesystem"
+			}
+			base := disk.BaseDiskPath(dev.DevicePath)
+			for i := range disks {
+				if disk.BaseDiskPath(disks[i].Path) == base {
+					disks[i].Assignment = kind + "-array"
+				}
+			}
+		}
+	}
 	devices, err := h.store.ListNonRaidDevices("")
 	if err != nil {
 		return

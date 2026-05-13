@@ -1,12 +1,13 @@
 import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import { api } from '../api/api';
 
-type PreloadKey = 'disks' | 'arrays' | 'pools' | 'datasets' | 'zvols'
+type PreloadKey = 'disks' | 'arrays' | 'filesystemArrays' | 'pools' | 'datasets' | 'zvols'
   | 'snapshots' | 'protocols' | 'health' | 'alarmHistory' | 'updateChannel';
 
 interface PreloadData {
   disks: any[];
   arrays: any[];
+  filesystemArrays: any[];
   pools: any[];
   datasets: any[];
   zvols: any[];
@@ -27,6 +28,7 @@ const PreloadContext = createContext<PreloadContextValue>(null!);
 const fetchers: Record<PreloadKey, () => Promise<any>> = {
   disks: () => api.getDisks(),
   arrays: () => api.getArrays(),
+  filesystemArrays: () => api.getFilesystemArrays(),
   pools: () => api.getPools(),
   datasets: () => api.getDatasets(),
   zvols: () => api.getZvols(),
@@ -38,7 +40,7 @@ const fetchers: Record<PreloadKey, () => Promise<any>> = {
 };
 
 const defaults: PreloadData = {
-  disks: [], arrays: [], pools: [], datasets: [], zvols: [],
+  disks: [], arrays: [], filesystemArrays: [], pools: [], datasets: [], zvols: [],
   snapshots: [], protocols: [], health: null, alarmHistory: [], updateChannel: null,
 };
 
