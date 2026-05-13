@@ -13,7 +13,7 @@ export default function NfsExports() {
   const [toggling, setToggling] = useState(false);
   const [updatingExport, setUpdatingExport] = useState<number | null>(null);
   const [showCreate, setShowCreate] = useState(false);
-  const [newExport, setNewExport] = useState({ path: '', networks: '', sync: false, root_squash: true, read_only: false });
+  const [newExport, setNewExport] = useState({ path: '', networks: '', sync: false, root_squash: false, read_only: false });
   const [paths, setPaths] = useState<any[]>([]);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -45,7 +45,7 @@ export default function NfsExports() {
     const data = { ...newExport, networks: newExport.networks.split(',').map((n: string) => n.trim()).filter(Boolean) };
     api.createNfsExport(data).then(() => {
       setShowCreate(false);
-      setNewExport({ path: '', networks: '', sync: false, root_squash: true, read_only: false });
+      setNewExport({ path: '', networks: '', sync: false, root_squash: false, read_only: false });
       loadData();
     }).catch(e => setError(extractError(e, t('nfs.error.create'))));
   }

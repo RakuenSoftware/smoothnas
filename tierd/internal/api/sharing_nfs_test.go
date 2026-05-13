@@ -20,7 +20,7 @@ func TestBuildNFSExportsAddsSmoothfsFsid(t *testing.T) {
 			Path:       "/mnt/media/storage",
 			Networks:   "127.0.0.1",
 			Sync:       false,
-			RootSquash: false,
+			RootSquash: true,
 			ReadOnly:   false,
 		},
 	}, []db.SmoothfsPool{
@@ -37,6 +37,9 @@ func TestBuildNFSExportsAddsSmoothfsFsid(t *testing.T) {
 	want := nfs.SmoothfsExportFsidOption(poolID, "/mnt/media", "/mnt/media/storage")
 	if exports[0].Fsid != want {
 		t.Fatalf("Fsid = %q, want %q", exports[0].Fsid, want)
+	}
+	if exports[0].RootSquash {
+		t.Fatal("smoothfs export kept root_squash=true, want no_root_squash for backup reads")
 	}
 }
 
