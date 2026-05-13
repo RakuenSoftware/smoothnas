@@ -582,6 +582,15 @@ func (h *SharingHandler) createNFSExport(w http.ResponseWriter, r *http.Request)
 		jsonError(w, fmt.Sprintf("export path is not a directory: %s", req.Path), http.StatusBadRequest)
 		return
 	}
+	if pools, err := h.store.ListSmoothfsPools(); err != nil {
+		serverError(w, fmt.Errorf("list smoothfs pools: %w", err))
+		return
+	} else if smoothfsPoolForPath(req.Path, pools) != nil {
+		// SmoothFS exports back full-system backup pulls. root_squash maps
+		// client root to nobody and makes rsync fail on non-world-readable
+		// files even though the backup runner is root on the client.
+		req.RootSquash = false
+	}
 
 	if err := ensureNFSExportServing(); err != nil {
 		serverError(w, err)
@@ -706,6 +715,7 @@ func buildNFSExports(dbExports []db.NfsExport, pools []db.SmoothfsPool) []nfs.Ex
 			ReadOnly:   e.ReadOnly,
 		}
 		if pool := smoothfsPoolForPath(e.Path, pools); pool != nil {
+			exp.RootSquash = false
 			if id, err := uuid.Parse(pool.UUID); err == nil {
 				exp.Fsid = nfs.SmoothfsExportFsidOption(id, pool.Mountpoint, e.Path)
 			}
