@@ -64,6 +64,10 @@ export const api = {
   replaceDiskInArray: (name: string, oldDisk: string, newDisk: string) =>
     apiFetch('POST', `/arrays/${name}/disks/${oldDisk}/replace`, { new_disk: newDisk }),
   scrubArray: (name: string) => apiFetch('POST', `/arrays/${name}/scrub`, {}),
+  getFilesystemArrays: () => apiFetch<any[]>('GET', '/arrays/filesystems'),
+  createFilesystemArray: (data: any) => apiFetch('POST', '/arrays/filesystems', data),
+  getFilesystemArray: (name: string) => apiFetch('GET', `/arrays/filesystems/${name}`),
+  deleteFilesystemArray: (name: string) => apiFetch('DELETE', `/arrays/filesystems/${name}`),
 
   // --- nonRaid Arrays ---
   getNonRaidArrays: () => apiFetch<any[]>('GET', '/nonraid/arrays'),

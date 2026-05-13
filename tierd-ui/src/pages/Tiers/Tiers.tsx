@@ -24,6 +24,7 @@ export default function Tiers() {
   const [error, setError] = useState('');
   const [tiers, setTiers] = useState<any[]>([]);
   const [arrays, setArrays] = useState<any[]>([]);
+  const [filesystemArrays, setFilesystemArrays] = useState<any[]>([]);
   const [pools, setPools] = useState<any[]>([]);
   const [namespaces, setNamespaces] = useState<any[]>([]);
   const [spindownByPool, setSpindownByPool] = useState<Record<string, any>>({});
@@ -87,12 +88,14 @@ export default function Tiers() {
     const p = Promise.all([
       api.getTiers(),
       api.getArrays(),
+      api.getFilesystemArrays().catch(() => []),
       api.getPools().catch(() => []),
       api.getTieringNamespaces().catch(() => []),
     ])
-      .then(([ts, arr, pls, nss]) => {
+      .then(([ts, arr, fsArr, pls, nss]) => {
         setTiers(ts || []);
         setArrays(arr || []);
+        setFilesystemArrays(fsArr || []);
         setPools(pls || []);
         setNamespaces(nss || []);
         refreshSpindown(ts || []);
@@ -220,6 +223,16 @@ export default function Tiers() {
         ref: p.name,
       });
     }
+    for (const a of filesystemArrays || []) {
+      const key = `${a.kind}:${a.mount_path}`;
+      if (otherKeys.has(key)) continue;
+      out.push({
+        key,
+        label: `${a.name} (${a.kind}, ${a.size_human || '?'})`,
+        kind: a.kind,
+        ref: a.mount_path,
+      });
+    }
     return out;
   }
 
@@ -280,6 +293,7 @@ export default function Tiers() {
       api.deleteTier(name).then(() => {
         load(true);
         invalidatePreload('arrays');
+        invalidatePreload('filesystemArrays');
       }).catch(e => {
         // Roll back the optimistic state so the user can retry.
         load(true);
@@ -334,6 +348,7 @@ export default function Tiers() {
         }));
         load(true);
         invalidatePreload('arrays');
+        invalidatePreload('filesystemArrays');
       }).catch(e => {
         const msg = extractError(e, t('tiers.error.assign'));
         setError(msg);

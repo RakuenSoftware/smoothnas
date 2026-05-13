@@ -67,13 +67,13 @@ const (
 // produced before the multi-arch split — `TierdSHAForArch` falls
 // back to it when an arch-specific field is empty.
 type Manifest struct {
-	Version       string `json:"version"`
-	Channel       string `json:"channel"`
-	TierdAmd64SHA string `json:"tierd_amd64_sha256,omitempty"`
-	TierdArm64SHA string `json:"tierd_arm64_sha256,omitempty"`
-	TierdSHA      string `json:"tierd_sha256,omitempty"` // legacy single-arch fallback
-	UISHA         string `json:"ui_sha256"`
-	SmoothfsRef   string `json:"smoothfs_ref,omitempty"`
+	Version        string `json:"version"`
+	Channel        string `json:"channel"`
+	TierdAmd64SHA  string `json:"tierd_amd64_sha256,omitempty"`
+	TierdArm64SHA  string `json:"tierd_arm64_sha256,omitempty"`
+	TierdSHA       string `json:"tierd_sha256,omitempty"` // legacy single-arch fallback
+	UISHA          string `json:"ui_sha256"`
+	SmoothfsRef    string `json:"smoothfs_ref,omitempty"`
 	SmoothfsSrcSHA string `json:"smoothfs_src_sha256,omitempty"`
 }
 
@@ -1206,6 +1206,7 @@ func appendModulesEntryIfMissing(path, module string) error {
 // apt-get install is a no-op for already-installed packages.
 var requiredPackages = []string{
 	"curl",                // Ookla repository bootstrap for speedtest CLI
+	"btrfs-progs",         // mkfs.btrfs / btrfs subvolume for filesystem arrays
 	"fio",                 // disk benchmarks
 	"cifs-utils",          // SMB remote benchmark mounts
 	"gdisk",               // sgdisk: disk preparation before array/pool creation
@@ -1220,6 +1221,7 @@ var requiredPackages = []string{
 }
 
 var optionalPackages = []string{
+	"bcachefs-tools",     // bcachefs format/mount tooling when available from configured repos
 	"smoothfs-samba-vfs", // exact-version Samba VFS module; install if the release repo provides it
 }
 
