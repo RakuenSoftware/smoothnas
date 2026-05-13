@@ -44,6 +44,80 @@ func TestRenderManagedPoolUnitRequiresLowerMountUnits(t *testing.T) {
 	}
 }
 
+func TestSyncManagedSmoothfsAdmissionThresholdUsesConfiguredFastTierFullPct(t *testing.T) {
+	store := openSmoothfsUnitTestStore(t)
+	if err := store.CreateTierPoolWithOptions("media", "xfs", []db.TierDefinition{
+		{Name: "Optane1", Rank: 1},
+		{Name: "Optane2", Rank: 2},
+		{Name: "HDD", Rank: 3},
+	}, false); err != nil {
+		t.Fatalf("create tier pool: %v", err)
+	}
+	for _, level := range []string{"Optane1", "Optane2", "HDD"} {
+		if err := store.AddArrayToTierSlot("media", level, "md-"+level); err != nil {
+			t.Fatalf("assign %s: %v", level, err)
+		}
+	}
+	if err := store.SetTierSlotFill("media", "Optane1", 50, 90); err != nil {
+		t.Fatalf("set Optane1 fill: %v", err)
+	}
+	if err := store.SetTierSlotFill("media", "Optane2", 50, 88); err != nil {
+		t.Fatalf("set Optane2 fill: %v", err)
+	}
+	if err := store.SetTierSlotFill("media", "HDD", 95, 95); err != nil {
+		t.Fatalf("set HDD fill: %v", err)
+	}
+	_, err := store.CreateSmoothfsPool(db.SmoothfsPool{
+		UUID:       "11111111-1111-1111-1111-111111111111",
+		Name:       "media",
+		Tiers:      []string{"/mnt/.tierd-backing/media/Optane1", "/mnt/.tierd-backing/media/Optane2", "/mnt/.tierd-backing/media/HDD"},
+		Mountpoint: "/mnt/media",
+		UnitPath:   "/etc/systemd/system/mnt-media.mount",
+	})
+	if err != nil {
+		t.Fatalf("create smoothfs pool: %v", err)
+	}
+
+	origRead := readSmoothfsWriteStagingFile
+	origWrite := writeSmoothfsWriteStagingFile
+	origRoot := smoothfsWriteStagingRoot
+	t.Cleanup(func() {
+		readSmoothfsWriteStagingFile = origRead
+		writeSmoothfsWriteStagingFile = origWrite
+		smoothfsWriteStagingRoot = origRoot
+	})
+
+	readSmoothfsWriteStagingFile = func(path string) ([]byte, error) {
+		switch filepath.Base(path) {
+		case "write_staging_supported":
+			return []byte("1\n"), nil
+		case "write_staging_full_pct":
+			return []byte("98\n"), nil
+		default:
+			return nil, errNotExist{}
+		}
+	}
+	var writes []string
+	writeSmoothfsWriteStagingFile = func(path string, data []byte, _ os.FileMode) error {
+		writes = append(writes, filepath.Base(path)+"="+string(data))
+		return nil
+	}
+	smoothfsWriteStagingRoot = func(uuid string) string {
+		if uuid != "11111111-1111-1111-1111-111111111111" {
+			t.Fatalf("unexpected smoothfs uuid %q", uuid)
+		}
+		return "/sys/fs/smoothfs/test"
+	}
+
+	if err := syncManagedSmoothfsAdmissionThreshold(store, "media"); err != nil {
+		t.Fatalf("sync admission threshold: %v", err)
+	}
+	want := []string{"write_staging_full_pct=88\n"}
+	if !reflect.DeepEqual(writes, want) {
+		t.Fatalf("writes = %#v, want %#v", writes, want)
+	}
+}
+
 func TestEnsureManagedSmoothfsPoolCreatesMountAtTierPath(t *testing.T) {
 	store := openSmoothfsUnitTestStore(t)
 	if err := store.CreateTierPoolWithOptions("media", "xfs", nil, false); err != nil {
