@@ -304,6 +304,7 @@ func runHostInit() {
 	mdadm.EnsureStripeCacheSize(mdadm.DefaultStripeCachePages)
 	tuning.ApplyNetworkTuning()
 	tuning.ApplyBlockTuning()
+	tuning.ApplyZfsArcTuning()
 	if err := nfs.ApplyServerTuning(); err != nil {
 		log.Printf("warning: could not apply NFS tuning: %v", err)
 	}
