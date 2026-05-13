@@ -204,3 +204,59 @@ func lastField(s string) string {
 	}
 	return fields[len(fields)-1]
 }
+
+const (
+	zfsArcMaxSysfsPath   = "/sys/module/zfs/parameters/zfs_arc_max"
+	zfsModprobeConfPath  = "/etc/modprobe.d/smoothnas-zfs.conf"
+	zfsArcOsHeadroom     = 4 << 30 // 4 GiB reserved for OS + tierd + other processes
+)
+
+// ApplyZfsArcTuning raises zfs_arc_max to (total_RAM - 4 GiB) if the current
+// limit is below that value. It never lowers a value the operator has already
+// raised, and skips completely when zfs_arc_max is 0 (unlimited — ZFS
+// self-manages). The computed limit is persisted to modprobe.d so it survives
+// reboots even if the ZFS module is reloaded before tierd starts.
+//
+// A 3 GiB cap on a 14 GiB box (the original misconfiguration this was
+// written to fix) causes arc_prune to run at ~23 % CPU continuously, evicting
+// cached blocks that nfsd threads immediately need again — producing <20 KB/s
+// NFS throughput on a 2.5 Gbps link.
+func ApplyZfsArcTuning() {
+	raw, err := os.ReadFile(zfsArcMaxSysfsPath)
+	if err != nil {
+		return // ZFS module not loaded
+	}
+	current, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+	if err != nil {
+		log.Printf("tuning: zfs_arc_max: parse current value: %v", err)
+		return
+	}
+	if current == 0 {
+		return // unlimited — let ZFS self-manage
+	}
+
+	memKB, err := readMemTotalKB()
+	if err != nil {
+		log.Printf("tuning: zfs_arc_max: read MemTotal: %v", err)
+		return
+	}
+	target := memKB*1024 - zfsArcOsHeadroom
+	if target < 1<<30 {
+		target = 1 << 30 // floor at 1 GiB on very small machines
+	}
+
+	if current >= target {
+		return // already at or above computed target
+	}
+
+	targetStr := strconv.FormatInt(target, 10)
+	if err := os.WriteFile(zfsArcMaxSysfsPath, []byte(targetStr+"\n"), 0644); err != nil {
+		log.Printf("tuning: zfs_arc_max: write sysfs: %v", err)
+		return
+	}
+	content := fmt.Sprintf("options zfs zfs_arc_max=%s\n", targetStr)
+	if err := os.WriteFile(zfsModprobeConfPath, []byte(content), 0644); err != nil {
+		log.Printf("tuning: zfs_arc_max: write modprobe conf: %v", err)
+	}
+	log.Printf("tuning: zfs_arc_max: %d -> %d", current, target)
+}
