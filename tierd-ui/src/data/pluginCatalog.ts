@@ -140,7 +140,7 @@ ports:
 ui:
   embed:
     path: /
-    auth: bearer
+    auth: bearer-injected
 
 profiles:
   - default-limits
@@ -197,7 +197,7 @@ ports:
 ui:
   embed:
     path: /
-    auth: bearer
+    auth: bearer-injected
 
 profiles:
   - default-limits
@@ -254,7 +254,7 @@ ports:
 ui:
   embed:
     path: /
-    auth: bearer
+    auth: bearer-injected
 
 profiles:
   - default-limits
