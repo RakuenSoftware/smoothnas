@@ -7,11 +7,23 @@ import { extractError } from '../../utils/errors';
 import Spinner from '../../components/Spinner/Spinner';
 import ConfirmDialog from '../../components/ConfirmDialog/ConfirmDialog';
 
-type CreateTab = 'mdadm' | 'zfs';
+type CreateTab = 'mdadm' | 'zfs' | 'filesystem';
+
+function formatBytes(n: number): string {
+  if (!n || n <= 0) return '0 B';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
 
 export default function Arrays() {
   const { t } = useI18n();
-  const { arrays, pools, disks, invalidate } = usePreload();
+  const { arrays, filesystemArrays, pools, disks, invalidate } = usePreload();
   const toast = useToast();
   const [loading, setLoading] = useState(true);
   const [expandedName, setExpandedName] = useState<string | null>(null);
@@ -29,6 +41,16 @@ export default function Arrays() {
   const [selectedL2arc, setSelectedL2arc] = useState<string[]>([]);
   const [importablePools, setImportablePools] = useState<any[]>([]);
   const [selectedZfsMembers, setSelectedZfsMembers] = useState<string[]>([]);
+
+  // btrfs / bcachefs create state
+  const [newFSArray, setNewFSArray] = useState({
+    name: 'fs0',
+    kind: 'btrfs',
+    data_profile: '',
+    metadata_profile: '',
+    replicas: 1,
+  });
+  const [selectedFSDisks, setSelectedFSDisks] = useState<string[]>([]);
 
   const [submitting, setSubmitting] = useState(false);
   const [createStatus, setCreateStatus] = useState('');
@@ -62,6 +84,7 @@ export default function Arrays() {
     setSelectedData([]);
     setSelectedSlog([]);
     setSelectedL2arc([]);
+    setSelectedFSDisks([]);
     setShowCreate(true);
   }
 
@@ -72,8 +95,8 @@ export default function Arrays() {
   }
 
   useEffect(() => {
-    if (arrays !== undefined && pools !== undefined) setLoading(false);
-  }, [arrays, pools]);
+    if (arrays !== undefined && filesystemArrays !== undefined && pools !== undefined) setLoading(false);
+  }, [arrays, filesystemArrays, pools]);
 
   useEffect(() => {
     loadImportablePools();
@@ -84,6 +107,7 @@ export default function Arrays() {
 
   function refresh() {
     invalidate('arrays');
+    invalidate('filesystemArrays');
     invalidate('pools');
     invalidate('disks');
     loadImportablePools();
@@ -154,6 +178,67 @@ export default function Arrays() {
       setCreateStatus('');
       toast.error(extractError(e, t('arrays.error.createPool')));
     });
+  }
+
+  // --- btrfs / bcachefs helpers ------------------------------------------
+
+  function toggleFSDisk(path: string) {
+    setSelectedFSDisks(prev => prev.includes(path) ? prev.filter(p => p !== path) : [...prev, path]);
+  }
+
+  function submitFilesystemArray() {
+    if (selectedFSDisks.length === 0) { toast.warning(t('arrays.warn.selectAtLeastOneDisk')); return; }
+    setSubmitting(true);
+    setCreateStatus(t('arrays.status.starting'));
+    api.createFilesystemArray({
+      name: newFSArray.name,
+      kind: newFSArray.kind,
+      disks: selectedFSDisks,
+      ...(newFSArray.kind === 'btrfs' ? {
+        data_profile: newFSArray.data_profile,
+        metadata_profile: newFSArray.metadata_profile,
+      } : {
+        replicas: newFSArray.replicas,
+      }),
+    }).then((res: any) => {
+      stopPollRef.current = pollJobWithStatus(res.job_id, onCreateDone, (err) => {
+        setSubmitting(false);
+        setCreateStatus('');
+        toast.error(t('arrays.error.createFilesystemPrefix', { err }));
+        refresh();
+      });
+    }).catch(e => {
+      setSubmitting(false);
+      setCreateStatus('');
+      toast.error(extractError(e, t('arrays.error.createFilesystem')));
+    });
+  }
+
+  function destroyFilesystemArray(name: string) {
+    setConfirmTitle(t('arrays.confirm.destroyFilesystemTitle'));
+    setConfirmMessage(t('arrays.confirm.destroyFilesystemMessage', { name }));
+    confirmAction.current = () => {
+      setConfirmVisible(false);
+      setDestroyingArrays(prev => new Set([...prev, `fs:${name}`]));
+      api.deleteFilesystemArray(name).then((res: any) => {
+        stopPollRef.current = pollJobWithStatus(res.job_id,
+          () => {
+            setDestroyingArrays(prev => { const s = new Set(prev); s.delete(`fs:${name}`); return s; });
+            toast.success(t('arrays.toast.arrayDestroyed'));
+            refresh();
+          },
+          (err) => {
+            setDestroyingArrays(prev => { const s = new Set(prev); s.delete(`fs:${name}`); return s; });
+            toast.error(t('arrays.error.destroyArrayPrefix', { err }));
+            refresh();
+          }
+        );
+      }).catch(e => {
+        setDestroyingArrays(prev => { const s = new Set(prev); s.delete(`fs:${name}`); return s; });
+        toast.error(extractError(e, t('arrays.error.destroyArray')));
+      });
+    };
+    setConfirmVisible(true);
   }
 
   function destroyPool(name: string) {
@@ -251,6 +336,7 @@ export default function Arrays() {
     setSelectedData([]);
     setSelectedSlog([]);
     setSelectedL2arc([]);
+    setSelectedFSDisks([]);
     toast.success(t('arrays.toast.created'));
     refresh();
   }
@@ -286,6 +372,19 @@ export default function Arrays() {
         stopPollRef.current = pollJobWithStatus(running.id, onDestroyDone, (err) => {
           setDestroyStatus('');
           toast.error(t('arrays.error.arrayDestructionFailed', { err }));
+          refresh();
+        });
+      }
+    }).catch(() => {});
+    api.listJobsByTag('filesystem-array-create').then((jobs: any[]) => {
+      const running = jobs.find(j => j.status === 'running');
+      if (running) {
+        setSubmitting(true);
+        setCreateStatus(running.progress || t('arrays.status.creatingArray'));
+        stopPollRef.current = pollJobWithStatus(running.id, onCreateDone, (err) => {
+          setSubmitting(false);
+          setCreateStatus('');
+          toast.error(t('arrays.error.arrayCreationFailed', { err }));
           refresh();
         });
       }
@@ -336,14 +435,14 @@ export default function Arrays() {
       {showCreate && (
         <div className="create-form">
           <div className="tabs" style={{ marginBottom: 12 }}>
-            {(['mdadm', 'zfs'] as CreateTab[]).map(tab => (
+            {(['mdadm', 'zfs', 'filesystem'] as CreateTab[]).map(tab => (
               <button
                 key={tab}
                 className={`tab${createTab === tab ? ' active' : ''}`}
                 onClick={() => setCreateTab(tab)}
                 disabled={submitting}
               >
-                {tab === 'mdadm' ? t('arrays.tab.mdadm') : t('arrays.tab.zfs')}
+                {tab === 'mdadm' ? t('arrays.tab.mdadm') : tab === 'zfs' ? t('arrays.tab.zfs') : t('arrays.tab.filesystem')}
               </button>
             ))}
           </div>
@@ -446,6 +545,64 @@ export default function Arrays() {
               </div>
             </>
           )}
+
+          {createTab === 'filesystem' && (
+            <>
+              <h3>{t('arrays.create.filesystemTitle')}</h3>
+              <div className="form-row">
+                <label>{t('arrays.field.name')}
+                  <input value={newFSArray.name} onChange={e => setNewFSArray(p => ({ ...p, name: e.target.value }))} placeholder="fs0" />
+                </label>
+                <label>{t('arrays.field.filesystem')}
+                  <select value={newFSArray.kind} onChange={e => setNewFSArray(p => ({ ...p, kind: e.target.value }))}>
+                    <option value="btrfs">btrfs</option>
+                    <option value="bcachefs">bcachefs</option>
+                  </select>
+                </label>
+                {newFSArray.kind === 'btrfs' ? (
+                  <>
+                    <label>{t('arrays.field.dataProfile')}
+                      <select value={newFSArray.data_profile} onChange={e => setNewFSArray(p => ({ ...p, data_profile: e.target.value }))}>
+                        <option value="">{t('arrays.option.auto')}</option>
+                        {['single', 'raid0', 'raid1', 'raid10', 'raid5', 'raid6'].map(v => <option key={v} value={v}>{v}</option>)}
+                      </select>
+                    </label>
+                    <label>{t('arrays.field.metadataProfile')}
+                      <select value={newFSArray.metadata_profile} onChange={e => setNewFSArray(p => ({ ...p, metadata_profile: e.target.value }))}>
+                        <option value="">{t('arrays.option.auto')}</option>
+                        {['dup', 'single', 'raid0', 'raid1', 'raid10', 'raid5', 'raid6'].map(v => <option key={v} value={v}>{v}</option>)}
+                      </select>
+                    </label>
+                  </>
+                ) : (
+                  <label>{t('arrays.field.replicas')}
+                    <select value={newFSArray.replicas} onChange={e => setNewFSArray(p => ({ ...p, replicas: Number(e.target.value) }))}>
+                      {[1, 2, 3].map(v => <option key={v} value={v}>{v}</option>)}
+                    </select>
+                  </label>
+                )}
+              </div>
+              <ZfsDiskPicker
+                label={t('arrays.disks.selectForFilesystem')}
+                disks={unassignedDisks}
+                selected={selectedFSDisks}
+                otherSelections={[]}
+                onToggle={toggleFSDisk}
+                accent="#4db6ac"
+                tint="#e0f2f1"
+                emptyMessage={t('arrays.disks.noUnassigned')}
+              />
+              {selectedFSDisks.length > 0 && <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>{t('arrays.disks.selected', { count: selectedFSDisks.length })}</p>}
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                {createStatus && <span style={{ fontSize: 13, color: '#666' }}>{createStatus}</span>}
+                <div style={{ flex: 1 }} />
+                <button className="btn secondary" onClick={cancelCreate} disabled={submitting}>{t('common.cancel')}</button>
+                <button className="btn primary" onClick={submitFilesystemArray} disabled={submitting || selectedFSDisks.length === 0}>
+                  {submitting ? t('arrays.creating') : t('arrays.button.create')}
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
 
@@ -516,6 +673,63 @@ export default function Arrays() {
                           <button className="btn danger" onClick={() => deleteArray(a.name)}>{t('arrays.action.destroy')}</button>
                         )}
                       </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* --- btrfs / bcachefs section --- */}
+          <h3 style={{ marginTop: 16, marginBottom: 8 }}>{t('arrays.section.filesystem')}</h3>
+          {filesystemArrays.length === 0 ? (
+            <div className="empty-state" style={{ marginBottom: 24 }}>
+              <p>{t('arrays.empty.filesystem')}</p>
+              <p className="empty-hint">{t('arrays.empty.filesystemHint')}</p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 0, marginBottom: 24 }}>
+              {filesystemArrays.map((a: any) => (
+                <div key={`${a.kind}:${a.name}`} style={{ background: '#fff', borderRadius: 8, marginBottom: 8, overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', opacity: destroyingArrays.has(`fs:${a.name}`) ? 0.5 : 1, pointerEvents: destroyingArrays.has(`fs:${a.name}`) ? 'none' : 'auto', transition: 'opacity 0.2s' }}>
+                  <div onClick={() => setExpandedName(n => n === `fs:${a.name}` ? null : `fs:${a.name}`)} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', cursor: 'pointer' }}>
+                    <span><strong>{a.name}</strong></span>
+                    <span style={{ fontSize: 12, color: '#888' }}>{a.kind}</span>
+                    <span className={`badge ${a.state}`}>{a.state}</span>
+                    <span style={{ marginLeft: 'auto', fontSize: 13, color: '#666' }}>{a.size_human}</span>
+                    <span style={{ fontSize: 13, color: '#666' }}>{t('arrays.summary.usedWithPct', { used: formatBytes(a.used_bytes || 0), pct: a.used_pct || 0 })}</span>
+                    <span style={{ fontSize: 13, color: '#666' }}>{t('arrays.summary.free', { free: formatBytes(a.free_bytes || 0) })}</span>
+                    <span>{expandedName === `fs:${a.name}` ? '▲' : '▼'}</span>
+                  </div>
+                  {expandedName === `fs:${a.name}` && (
+                    <div style={{ padding: '12px 16px', borderTop: '1px solid #eee' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
+                        {[
+                          [t('arrays.detail.path'), <code>{a.mount_path}</code>],
+                          [t('arrays.detail.filesystem'), a.kind],
+                          a.data_profile && [t('arrays.field.dataProfile'), a.data_profile],
+                          a.metadata_profile && [t('arrays.field.metadataProfile'), a.metadata_profile],
+                          a.replicas && [t('arrays.field.replicas'), a.replicas],
+                          [t('arrays.detail.state'), <span className={`badge ${a.state}`}>{a.state}</span>],
+                        ].filter(Boolean).map(([label, val]: any) => (
+                          <div key={label}>
+                            <div style={{ fontSize: 11, color: '#999', marginBottom: 4 }}>{label}</div>
+                            <div style={{ fontSize: 13 }}>{val}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {a.member_disks?.length > 0 && (
+                        <div style={{ marginBottom: 12 }}>
+                          <div style={{ fontSize: 11, color: '#999', marginBottom: 4 }}>{t('arrays.detail.memberDisks')}</div>
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                            {a.member_disks.map((d: string) => <code key={d} style={{ background: '#f5f5f5', padding: '2px 8px', borderRadius: 4 }}>{d}</code>)}
+                          </div>
+                        </div>
+                      )}
+                      {destroyingArrays.has(`fs:${a.name}`) ? (
+                        <span className="slot-assigning">{t('arrays.action.destroying')}</span>
+                      ) : (
+                        <button className="btn danger" onClick={() => destroyFilesystemArray(a.name)}>{t('arrays.action.destroy')}</button>
+                      )}
                     </div>
                   )}
                 </div>

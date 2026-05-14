@@ -11,10 +11,10 @@ import (
 // ValidateFilesystem reports an error if fs is not a supported filesystem.
 func ValidateFilesystem(fs string) error {
 	switch fs {
-	case "xfs", "ext4":
+	case "xfs", "ext4", "btrfs", "bcachefs":
 		return nil
 	default:
-		return fmt.Errorf("unsupported filesystem %q: must be xfs or ext4", fs)
+		return fmt.Errorf("unsupported filesystem %q: must be xfs, ext4, btrfs, or bcachefs", fs)
 	}
 }
 

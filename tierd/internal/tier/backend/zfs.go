@@ -210,12 +210,16 @@ func isAlreadyMounted(path string) bool {
 
 func ensureLegacyFSTabEntry(dataset, mountPoint string) error {
 	entry := fmt.Sprintf("%s %s zfs defaults,nofail 0 0", dataset, mountPoint)
+	return upsertLegacyFSTabEntry(dataset, mountPoint, entry)
+}
+
+func upsertLegacyFSTabEntry(source, mountPoint, entry string) error {
 	data, err := os.ReadFile(zfsFSTabPath)
 	if err == nil {
 		lines := strings.Split(string(data), "\n")
 		for i, line := range lines {
 			fields := strings.Fields(line)
-			if len(fields) >= 2 && (fields[0] == dataset || fields[1] == mountPoint) {
+			if len(fields) >= 2 && (fields[0] == source || fields[1] == mountPoint) {
 				if line == entry {
 					return nil
 				}

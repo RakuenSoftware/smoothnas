@@ -64,6 +64,29 @@ export const api = {
   replaceDiskInArray: (name: string, oldDisk: string, newDisk: string) =>
     apiFetch('POST', `/arrays/${name}/disks/${oldDisk}/replace`, { new_disk: newDisk }),
   scrubArray: (name: string) => apiFetch('POST', `/arrays/${name}/scrub`, {}),
+  getFilesystemArrays: () => apiFetch<any[]>('GET', '/arrays/filesystems'),
+  createFilesystemArray: (data: any) => apiFetch('POST', '/arrays/filesystems', data),
+  getFilesystemArray: (name: string) => apiFetch('GET', `/arrays/filesystems/${name}`),
+  deleteFilesystemArray: (name: string) => apiFetch('DELETE', `/arrays/filesystems/${name}`),
+
+  // --- nonRaid Arrays ---
+  getNonRaidArrays: () => apiFetch<any[]>('GET', '/nonraid/arrays'),
+  createNonRaidArray: (data: {
+    name: string;
+    filesystem?: string;
+    mount_base?: string;
+    data_disks: string[];
+    parity_disks: string[];
+  }) => apiFetch('POST', '/nonraid/arrays', data),
+  validateNonRaidArray: (data: {
+    name: string;
+    filesystem?: string;
+    mount_base?: string;
+    data_disks: string[];
+    parity_disks: string[];
+  }) => apiFetch('POST', '/nonraid/arrays/validate', data),
+  getNonRaidArray: (name: string) => apiFetch('GET', `/nonraid/arrays/${name}`),
+  deleteNonRaidArray: (name: string) => apiFetch('DELETE', `/nonraid/arrays/${name}`),
 
   // --- Tiers ---
   getTiers: () => apiFetch<any[]>('GET', '/tiers'),

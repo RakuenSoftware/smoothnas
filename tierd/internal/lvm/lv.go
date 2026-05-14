@@ -128,6 +128,10 @@ func FormatLV(vg, name, fs string) error {
 			"-m", "reflink=0,rmapbt=0", dev)
 	case "ext4":
 		cmd = exec.Command(findTool("mkfs.ext4"), "-F", dev)
+	case "btrfs":
+		cmd = exec.Command(findTool("mkfs.btrfs"), "-f", dev)
+	case "bcachefs":
+		cmd = exec.Command(findTool("bcachefs"), "format", dev)
 	default:
 		return fmt.Errorf("unsupported filesystem %q", fs)
 	}
@@ -232,6 +236,12 @@ func GrowFilesystem(vg, name, mountPoint, fs string) error {
 		cmd = exec.Command(findTool("xfs_growfs"), mountPoint)
 	case "ext4":
 		cmd = exec.Command(findTool("resize2fs"), dev)
+	case "btrfs":
+		cmd = exec.Command(findTool("btrfs"), "filesystem", "resize", "max", mountPoint)
+	case "bcachefs":
+		// bcachefs consumes the full block device at mount time; there is
+		// no grow helper equivalent needed for our single-device LV use.
+		return nil
 	default:
 		return fmt.Errorf("unsupported filesystem %q", fs)
 	}

@@ -14,6 +14,7 @@ import (
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	diskpkg "github.com/JBailes/SmoothNAS/tierd/internal/disk"
+	"github.com/JBailes/SmoothNAS/tierd/internal/iopressure"
 	mdadmraid "github.com/JBailes/SmoothNAS/tierd/internal/mdadm"
 	"github.com/JBailes/SmoothNAS/tierd/internal/spindown"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tiering/meta"
@@ -52,6 +53,16 @@ const tierActiveWriteThreshold = 5 * 1024 * 1024 // 5 MB/s
 // ongoing write stream registers a meaningful delta and short enough
 // that the once-per-2-min planner cycle barely notices the cost.
 const tierActivityProbeInterval = 2 * time.Second
+
+// placementIOPressureThreshold is the Linux PSI avg10 percentage above which
+// cold placement work defers. Backup reads put real pressure on the backing
+// disks without changing filesystem used bytes, so this catches the read-heavy
+// case that activeWritesOnAnyTier intentionally cannot see.
+const placementIOPressureThreshold = 5.0
+
+// placementIOPressureRecheckInterval bounds how long a candidate walk can keep
+// scanning after a backup or other heavy IO starts.
+const placementIOPressureRecheckInterval = 10 * time.Second
 
 // sizeBucketStep is the multiplicative size ratio that moves a file one
 // tier slower under the pure-size heuristic. Every 16× in size demotes
@@ -236,13 +247,21 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 			_ = spindown.StoreTargetBalanceStatus(a.store, ns.PoolName, balanceStatus)
 		}()
 	}
-	// Three idle gates — all must pass. If any of them reports activity
-	// the planner skips the cycle entirely. This keeps 50k-file walks,
+	// Idle gates must pass. If any of them reports activity
+	// the planner skips the cycle entirely. This keeps large backing walks,
 	// meta-store reads, and potential migrations out of the way of
 	// anything actively touching the pool.
 	if !a.poolIdleForPlacement(ns.NamespaceID) {
 		balanceStatus.Reason = "target-balance placement deferred; pool is not idle"
 		return
+	}
+	if sample, active, err := placementHostIOBusy(); err == nil && active {
+		log.Printf("placement: pool %s skipped; host IO pressure %s above %.1f",
+			ns.PoolName, sample.Short(), placementIOPressureThreshold)
+		balanceStatus.Reason = "target-balance placement deferred; host IO pressure is high"
+		return
+	} else if err != nil {
+		log.Printf("placement: pool %s IO pressure unavailable: %v", ns.PoolName, err)
 	}
 
 	ranked := a.poolRankedTargets(ns.PoolName)
@@ -298,12 +317,31 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 	// Walk every tier and collect candidates. We'll sort+pack below.
 	var cands []candidate
 	now := time.Now()
+	lastIOPressureCheck := now
+	hostIOActive := false
+	var hostIOSample iopressure.Sample
+	checkHostIO := func() bool {
+		if time.Since(lastIOPressureCheck) < placementIOPressureRecheckInterval {
+			return false
+		}
+		lastIOPressureCheck = time.Now()
+		sample, active, err := placementHostIOBusy()
+		if err != nil || !active {
+			return false
+		}
+		hostIOActive = true
+		hostIOSample = sample
+		return true
+	}
 	for _, rt := range ranked {
 		if ctx.Err() != nil {
 			balanceStatus.Reason = "target-balance placement canceled"
 			return
 		}
 		_ = filepath.WalkDir(rt.target.MountPath, func(path string, d fs.DirEntry, err error) error {
+			if checkHostIO() {
+				return filepath.SkipAll
+			}
 			if err != nil || ctx.Err() != nil {
 				if ctx.Err() != nil {
 					return filepath.SkipAll
@@ -343,6 +381,13 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 			})
 			return nil
 		})
+		if hostIOActive {
+			log.Printf("placement: pool %s aborting candidate walk; host IO pressure %s above %.1f",
+				ns.PoolName, hostIOSample.Short(), placementIOPressureThreshold)
+			balanceStatus.Reason = "target-balance placement paused; host IO pressure became high"
+			balanceStatus.CandidateCount = len(cands)
+			return
+		}
 	}
 
 	// caps.usedBytes currently includes every candidate file's bytes —
@@ -411,6 +456,17 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 				log.Printf("placement: pool %s aborting mid-cycle after %d moves (activity resumed)",
 					ns.PoolName, moved)
 				balanceStatus.Reason = "target-balance placement paused; pool activity resumed"
+				balanceStatus.CandidateCount = len(cands)
+				balanceStatus.PlannedMoves = planned
+				balanceStatus.PendingMoves = max1(planned-moved, 0)
+				balanceStatus.Moved = moved
+				balanceStatus.Skipped = skipped
+				return
+			}
+			if sample, active, err := placementHostIOBusy(); err == nil && active {
+				log.Printf("placement: pool %s aborting mid-cycle after %d moves; host IO pressure %s above %.1f",
+					ns.PoolName, moved, sample.Short(), placementIOPressureThreshold)
+				balanceStatus.Reason = "target-balance placement paused; host IO pressure became high"
 				balanceStatus.CandidateCount = len(cands)
 				balanceStatus.PlannedMoves = planned
 				balanceStatus.PendingMoves = max1(planned-moved, 0)
@@ -634,6 +690,14 @@ func (a *Adapter) poolIdleForPlacement(namespaceID string) bool {
 		return false
 	}
 	return true
+}
+
+func placementHostIOBusy() (iopressure.Sample, bool, error) {
+	sample, err := iopressure.ReadDefault()
+	if err != nil {
+		return sample, false, err
+	}
+	return sample, sample.High(placementIOPressureThreshold), nil
 }
 
 // activeWritesOnAnyTier samples each tier's mountpoint twice with a small

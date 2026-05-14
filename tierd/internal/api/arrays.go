@@ -10,6 +10,8 @@ import (
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/cache"
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
+	"github.com/JBailes/SmoothNAS/tierd/internal/disk"
+	"github.com/JBailes/SmoothNAS/tierd/internal/fsarray"
 	"github.com/JBailes/SmoothNAS/tierd/internal/lvm"
 	"github.com/JBailes/SmoothNAS/tierd/internal/mdadm"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tier"
@@ -167,6 +169,30 @@ func (h *ArraysHandler) Route(w http.ResponseWriter, r *http.Request) {
 func (h *ArraysHandler) routeArrays(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
+	if path == "/api/arrays/filesystems" || path == "/api/arrays/filesystems/" {
+		switch r.Method {
+		case http.MethodGet:
+			h.listFilesystemArrays(w, r)
+		case http.MethodPost:
+			h.createFilesystemArray(w, r)
+		default:
+			jsonMethodNotAllowed(w)
+		}
+		return
+	}
+	if strings.HasPrefix(path, "/api/arrays/filesystems/") {
+		name := strings.TrimPrefix(path, "/api/arrays/filesystems/")
+		switch r.Method {
+		case http.MethodGet:
+			h.getFilesystemArray(w, r, name)
+		case http.MethodDelete:
+			h.deleteFilesystemArray(w, r, name)
+		default:
+			jsonMethodNotAllowed(w)
+		}
+		return
+	}
+
 	// GET/POST /api/arrays
 	if path == "/api/arrays" || path == "/api/arrays/" {
 		switch r.Method {
@@ -309,6 +335,35 @@ type createArrayRequest struct {
 	Disks []string `json:"disks"`
 }
 
+type createFilesystemArrayRequest struct {
+	Name            string   `json:"name"`
+	Kind            string   `json:"kind"`
+	Disks           []string `json:"disks"`
+	DataProfile     string   `json:"data_profile"`
+	MetadataProfile string   `json:"metadata_profile"`
+	Replicas        int      `json:"replicas"`
+}
+
+type filesystemArrayResponse struct {
+	ID              int64    `json:"id"`
+	Name            string   `json:"name"`
+	Kind            string   `json:"kind"`
+	Label           string   `json:"label"`
+	MountPath       string   `json:"mount_path"`
+	DataProfile     string   `json:"data_profile,omitempty"`
+	MetadataProfile string   `json:"metadata_profile,omitempty"`
+	Replicas        int      `json:"replicas,omitempty"`
+	State           string   `json:"state"`
+	SizeBytes       uint64   `json:"size_bytes"`
+	SizeHuman       string   `json:"size_human"`
+	UsedBytes       uint64   `json:"used_bytes"`
+	FreeBytes       uint64   `json:"free_bytes"`
+	UsedPct         int      `json:"used_pct"`
+	Mounted         bool     `json:"mounted"`
+	MemberDisks     []string `json:"member_disks"`
+	ErrorReason     string   `json:"error_reason,omitempty"`
+}
+
 func (h *ArraysHandler) createArray(w http.ResponseWriter, r *http.Request) {
 	var req createArrayRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -326,6 +381,266 @@ func (h *ArraysHandler) createArray(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusAccepted)
 	fmt.Fprintf(w, `{"job_id":"%s"}`, jobID)
+}
+
+func (h *ArraysHandler) listFilesystemArrays(w http.ResponseWriter, r *http.Request) {
+	rows, err := h.store.ListFilesystemArrays()
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	out := make([]filesystemArrayResponse, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, filesystemArrayToResponse(row))
+	}
+	json.NewEncoder(w).Encode(out)
+}
+
+func (h *ArraysHandler) getFilesystemArray(w http.ResponseWriter, r *http.Request, name string) {
+	row, err := h.store.GetFilesystemArray(name)
+	if err == db.ErrNotFound {
+		jsonErrorCoded(w, "filesystem array not found", http.StatusNotFound, "arrays.filesystem_not_found")
+		return
+	}
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	json.NewEncoder(w).Encode(filesystemArrayToResponse(*row))
+}
+
+func (h *ArraysHandler) createFilesystemArray(w http.ResponseWriter, r *http.Request) {
+	var req createFilesystemArrayRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonInvalidRequestBody(w)
+		return
+	}
+	if req.Name == "" || req.Kind == "" || len(req.Disks) == 0 {
+		jsonErrorCoded(w, "name, kind, and disks required", http.StatusBadRequest, "arrays.filesystem_create_fields_required")
+		return
+	}
+
+	jobID := jobs.StartTagged("filesystem-array-create")
+	go h.runCreateFilesystemArray(jobID, req)
+
+	w.WriteHeader(http.StatusAccepted)
+	fmt.Fprintf(w, `{"job_id":"%s"}`, jobID)
+}
+
+func (h *ArraysHandler) runCreateFilesystemArray(jobID string, req createFilesystemArrayRequest) {
+	progress := func(msg string) { jobs.UpdateProgress(jobID, msg) }
+	progress("Validating disks...")
+	devices, err := h.resolveFilesystemArrayDevices(req.Disks)
+	if err != nil {
+		jobs.Fail(jobID, err)
+		return
+	}
+	plan, err := fsarray.BuildPlan(req.Name, req.Kind, fsarray.DefaultMountBase, req.DataProfile, req.MetadataProfile, req.Replicas, devices)
+	if err != nil {
+		jobs.Fail(jobID, err)
+		return
+	}
+
+	row := &db.FilesystemArrayRow{
+		Name:            plan.Name,
+		Kind:            plan.Kind,
+		Label:           plan.Label,
+		MountPath:       plan.MountPath,
+		DataProfile:     plan.DataProfile,
+		MetadataProfile: plan.MetadataProfile,
+		Replicas:        plan.Replicas,
+		State:           fsarray.StateActive,
+		SizeBytes:       plan.SizeBytes,
+	}
+	dbDevices := make([]db.FilesystemArrayDeviceRow, 0, len(plan.Devices))
+	for _, dev := range plan.Devices {
+		dbDevices = append(dbDevices, db.FilesystemArrayDeviceRow{
+			DevicePath: dev.Path,
+			SizeBytes:  dev.Size,
+			State:      fsarray.StateActive,
+		})
+	}
+	created, err := h.store.CreateFilesystemArray(row, dbDevices)
+	if err != nil {
+		jobs.Fail(jobID, err)
+		return
+	}
+
+	progress("Formatting filesystem array...")
+	if err := fsarray.Create(plan); err != nil {
+		_ = h.store.SetFilesystemArrayState(created.Name, fsarray.StateError, err.Error())
+		h.invalidateAll()
+		jobs.Fail(jobID, err)
+		return
+	}
+
+	h.invalidateAll()
+	jobs.Complete(jobID, map[string]string{"status": "created", "name": created.Name, "kind": created.Kind, "mount_path": created.MountPath})
+}
+
+func (h *ArraysHandler) deleteFilesystemArray(w http.ResponseWriter, r *http.Request, name string) {
+	row, err := h.store.GetFilesystemArray(name)
+	if err == db.ErrNotFound {
+		jsonErrorCoded(w, "filesystem array not found", http.StatusNotFound, "arrays.filesystem_not_found")
+		return
+	}
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if owners, err := h.filesystemArrayTierOwners(row.Kind, row.MountPath); err != nil {
+		serverError(w, err)
+		return
+	} else if len(owners) > 0 {
+		jsonErrorCoded(w, "filesystem array is assigned to tier "+strings.Join(owners, ", "), http.StatusConflict, "arrays.filesystem_assigned")
+		return
+	}
+
+	jobID := jobs.StartTagged("filesystem-array-destroy")
+	go h.runDestroyFilesystemArray(jobID, *row)
+
+	w.WriteHeader(http.StatusAccepted)
+	fmt.Fprintf(w, `{"job_id":"%s"}`, jobID)
+}
+
+func (h *ArraysHandler) runDestroyFilesystemArray(jobID string, row db.FilesystemArrayRow) {
+	progress := func(msg string) { jobs.UpdateProgress(jobID, msg) }
+	_ = h.store.SetFilesystemArrayState(row.Name, fsarray.StateDestroying, "")
+	progress("Destroying filesystem array...")
+	devices := make([]string, 0, len(row.Devices))
+	for _, dev := range row.Devices {
+		devices = append(devices, dev.DevicePath)
+	}
+	if err := fsarray.Destroy(row.MountPath, devices); err != nil {
+		_ = h.store.SetFilesystemArrayState(row.Name, fsarray.StateError, err.Error())
+		h.invalidateAll()
+		jobs.Fail(jobID, err)
+		return
+	}
+	if err := h.store.DeleteFilesystemArray(row.Name); err != nil {
+		h.invalidateAll()
+		jobs.Fail(jobID, err)
+		return
+	}
+	h.invalidateAll()
+	jobs.Complete(jobID, map[string]string{"status": "destroyed", "name": row.Name})
+}
+
+func (h *ArraysHandler) resolveFilesystemArrayDevices(paths []string) ([]fsarray.Device, error) {
+	disks, err := disk.List()
+	if err != nil {
+		return nil, err
+	}
+	byPath := map[string]disk.Disk{}
+	for _, d := range disks {
+		byPath[d.Path] = d
+		byPath[disk.BaseDiskPath(d.Path)] = d
+	}
+	reserved := map[string]struct{}{}
+	if rows, err := h.store.ListFilesystemArrayDevices(""); err == nil {
+		for _, row := range rows {
+			reserved[disk.BaseDiskPath(row.DevicePath)] = struct{}{}
+		}
+	}
+	if rows, err := h.store.ListNonRaidDevices(""); err == nil {
+		for _, row := range rows {
+			reserved[disk.BaseDiskPath(row.DevicePath)] = struct{}{}
+		}
+	}
+
+	out := make([]fsarray.Device, 0, len(paths))
+	for _, path := range paths {
+		if err := mdadm.ValidateDiskPath(path); err != nil {
+			return nil, err
+		}
+		base := disk.BaseDiskPath(path)
+		if _, ok := reserved[base]; ok {
+			return nil, fmt.Errorf("disk %s is already assigned", path)
+		}
+		d, ok := byPath[path]
+		if !ok {
+			d, ok = byPath[base]
+		}
+		if !ok {
+			return nil, fmt.Errorf("disk %s not found", path)
+		}
+		if d.Assignment != "" && d.Assignment != "unassigned" {
+			return nil, fmt.Errorf("disk %s is not unassigned: %s", path, d.Assignment)
+		}
+		out = append(out, fsarray.Device{Path: d.Path, Size: d.Size})
+	}
+	return out, nil
+}
+
+func (h *ArraysHandler) filesystemArrayTierOwners(kind, ref string) ([]string, error) {
+	pools, err := h.store.ListTierInstances()
+	if err != nil {
+		return nil, err
+	}
+	var owners []string
+	for _, pool := range pools {
+		slots, err := h.store.ListTierSlots(pool.Name)
+		if err != nil {
+			return nil, err
+		}
+		for _, slot := range slots {
+			if slot.BackingKind == kind && slot.BackingRef == ref && slot.State != db.TierSlotStateEmpty {
+				owners = append(owners, pool.Name+"/"+slot.Name)
+			}
+		}
+	}
+	return owners, nil
+}
+
+func filesystemArrayToResponse(row db.FilesystemArrayRow) filesystemArrayResponse {
+	total, free, mounted := fsarray.Usage(row.MountPath)
+	if total == 0 {
+		total = row.SizeBytes
+	}
+	used := uint64(0)
+	if total > free {
+		used = total - free
+	}
+	usedPct := 0
+	if total > 0 {
+		usedPct = int((used * 100) / total)
+	}
+	disks := make([]string, 0, len(row.Devices))
+	for _, dev := range row.Devices {
+		disks = append(disks, dev.DevicePath)
+	}
+	return filesystemArrayResponse{
+		ID:              row.ID,
+		Name:            row.Name,
+		Kind:            row.Kind,
+		Label:           row.Label,
+		MountPath:       row.MountPath,
+		DataProfile:     row.DataProfile,
+		MetadataProfile: row.MetadataProfile,
+		Replicas:        row.Replicas,
+		State:           row.State,
+		SizeBytes:       total,
+		SizeHuman:       apiHumanSize(total),
+		UsedBytes:       used,
+		FreeBytes:       free,
+		UsedPct:         usedPct,
+		Mounted:         mounted,
+		MemberDisks:     disks,
+		ErrorReason:     row.ErrorReason,
+	}
+}
+
+func apiHumanSize(bytes uint64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := uint64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 func (h *ArraysHandler) runCreateArray(jobID string, req createArrayRequest) {
