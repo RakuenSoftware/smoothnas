@@ -7,7 +7,7 @@ import { extractError } from '../../utils/errors';
 import Spinner from '../../components/Spinner/Spinner';
 import ConfirmDialog from '../../components/ConfirmDialog/ConfirmDialog';
 
-type CreateTab = 'mdadm' | 'zfs' | 'filesystem';
+type CreateTab = 'mdadm' | 'nonraid' | 'filesystem' | 'zfs';
 
 function formatBytes(n: number): string {
   if (!n || n <= 0) return '0 B';
@@ -23,7 +23,7 @@ function formatBytes(n: number): string {
 
 export default function Arrays() {
   const { t } = useI18n();
-  const { arrays, filesystemArrays, pools, disks, invalidate } = usePreload();
+  const { arrays, nonRaidArrays, filesystemArrays, pools, disks, invalidate } = usePreload();
   const toast = useToast();
   const [loading, setLoading] = useState(true);
   const [expandedName, setExpandedName] = useState<string | null>(null);
@@ -33,6 +33,15 @@ export default function Arrays() {
   // mdadm create state
   const [newArray, setNewArray] = useState({ name: 'md0', level: 'raid5' });
   const [selectedDisks, setSelectedDisks] = useState<string[]>([]);
+
+  // nonRaid create state
+  const [newNonRaidArray, setNewNonRaidArray] = useState({
+    name: 'nr0',
+    filesystem: 'xfs',
+    mount_base: '',
+  });
+  const [selectedNonRaidData, setSelectedNonRaidData] = useState<string[]>([]);
+  const [selectedNonRaidParity, setSelectedNonRaidParity] = useState<string[]>([]);
 
   // ZFS create state
   const [newPool, setNewPool] = useState({ name: 'tank', vdev_type: 'raidz1' });
@@ -77,10 +86,24 @@ export default function Arrays() {
     return `md${i}`;
   }
 
+  function nextNonRaidName(): string {
+    const used = new Set(
+      (nonRaidArrays || [])
+        .map((a: any) => { const m = (a.name || '').match(/^nr(\d+)$/); return m ? parseInt(m[1], 10) : -1; })
+        .filter((n: number) => n >= 0)
+    );
+    let i = 0;
+    while (used.has(i)) i++;
+    return `nr${i}`;
+  }
+
   function openCreate() {
     setNewArray({ name: nextArrayName(), level: 'raid5' });
+    setNewNonRaidArray({ name: nextNonRaidName(), filesystem: 'xfs', mount_base: '' });
     setNewPool({ name: 'tank', vdev_type: 'raidz1' });
     setSelectedDisks([]);
+    setSelectedNonRaidData([]);
+    setSelectedNonRaidParity([]);
     setSelectedData([]);
     setSelectedSlog([]);
     setSelectedL2arc([]);
@@ -95,8 +118,8 @@ export default function Arrays() {
   }
 
   useEffect(() => {
-    if (arrays !== undefined && filesystemArrays !== undefined && pools !== undefined) setLoading(false);
-  }, [arrays, filesystemArrays, pools]);
+    if (arrays !== undefined && nonRaidArrays !== undefined && filesystemArrays !== undefined && pools !== undefined) setLoading(false);
+  }, [arrays, nonRaidArrays, filesystemArrays, pools]);
 
   useEffect(() => {
     loadImportablePools();
@@ -107,6 +130,7 @@ export default function Arrays() {
 
   function refresh() {
     invalidate('arrays');
+    invalidate('nonRaidArrays');
     invalidate('filesystemArrays');
     invalidate('pools');
     invalidate('disks');
@@ -147,6 +171,53 @@ export default function Arrays() {
       setCreateStatus('');
       toast.error(extractError(e, t('arrays.error.createArray')));
     });
+  }
+
+  // --- nonRaid helpers ----------------------------------------------------
+
+  function toggleNonRaidDisk(path: string, role: 'data' | 'parity') {
+    const set = role === 'data' ? setSelectedNonRaidData : setSelectedNonRaidParity;
+    set(prev => prev.includes(path) ? prev.filter(p => p !== path) : [...prev, path]);
+  }
+
+  function submitNonRaidArray() {
+    if (selectedNonRaidData.length === 0) { toast.warning(t('arrays.warn.selectAtLeastOneData')); return; }
+    if (selectedNonRaidParity.length === 0) { toast.warning(t('arrays.warn.selectAtLeastOneParity')); return; }
+    setSubmitting(true);
+    setCreateStatus(t('arrays.status.starting'));
+    api.createNonRaidArray({
+      name: newNonRaidArray.name,
+      filesystem: newNonRaidArray.filesystem,
+      ...(newNonRaidArray.mount_base.trim() ? { mount_base: newNonRaidArray.mount_base.trim() } : {}),
+      data_disks: selectedNonRaidData,
+      parity_disks: selectedNonRaidParity,
+    }).then(() => {
+      onCreateDone();
+    }).catch(e => {
+      setSubmitting(false);
+      setCreateStatus('');
+      toast.error(extractError(e, t('arrays.error.createNonRaid')));
+      refresh();
+    });
+  }
+
+  function destroyNonRaidArray(name: string) {
+    setConfirmTitle(t('arrays.confirm.destroyNonRaidTitle'));
+    setConfirmMessage(t('arrays.confirm.destroyNonRaidMessage', { name }));
+    confirmAction.current = () => {
+      setConfirmVisible(false);
+      setDestroyingArrays(prev => new Set([...prev, `nr:${name}`]));
+      api.deleteNonRaidArray(name).then(() => {
+        setDestroyingArrays(prev => { const s = new Set(prev); s.delete(`nr:${name}`); return s; });
+        toast.success(t('arrays.toast.arrayDestroyed'));
+        refresh();
+      }).catch(e => {
+        setDestroyingArrays(prev => { const s = new Set(prev); s.delete(`nr:${name}`); return s; });
+        toast.error(extractError(e, t('arrays.error.destroyNonRaid')));
+        refresh();
+      });
+    };
+    setConfirmVisible(true);
   }
 
   // --- ZFS helpers ---------------------------------------------------------
@@ -333,6 +404,8 @@ export default function Arrays() {
     setShowCreate(false);
     setCreateStatus('');
     setSelectedDisks([]);
+    setSelectedNonRaidData([]);
+    setSelectedNonRaidParity([]);
     setSelectedData([]);
     setSelectedSlog([]);
     setSelectedL2arc([]);
@@ -435,14 +508,20 @@ export default function Arrays() {
       {showCreate && (
         <div className="create-form">
           <div className="tabs" style={{ marginBottom: 12 }}>
-            {(['mdadm', 'zfs', 'filesystem'] as CreateTab[]).map(tab => (
+            {(['mdadm', 'nonraid', 'filesystem', 'zfs'] as CreateTab[]).map(tab => (
               <button
                 key={tab}
                 className={`tab${createTab === tab ? ' active' : ''}`}
                 onClick={() => setCreateTab(tab)}
                 disabled={submitting}
               >
-                {tab === 'mdadm' ? t('arrays.tab.mdadm') : tab === 'zfs' ? t('arrays.tab.zfs') : t('arrays.tab.filesystem')}
+                {tab === 'mdadm'
+                  ? t('arrays.tab.mdadm')
+                  : tab === 'nonraid'
+                    ? t('arrays.tab.nonraid')
+                    : tab === 'filesystem'
+                      ? t('arrays.tab.filesystem')
+                      : t('arrays.tab.zfs')}
               </button>
             ))}
           </div>
@@ -487,6 +566,55 @@ export default function Arrays() {
             </>
           )}
 
+          {createTab === 'nonraid' && (
+            <>
+              <h3>{t('arrays.create.nonraidTitle')}</h3>
+              <div className="form-row">
+                <label>{t('arrays.field.name')}
+                  <input value={newNonRaidArray.name} onChange={e => setNewNonRaidArray(p => ({ ...p, name: e.target.value }))} placeholder="nr0" />
+                </label>
+                <label>{t('arrays.field.filesystem')}
+                  <select value={newNonRaidArray.filesystem} onChange={e => setNewNonRaidArray(p => ({ ...p, filesystem: e.target.value }))}>
+                    <option value="xfs">xfs</option>
+                  </select>
+                </label>
+                <label>{t('arrays.field.mountBase')}
+                  <input value={newNonRaidArray.mount_base} onChange={e => setNewNonRaidArray(p => ({ ...p, mount_base: e.target.value }))} placeholder="/mnt/nonraid" />
+                </label>
+              </div>
+              <DiskRolePicker
+                label={t('arrays.disks.selectNonRaidData')}
+                disks={unassignedDisks}
+                selected={selectedNonRaidData}
+                otherSelections={[selectedNonRaidParity]}
+                onToggle={(p) => toggleNonRaidDisk(p, 'data')}
+                accent="#4fc3f7"
+                tint="#e3f2fd"
+                emptyMessage={t('arrays.disks.noUnassigned')}
+              />
+              {selectedNonRaidData.length > 0 && <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>{t('arrays.nonraid.dataSelected', { count: selectedNonRaidData.length })}</p>}
+              <DiskRolePicker
+                label={t('arrays.disks.selectNonRaidParity')}
+                disks={unassignedDisks}
+                selected={selectedNonRaidParity}
+                otherSelections={[selectedNonRaidData]}
+                onToggle={(p) => toggleNonRaidDisk(p, 'parity')}
+                accent="#ef5350"
+                tint="#ffebee"
+                emptyMessage={t('arrays.disks.noUnassigned')}
+              />
+              {selectedNonRaidParity.length > 0 && <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>{t('arrays.nonraid.paritySelected', { count: selectedNonRaidParity.length })}</p>}
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                {createStatus && <span style={{ fontSize: 13, color: '#666' }}>{createStatus}</span>}
+                <div style={{ flex: 1 }} />
+                <button className="btn secondary" onClick={cancelCreate} disabled={submitting}>{t('common.cancel')}</button>
+                <button className="btn primary" onClick={submitNonRaidArray} disabled={submitting || selectedNonRaidData.length === 0 || selectedNonRaidParity.length === 0}>
+                  {submitting ? t('arrays.creating') : t('arrays.button.create')}
+                </button>
+              </div>
+            </>
+          )}
+
           {createTab === 'zfs' && (
             <>
               <h3>{t('arrays.create.zfsTitle')}</h3>
@@ -504,7 +632,7 @@ export default function Arrays() {
                   </select>
                 </label>
               </div>
-              <ZfsDiskPicker
+              <DiskRolePicker
                 label={t('arrays.zfs.dataLabel')}
                 disks={unassignedDisks}
                 selected={selectedData}
@@ -515,7 +643,7 @@ export default function Arrays() {
                 emptyMessage={t('arrays.disks.noUnassigned')}
               />
               {selectedData.length > 0 && <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>{t('arrays.zfs.dataSelected', { count: selectedData.length })}</p>}
-              <ZfsDiskPicker
+              <DiskRolePicker
                 label={t('arrays.zfs.slogLabel')}
                 disks={unassignedDisks}
                 selected={selectedSlog}
@@ -525,7 +653,7 @@ export default function Arrays() {
                 tint="#e8f5e9"
                 emptyMessage={t('arrays.disks.noUnassigned')}
               />
-              <ZfsDiskPicker
+              <DiskRolePicker
                 label={t('arrays.zfs.l2arcLabel')}
                 disks={unassignedDisks}
                 selected={selectedL2arc}
@@ -555,8 +683,8 @@ export default function Arrays() {
                 </label>
                 <label>{t('arrays.field.filesystem')}
                   <select value={newFSArray.kind} onChange={e => setNewFSArray(p => ({ ...p, kind: e.target.value }))}>
-                    <option value="btrfs">btrfs</option>
-                    <option value="bcachefs">bcachefs</option>
+                    <option value="btrfs">{t('arrays.filesystem.btrfs')}</option>
+                    <option value="bcachefs">{t('arrays.filesystem.bcachefs')}</option>
                   </select>
                 </label>
                 {newFSArray.kind === 'btrfs' ? (
@@ -582,7 +710,7 @@ export default function Arrays() {
                   </label>
                 )}
               </div>
-              <ZfsDiskPicker
+              <DiskRolePicker
                 label={t('arrays.disks.selectForFilesystem')}
                 disks={unassignedDisks}
                 selected={selectedFSDisks}
@@ -677,6 +805,72 @@ export default function Arrays() {
                   )}
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* --- nonRaid section --- */}
+          <h3 style={{ marginTop: 16, marginBottom: 8 }}>{t('arrays.section.nonraid')}</h3>
+          {nonRaidArrays.length === 0 ? (
+            <div className="empty-state" style={{ marginBottom: 24 }}>
+              <p>{t('arrays.empty.nonraid')}</p>
+              <p className="empty-hint">{t('arrays.empty.nonraidHint')}</p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 0, marginBottom: 24 }}>
+              {nonRaidArrays.map((a: any) => {
+                const dataDevices = (a.devices || []).filter((d: any) => d.role === 'data');
+                const parityDevices = (a.devices || []).filter((d: any) => d.role === 'parity');
+                return (
+                  <div key={a.name} style={{ background: '#fff', borderRadius: 8, marginBottom: 8, overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: a.state === 'error' ? '1px solid #f44336' : '1px solid transparent', opacity: destroyingArrays.has(`nr:${a.name}`) ? 0.5 : 1, pointerEvents: destroyingArrays.has(`nr:${a.name}`) ? 'none' : 'auto', transition: 'opacity 0.2s' }}>
+                    <div onClick={() => setExpandedName(n => n === `nr:${a.name}` ? null : `nr:${a.name}`)} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', cursor: 'pointer' }}>
+                      <span><strong>{a.name}</strong></span>
+                      <span style={{ fontSize: 12, color: '#888' }}>{t('arrays.tab.nonraid')}</span>
+                      <span className={`badge ${a.state}`}>{a.state}</span>
+                      <span style={{ marginLeft: 'auto', fontSize: 13, color: '#666' }}>{formatBytes(a.capacity_bytes || 0)}</span>
+                      <span style={{ fontSize: 13, color: '#666' }}>{t('arrays.nonraid.dataParitySummary', { data: dataDevices.length, parity: parityDevices.length })}</span>
+                      <span>{expandedName === `nr:${a.name}` ? '▲' : '▼'}</span>
+                    </div>
+                    {expandedName === `nr:${a.name}` && (
+                      <div style={{ padding: '12px 16px', borderTop: '1px solid #eee' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
+                          {[
+                            [t('arrays.detail.path'), <code>{a.mount_path}</code>],
+                            [t('arrays.detail.filesystem'), a.filesystem],
+                            [t('arrays.detail.state'), <span className={`badge ${a.state}`}>{a.state}</span>],
+                            [t('arrays.detail.size'), formatBytes(a.capacity_bytes || 0)],
+                            [t('arrays.detail.dataDisks'), dataDevices.length],
+                            [t('arrays.detail.parityDisks'), parityDevices.length],
+                            [t('arrays.detail.minParitySize'), formatBytes(a.min_parity_bytes || 0)],
+                            a.error_reason && [t('arrays.detail.error'), a.error_reason],
+                          ].filter(Boolean).map(([label, val]: any) => (
+                            <div key={label}>
+                              <div style={{ fontSize: 11, color: '#999', marginBottom: 4 }}>{label}</div>
+                              <div style={{ fontSize: 13 }}>{val}</div>
+                            </div>
+                          ))}
+                        </div>
+                        {a.devices?.length > 0 && (
+                          <div style={{ marginBottom: 12 }}>
+                            <div style={{ fontSize: 11, color: '#999', marginBottom: 4 }}>{t('arrays.detail.memberDisks')}</div>
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                              {a.devices.map((d: any) => (
+                                <code key={`${d.role}:${d.slot}:${d.device_path}`} style={{ background: '#f5f5f5', padding: '2px 8px', borderRadius: 4 }}>
+                                  {d.role}:{d.slot} {d.device_path}
+                                </code>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {destroyingArrays.has(`nr:${a.name}`) ? (
+                          <span className="slot-assigning">{t('arrays.action.destroying')}</span>
+                        ) : (
+                          <button className="btn danger" onClick={() => destroyNonRaidArray(a.name)}>{t('arrays.action.destroy')}</button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 
@@ -850,10 +1044,9 @@ function ZfsMemberDiskPicker({
   );
 }
 
-// ZfsDiskPicker renders one of the three disk-selection groups (data / slog
-// / l2arc). A disk picked for another role shows disabled here so the same
-// disk can't be assigned to two roles at once.
-function ZfsDiskPicker({
+// DiskRolePicker renders a disk-selection group. A disk picked for another
+// role shows disabled here so the same disk can't be assigned twice.
+function DiskRolePicker({
   label, disks, selected, otherSelections, onToggle, accent, tint, emptyMessage,
 }: {
   label: string;
