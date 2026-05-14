@@ -200,6 +200,39 @@ func withAPTConfigPaths(t *testing.T, autoPath, securityPath string) {
 	})
 }
 
+func withBcachefsRepoPaths(t *testing.T, keyPath, sourcesPath, releasePath string) {
+	t.Helper()
+	originalKey := aptBcachefsKeyPath
+	originalSources := aptBcachefsSourcesPath
+	originalRelease := osReleasePath
+	aptBcachefsKeyPath = keyPath
+	aptBcachefsSourcesPath = sourcesPath
+	osReleasePath = releasePath
+	t.Cleanup(func() {
+		aptBcachefsKeyPath = originalKey
+		aptBcachefsSourcesPath = originalSources
+		osReleasePath = originalRelease
+	})
+}
+
+func withSmoothKernelHeadersProviderBuildRoot(t *testing.T, path string) {
+	t.Helper()
+	original := smoothKernelHeadersProviderBuildRoot
+	smoothKernelHeadersProviderBuildRoot = path
+	t.Cleanup(func() {
+		smoothKernelHeadersProviderBuildRoot = original
+	})
+}
+
+func withOptionalPackages(t *testing.T, pkgs []string) {
+	t.Helper()
+	original := optionalPackages
+	optionalPackages = pkgs
+	t.Cleanup(func() {
+		optionalPackages = original
+	})
+}
+
 func flattenCalls(calls [][]string) []string {
 	out := make([]string, 0, len(calls))
 	for _, call := range calls {
@@ -247,6 +280,101 @@ func TestGitCommandForUserSetsCredentialAndEnv(t *testing.T) {
 	} {
 		if !strings.Contains(env, want) {
 			t.Fatalf("expected env to contain %q", want)
+		}
+	}
+}
+
+func TestEnsureBcachefsRepoWritesSourceAndUpdatesApt(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "trusted.gpg.d", "apt.bcachefs.org.asc")
+	sourcesPath := filepath.Join(dir, "sources.list.d", "apt.bcachefs.org.sources")
+	releasePath := filepath.Join(dir, "os-release")
+	if err := os.WriteFile(releasePath, []byte("VERSION_CODENAME=trixie\n"), 0644); err != nil {
+		t.Fatalf("write os-release: %v", err)
+	}
+	withBcachefsRepoPaths(t, keyPath, sourcesPath, releasePath)
+	withOptionalPackages(t, []string{"bcachefs-tools", "bcachefs-kernel-dkms"})
+
+	var calls [][]string
+	withExecCommand(t, func(name string, args ...string) *exec.Cmd {
+		calls = append(calls, append([]string{name}, args...))
+		if name == "curl" && len(args) >= 3 {
+			return exec.Command("bash", "-lc", "printf key > \"$1\"", "sh", args[2])
+		}
+		return exec.Command("bash", "-lc", "true")
+	})
+
+	ensureBcachefsRepo()
+
+	source, err := os.ReadFile(sourcesPath)
+	if err != nil {
+		t.Fatalf("read bcachefs source: %v", err)
+	}
+	gotSource := string(source)
+	for _, want := range []string{
+		"URIs: https://apt.bcachefs.org/trixie/",
+		"Suites: bcachefs-tools-release",
+		"Signed-By: " + keyPath,
+	} {
+		if !strings.Contains(gotSource, want) {
+			t.Fatalf("source missing %q:\n%s", want, gotSource)
+		}
+	}
+	gotCalls := strings.Join(flattenCalls(calls), "\n")
+	for _, want := range []string{
+		"curl -fsSL -o " + keyPath + " https://apt.bcachefs.org/apt.bcachefs.org.asc",
+		"apt-get update -qq",
+	} {
+		if !strings.Contains(gotCalls, want) {
+			t.Fatalf("expected command %q, got:\n%s", want, gotCalls)
+		}
+	}
+}
+
+func TestEnsureLinuxHeadersVirtualProviderBuildsLocalPackage(t *testing.T) {
+	dir := t.TempDir()
+	withSmoothKernelHeadersProviderBuildRoot(t, dir)
+	withOptionalPackages(t, []string{"bcachefs-kernel-dkms"})
+	withPackageInstalledCheck(t, func(name string) bool {
+		return false
+	})
+
+	var calls [][]string
+	withExecCommand(t, func(name string, args ...string) *exec.Cmd {
+		calls = append(calls, append([]string{name}, args...))
+		switch name {
+		case "uname":
+			return exec.Command("bash", "-lc", "printf 6.19.12-smoothkernel")
+		case "dpkg-query":
+			return exec.Command("bash", "-lc", "printf 6.19.12-1")
+		default:
+			return exec.Command("bash", "-lc", "true")
+		}
+	})
+
+	ensureLinuxHeadersVirtualProvider()
+
+	control, err := os.ReadFile(filepath.Join(dir, "pkg", "DEBIAN", "control"))
+	if err != nil {
+		t.Fatalf("read control: %v", err)
+	}
+	gotControl := string(control)
+	for _, want := range []string{
+		"Package: smoothkernel-headers-virtual",
+		"Provides: linux-headers (= 6.19.12-1)",
+		"Depends: linux-headers-6.19.12-smoothkernel (= 6.19.12-1)",
+	} {
+		if !strings.Contains(gotControl, want) {
+			t.Fatalf("control missing %q:\n%s", want, gotControl)
+		}
+	}
+	gotCalls := strings.Join(flattenCalls(calls), "\n")
+	for _, want := range []string{
+		"dpkg-deb --build " + filepath.Join(dir, "pkg") + " " + filepath.Join(dir, "smoothkernel-headers-virtual.deb"),
+		"dpkg -i " + filepath.Join(dir, "smoothkernel-headers-virtual.deb"),
+	} {
+		if !strings.Contains(gotCalls, want) {
+			t.Fatalf("expected command %q, got:\n%s", want, gotCalls)
 		}
 	}
 }

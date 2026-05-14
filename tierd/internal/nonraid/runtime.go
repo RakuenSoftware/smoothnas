@@ -316,15 +316,9 @@ func findFreeNBD() (string, error) {
 }
 
 func disconnectNBD(path string) error {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
-	}
-	defer f.Close()
-	if err := ioctlSetInt(f, nbdDisconnect, 0); err != nil {
+	if err := DisconnectNBD(path); err != nil {
 		log.Printf("nonraid: disconnect %s: %v", path, err)
+		return err
 	}
-	_ = ioctlSetInt(f, nbdClearQueue, 0)
-	_ = ioctlSetInt(f, nbdClearSock, 0)
 	return nil
 }

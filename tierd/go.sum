@@ -1,3 +1,7 @@
+github.com/RakuenSoftware/nonraid v0.0.0-20260513210635-e9976f5ddaf5 h1:lqRNvEhVHtq/Ypr4YGZvSZXY8HvFBCd2Jubetl9T86Y=
+github.com/RakuenSoftware/nonraid v0.0.0-20260513210635-e9976f5ddaf5/go.mod h1:IBCLxG8iWaPxzG7lvSCXvbcmsG1cmrS44U91XuNWXbs=
+github.com/RakuenSoftware/nonraid v0.0.0-20260513211115-f1f6d113a548 h1:iW3Qvm2iOT2UeZdXPPg0hOyvfvr9JnHkcej+uCmxVpo=
+github.com/RakuenSoftware/nonraid v0.0.0-20260513211115-f1f6d113a548/go.mod h1:IBCLxG8iWaPxzG7lvSCXvbcmsG1cmrS44U91XuNWXbs=
 github.com/RakuenSoftware/smoothfs v0.0.0-20260508144945-26df046ea354 h1:kpuqgPY391Cx9lyjbQGQqYwow0PKm0UALS79EFU9uHA=
 github.com/RakuenSoftware/smoothfs v0.0.0-20260508144945-26df046ea354/go.mod h1:ZL2l/hHg2lr7QnnGh6eL+ecawHSsosx5GYIrJGlDLWw=
 github.com/RakuenSoftware/smoothgui/auth v0.2.3 h1:sVGM6cFtleouPjn+CIDdlovKQBFBC7VUfGr0bfKaMb8=
