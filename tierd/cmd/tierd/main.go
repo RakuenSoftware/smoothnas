@@ -22,6 +22,8 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/monitor"
 	"github.com/JBailes/SmoothNAS/tierd/internal/network"
 	"github.com/JBailes/SmoothNAS/tierd/internal/nfs"
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
+	pluginruntime "github.com/JBailes/SmoothNAS/tierd/internal/plugin/runtime"
 	"github.com/JBailes/SmoothNAS/tierd/internal/smart"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tier"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tiering"
@@ -160,7 +162,15 @@ func main() {
 	zfsAdapter := zfsmgdadapter.NewAdapter(store, zfsRunDir)
 
 	startTime := time.Now()
-	router := api.NewRouterFull(store, version, startTime, historyStore, alarmStore, mon,
+	pluginCatalog, catalogErr := plugin.NewCatalog(plugin.DefaultOperatorProfilesDir)
+	if catalogErr != nil {
+		log.Printf("plugin profile catalog: %v (built-ins still loaded)", catalogErr)
+	}
+	pluginLifecycle, stopPluginRuntime := setupPluginRuntime(plugin.NewStore(store), pluginCatalog)
+
+	router := api.NewRouterFullWithPlugins(store, version, startTime, historyStore, alarmStore, mon,
+		pluginLifecycle,
+		pluginCatalog,
 		mdadmAdapter,
 		zfsAdapter,
 	)
@@ -255,6 +265,7 @@ func main() {
 	}
 
 	mon.Stop()
+	stopPluginRuntime()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -279,6 +290,46 @@ func main() {
 	}
 
 	log.Println("stopped")
+}
+
+func setupPluginRuntime(pluginStore *plugin.Store, catalog *plugin.Catalog) (*plugin.Lifecycle, context.CancelFunc) {
+	socketPath := os.Getenv("SMOOTHNAS_RUNTIME_SOCKET")
+	if socketPath == "" {
+		socketPath = pluginruntime.DefaultSocketPath
+	}
+
+	rt := pluginruntime.NewClient(socketPath)
+	readyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err := rt.WaitForReady(readyCtx)
+	cancel()
+	if err != nil {
+		log.Printf("plugin runtime unavailable at %s: %v", socketPath, err)
+		return nil, func() {}
+	}
+
+	if info, err := rt.Info(context.Background()); err != nil {
+		log.Printf("plugin runtime ready at %s; info unavailable: %v", socketPath, err)
+	} else {
+		log.Printf("plugin runtime ready at %s: version=%s driver=%s containers=%d images=%d",
+			socketPath, info.ServerVersion, info.Driver, info.Containers, info.Images)
+	}
+
+	lifecycle := plugin.NewLifecycle(pluginStore, rt)
+	lifecycle.SetProxy(plugin.NewProxy())
+	if catalog != nil {
+		lifecycle.SetCatalog(catalog)
+	}
+
+	reconciler := plugin.NewReconciler(pluginStore, rt)
+	syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := reconciler.Sync(syncCtx); err != nil {
+		log.Printf("plugin runtime reconcile: %v", err)
+	}
+	syncCancel()
+
+	watchCtx, stopWatch := context.WithCancel(context.Background())
+	go reconciler.WatchEvents(watchCtx)
+	return lifecycle, stopWatch
 }
 
 func runHostInit() {

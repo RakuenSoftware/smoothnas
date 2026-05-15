@@ -23,20 +23,21 @@ type CreateContainerRequest struct {
 // API has dozens of fields here; we only set the ones the plugin
 // system actually needs in this phase.
 type HostConfig struct {
-	Binds         []string         `json:"Binds,omitempty"`         // "<host_path>:<bind_path>[:ro]"
-	NetworkMode   string           `json:"NetworkMode,omitempty"`   // "smoothnas-plugins" once phase 04 lands
-	RestartPolicy RestartPolicy    `json:"RestartPolicy"`
-	Devices       []DeviceMapping  `json:"Devices,omitempty"`       // populated by phase 05 (profiles)
-	CapAdd        []string         `json:"CapAdd,omitempty"`        // capabilities a profile can grant
-	PidsLimit     int64            `json:"PidsLimit,omitempty"`     // 0 = unlimited; profiles can cap
-	OomScoreAdj   int              `json:"OomScoreAdj,omitempty"`   // -1000..1000; default-limits sets 100
+	Binds         []string                 `json:"Binds,omitempty"`       // "<host_path>:<bind_path>[:ro]"
+	NetworkMode   string                   `json:"NetworkMode,omitempty"` // LXC2Docker's managed bridge network
+	RestartPolicy RestartPolicy            `json:"RestartPolicy"`
+	Devices       []DeviceMapping          `json:"Devices,omitempty"`      // populated by phase 05 (profiles)
+	CapAdd        []string                 `json:"CapAdd,omitempty"`       // capabilities a profile can grant
+	Memory        int64                    `json:"Memory,omitempty"`       // bytes; 0 = unlimited
+	PidsLimit     int64                    `json:"PidsLimit,omitempty"`    // 0 = unlimited; profiles can cap
+	OomScoreAdj   int                      `json:"OomScoreAdj,omitempty"`  // -1000..1000; default-limits sets 100
 	PortBindings  map[string][]PortBinding `json:"PortBindings,omitempty"` // empty for v1; phase 09 may populate
 }
 
 // RestartPolicy maps the manifest's container.restartPolicy to
 // Docker's wire shape.
 type RestartPolicy struct {
-	Name              string `json:"Name"`              // "no" | "on-failure" | "unless-stopped" | "always"
+	Name              string `json:"Name"` // "no" | "on-failure" | "unless-stopped" | "always"
 	MaximumRetryCount int    `json:"MaximumRetryCount"`
 }
 
@@ -65,18 +66,18 @@ type CreateContainerResponse struct {
 // reads. Lifecycle code uses State + NetworkSettings; reconciliation
 // uses ID + Name + Labels.
 type ContainerInspect struct {
-	ID              string                            `json:"Id"`
-	Name            string                            `json:"Name"`     // includes leading "/"
-	Image           string                            `json:"Image"`    // resolved image ref
-	State           ContainerState                    `json:"State"`
-	Config          ContainerConfig                   `json:"Config"`
-	HostConfig      HostConfig                        `json:"HostConfig"`
-	NetworkSettings ContainerNetworkSettings          `json:"NetworkSettings"`
+	ID              string                   `json:"Id"`
+	Name            string                   `json:"Name"`  // includes leading "/"
+	Image           string                   `json:"Image"` // resolved image ref
+	State           ContainerState           `json:"State"`
+	Config          ContainerConfig          `json:"Config"`
+	HostConfig      HostConfig               `json:"HostConfig"`
+	NetworkSettings ContainerNetworkSettings `json:"NetworkSettings"`
 }
 
 // ContainerState mirrors Docker's State block.
 type ContainerState struct {
-	Status     string `json:"Status"`     // "created" | "running" | "exited" | "restarting" | "paused" | "dead"
+	Status     string `json:"Status"` // "created" | "running" | "exited" | "restarting" | "paused" | "dead"
 	Running    bool   `json:"Running"`
 	Restarting bool   `json:"Restarting"`
 	OOMKilled  bool   `json:"OOMKilled"`
@@ -90,13 +91,17 @@ type ContainerState struct {
 
 // ContainerConfig is the subset of the Config block tierd reads back.
 type ContainerConfig struct {
-	Image  string            `json:"Image"`
-	Labels map[string]string `json:"Labels"`
+	Image      string            `json:"Image"`
+	Cmd        []string          `json:"Cmd"`
+	Env        []string          `json:"Env"`
+	WorkingDir string            `json:"WorkingDir"`
+	User       string            `json:"User"`
+	Labels     map[string]string `json:"Labels"`
 }
 
 // ContainerNetworkSettings exposes the bridge IP phase 04's nginx
-// proxy needs. The map key is the network name (`smoothnas-plugins`
-// once phase 04 lands; `bridge` before that).
+// proxy needs. The map key is the Docker network name exposed by
+// LXC2Docker for the managed bridge.
 type ContainerNetworkSettings struct {
 	Networks map[string]ContainerNetwork `json:"Networks"`
 }

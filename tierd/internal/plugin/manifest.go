@@ -3,6 +3,7 @@ package plugin
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -35,111 +36,132 @@ const (
 
 // UI auth modes.
 const (
-	AuthNone            = "none"
-	AuthBearerInjected  = "bearer-injected"
+	AuthNone           = "none"
+	AuthBearerInjected = "bearer-injected"
 )
 
 // Manifest is the parsed in-memory form of smoothnas-plugin.yaml.
 // Field-level validation lives in ValidateManifest.
 type Manifest struct {
-	APIVersion string         `yaml:"apiVersion"`
-	Kind       string         `yaml:"kind"`
-	Metadata   Metadata       `yaml:"metadata"`
-	Artifact   Artifact       `yaml:"artifact"`
-	Container  Container      `yaml:"container"`
-	Instances  Instances      `yaml:"instances"`
-	Volumes    []Volume       `yaml:"volumes"`
-	Ports      []Port         `yaml:"ports"`
-	UI         *UI            `yaml:"ui,omitempty"`
-	Profiles   []string       `yaml:"profiles"`
-	Config     []ConfigField  `yaml:"config"`
+	APIVersion string        `yaml:"apiVersion" json:"apiVersion"`
+	Kind       string        `yaml:"kind" json:"kind"`
+	Metadata   Metadata      `yaml:"metadata" json:"metadata"`
+	Artifact   Artifact      `yaml:"artifact" json:"artifact"`
+	Container  Container     `yaml:"container" json:"container"`
+	Instances  Instances     `yaml:"instances" json:"instances"`
+	Volumes    []Volume      `yaml:"volumes" json:"volumes"`
+	Ports      []Port        `yaml:"ports" json:"ports"`
+	UI         *UI           `yaml:"ui,omitempty" json:"ui,omitempty"`
+	Profiles   []string      `yaml:"profiles" json:"profiles"`
+	Config     []ConfigField `yaml:"config" json:"config"`
 }
 
 // Metadata is the descriptive header.
 type Metadata struct {
-	Name        string `yaml:"name"`
-	Version     string `yaml:"version"`
-	Description string `yaml:"description"`
-	Vendor      string `yaml:"vendor"`
-	Homepage    string `yaml:"homepage"`
+	Name        string `yaml:"name" json:"name"`
+	Version     string `yaml:"version" json:"version"`
+	Description string `yaml:"description" json:"description"`
+	Vendor      string `yaml:"vendor" json:"vendor"`
+	Homepage    string `yaml:"homepage" json:"homepage"`
 }
 
 // Artifact is a tagged union over Type. The unselected sub-struct is
 // ignored at validation time, but yaml.v3 happily deserialises both
 // since we use inline embedding with a discriminator.
 type Artifact struct {
-	Type   string `yaml:"type"`
+	Type string `yaml:"type" json:"type"`
 
 	// oci-image fields
-	Image  string `yaml:"image,omitempty"`
-	Digest string `yaml:"digest,omitempty"`
+	Image  string `yaml:"image,omitempty" json:"image,omitempty"`
+	Digest string `yaml:"digest,omitempty" json:"digest,omitempty"`
 
 	// lxc-distro fields
-	Distro   string   `yaml:"distro,omitempty"`
-	Release  string   `yaml:"release,omitempty"`
-	Arch     string   `yaml:"arch,omitempty"`
-	Packages []string `yaml:"packages,omitempty"`
-	Setup    []string `yaml:"setup,omitempty"`
+	Distro   string   `yaml:"distro,omitempty" json:"distro,omitempty"`
+	Release  string   `yaml:"release,omitempty" json:"release,omitempty"`
+	Arch     string   `yaml:"arch,omitempty" json:"arch,omitempty"`
+	Packages []string `yaml:"packages,omitempty" json:"packages,omitempty"`
+	Setup    []string `yaml:"setup,omitempty" json:"setup,omitempty"`
 }
 
 // Container holds runtime knobs that apply to both artifact types.
 type Container struct {
-	Command       []string `yaml:"command,omitempty"`
-	WorkingDir    string   `yaml:"workingDir,omitempty"`
-	User          string   `yaml:"user,omitempty"`
-	RestartPolicy string   `yaml:"restartPolicy"`
+	Command       []string  `yaml:"command,omitempty" json:"command,omitempty"`
+	WorkingDir    string    `yaml:"workingDir,omitempty" json:"workingDir,omitempty"`
+	User          string    `yaml:"user,omitempty" json:"user,omitempty"`
+	RestartPolicy string    `yaml:"restartPolicy" json:"restartPolicy"`
+	Resources     Resources `yaml:"resources,omitempty" json:"resources,omitempty"`
+}
+
+// Resources holds runtime resource limits that can be literal values or
+// interpolated from config keys. Values are rendered into HostConfig by the
+// payload builder rather than passed only as container environment.
+type Resources struct {
+	Memory string `yaml:"memory,omitempty" json:"memory,omitempty"`
 }
 
 // Instances controls replica fan-out. When omitted entirely the
 // manifest is treated as { Count: 1, Configurable: false }.
 type Instances struct {
-	Count        int  `yaml:"count"`
-	Configurable bool `yaml:"configurable"`
+	Count        int  `yaml:"count" json:"count"`
+	Configurable bool `yaml:"configurable" json:"configurable"`
 }
 
 // Volume describes one persistent mount. PerInstance has no effect
 // when Count == 1.
 type Volume struct {
-	Name        string `yaml:"name"`
-	Mode        string `yaml:"mode"`
-	Slot        string `yaml:"slot,omitempty"`
-	MinSize     string `yaml:"minSize,omitempty"`
-	Bind        string `yaml:"bind"`
-	PerInstance bool   `yaml:"perInstance,omitempty"`
+	Name        string `yaml:"name" json:"name"`
+	Mode        string `yaml:"mode" json:"mode"`
+	Slot        string `yaml:"slot,omitempty" json:"slot,omitempty"`
+	MinSize     string `yaml:"minSize,omitempty" json:"minSize,omitempty"`
+	Bind        string `yaml:"bind" json:"bind"`
+	PerInstance bool   `yaml:"perInstance,omitempty" json:"perInstance,omitempty"`
 }
 
 // Port describes one port the container listens on. Phase 04 reads
 // Expose to decide whether to render an nginx route. HostExpose is
 // reserved for phase 09 and ignored in phase 1–4.
 type Port struct {
-	Name        string `yaml:"name"`
-	Port        int    `yaml:"port"`
-	Protocol    string `yaml:"protocol"`
-	Expose      bool   `yaml:"expose"`
-	HostExpose  bool   `yaml:"hostExpose,omitempty"`
+	Name       string `yaml:"name" json:"name"`
+	Port       int    `yaml:"port" json:"port"`
+	Protocol   string `yaml:"protocol" json:"protocol"`
+	Expose     bool   `yaml:"expose" json:"expose"`
+	HostExpose bool   `yaml:"hostExpose,omitempty" json:"hostExpose,omitempty"`
 }
 
 // UI describes how the plugin's own HTTP UI should be embedded in
 // the SmoothNAS browser. Phase 07 owns the embed page.
 type UI struct {
-	Embed UIEmbed `yaml:"embed"`
+	Embed UIEmbed `yaml:"embed" json:"embed"`
 }
 
 // UIEmbed is the embed sub-block.
 type UIEmbed struct {
-	Path string `yaml:"path"`
-	Auth string `yaml:"auth"`
+	Path string `yaml:"path" json:"path"`
+	Auth string `yaml:"auth" json:"auth"`
 }
 
 // ConfigField declares an operator-tunable parameter. The value
 // chosen at install time is recorded in plugin_config and passed
 // to the container as an environment variable named Key.
 type ConfigField struct {
-	Key         string `yaml:"key"`
-	Type        string `yaml:"type"`
-	Default     string `yaml:"default,omitempty"`
-	Description string `yaml:"description,omitempty"`
-	Secret      bool   `yaml:"secret,omitempty"`
+	Key         string         `yaml:"key" json:"key"`
+	Type        string         `yaml:"type" json:"type"`
+	Label       string         `yaml:"label,omitempty" json:"label,omitempty"`
+	Default     string         `yaml:"default,omitempty" json:"default,omitempty"`
+	Description string         `yaml:"description,omitempty" json:"description,omitempty"`
+	Secret      bool           `yaml:"secret,omitempty" json:"secret,omitempty"`
+	Options     []ConfigOption `yaml:"options,omitempty" json:"options,omitempty"`
+	Min         string         `yaml:"min,omitempty" json:"min,omitempty"`
+	Max         string         `yaml:"max,omitempty" json:"max,omitempty"`
+	Step        string         `yaml:"step,omitempty" json:"step,omitempty"`
+	Unit        string         `yaml:"unit,omitempty" json:"unit,omitempty"`
+}
+
+// ConfigOption is one selectable value for a config field with
+// type=select. Values are still persisted as strings in plugin_config.
+type ConfigOption struct {
+	Value string `yaml:"value" json:"value"`
+	Label string `yaml:"label,omitempty" json:"label,omitempty"`
 }
 
 // ParseManifest parses a manifest YAML document. Strict decoding is
@@ -192,7 +214,7 @@ func ValidateManifest(m *Manifest) error {
 
 	validateMetadata(v, &m.Metadata)
 	validateArtifact(v, &m.Artifact)
-	validateContainer(v, &m.Container, &m.Artifact)
+	validateContainer(v, &m.Container, &m.Artifact, m.Config)
 	validateInstances(v, &m.Instances, m.Volumes)
 	validateVolumes(v, m.Volumes)
 	validatePorts(v, m.Ports)
@@ -247,7 +269,7 @@ func validateArtifact(v *ValidationError, a *Artifact) {
 	}
 }
 
-func validateContainer(v *ValidationError, c *Container, a *Artifact) {
+func validateContainer(v *ValidationError, c *Container, a *Artifact, config []ConfigField) {
 	switch c.RestartPolicy {
 	case "", RestartUnlessStopped, RestartOnFailure, RestartNo:
 		// "" means "use default" (unless-stopped) — install.go fills it in.
@@ -260,6 +282,88 @@ func validateContainer(v *ValidationError, c *Container, a *Artifact) {
 	if a.Type == ArtifactLXCDistro && len(c.Command) == 0 {
 		v.add("container.command", "is required when artifact.type is %q", ArtifactLXCDistro)
 	}
+	validateResources(v, &c.Resources, config)
+}
+
+func validateResources(v *ValidationError, r *Resources, config []ConfigField) {
+	if r.Memory == "" {
+		return
+	}
+	if key, ok := configReference(r.Memory); ok {
+		if !configKeyExists(config, key) {
+			v.add("container.resources.memory", "references unknown config key %q", key)
+		}
+		return
+	}
+	if _, err := parseByteSize(r.Memory); err != nil {
+		v.add("container.resources.memory", "%v", err)
+	}
+}
+
+func configReference(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "${") || !strings.HasSuffix(value, "}") {
+		return "", false
+	}
+	key := strings.TrimSuffix(strings.TrimPrefix(value, "${"), "}")
+	if !reConfigKey.MatchString(key) {
+		return "", false
+	}
+	return key, true
+}
+
+func configKeyExists(config []ConfigField, key string) bool {
+	for _, f := range config {
+		if f.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func parseByteSize(value string) (int64, error) {
+	s := strings.TrimSpace(value)
+	if s == "" {
+		return 0, fmt.Errorf("must be a positive byte size")
+	}
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return 0, fmt.Errorf("must start with a positive integer byte size")
+	}
+	n, err := strconv.ParseInt(s[:i], 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("must be a positive byte size")
+	}
+	mult := int64(1)
+	switch strings.ToLower(strings.TrimSpace(s[i:])) {
+	case "", "b", "byte", "bytes":
+		mult = 1
+	case "k", "kb":
+		mult = 1000
+	case "ki", "kib":
+		mult = 1 << 10
+	case "m", "mb":
+		mult = 1000 * 1000
+	case "mi", "mib":
+		mult = 1 << 20
+	case "g", "gb":
+		mult = 1000 * 1000 * 1000
+	case "gi", "gib":
+		mult = 1 << 30
+	case "t", "tb":
+		mult = 1000 * 1000 * 1000 * 1000
+	case "ti", "tib":
+		mult = 1 << 40
+	default:
+		return 0, fmt.Errorf("has unsupported size suffix %q", strings.TrimSpace(s[i:]))
+	}
+	if n > (1<<63-1)/mult {
+		return 0, fmt.Errorf("byte size overflows int64")
+	}
+	return n * mult, nil
 }
 
 func validateInstances(v *ValidationError, in *Instances, vols []Volume) {
@@ -367,6 +471,20 @@ func validateConfig(v *ValidationError, fields []ConfigField) {
 			v.add(field+".key", "duplicate key %q", f.Key)
 		}
 		seen[f.Key] = true
+		switch f.Type {
+		case "", "string", "number", "select", "boolean":
+			// "" is accepted for old manifests and rendered as string.
+		default:
+			v.add(field+".type", "must be string, number, select, or boolean (got %q)", f.Type)
+		}
+		if f.Type == "select" && len(f.Options) == 0 {
+			v.add(field+".options", "is required when type is select")
+		}
+		for j, opt := range f.Options {
+			if opt.Value == "" {
+				v.add(fmt.Sprintf("%s.options[%d].value", field, j), "is required")
+			}
+		}
 	}
 }
 
@@ -399,4 +517,3 @@ func (m *Manifest) DistroSummary() string {
 	}
 	return strings.Join([]string{m.Artifact.Distro, m.Artifact.Release, arch}, "/")
 }
-

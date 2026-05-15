@@ -14,7 +14,8 @@ Architecture: amd64 arm64
 Depends: ${shlibs:Depends},
          ${misc:Depends},
          systemd
-Recommends: smoothfs-dkms,
+Recommends: smoothnas-runtime,
+            smoothfs-dkms,
             smoothfs-samba-vfs
 Description: SmoothNAS storage management daemon
  tierd is the SmoothNAS control-plane daemon. It owns the pool,

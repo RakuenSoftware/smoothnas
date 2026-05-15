@@ -280,7 +280,14 @@ func TestPluginsAPI_UpdateConfig(t *testing.T) {
 	det := doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins/llama-cpp", nil)
 	var detail pluginDetail
 	_ = json.Unmarshal(det.Body.Bytes(), &detail)
-	if len(detail.Config) != 1 || detail.Config[0].Value != "/models/custom.gguf" {
+	gotModelPath := ""
+	for _, cfg := range detail.Config {
+		if cfg.Key == "MODEL_PATH" {
+			gotModelPath = cfg.Value
+			break
+		}
+	}
+	if gotModelPath != "/models/custom.gguf" {
 		t.Errorf("config not updated: %+v", detail.Config)
 	}
 }

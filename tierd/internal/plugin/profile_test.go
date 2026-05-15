@@ -178,6 +178,14 @@ func TestResolve_OptionalPreflightWarnsAndContinues(t *testing.T) {
 	if len(r.PreflightWarnings) == 0 {
 		t.Error("expected at least one preflight warning")
 	}
+	if len(r.Devices) != 0 {
+		t.Errorf("missing optional devices should be dropped, got %+v", r.Devices)
+	}
+	for _, raw := range r.LXCRaw {
+		if strings.Contains(raw, "lxc.mount.entry = /dev/dri ") {
+			t.Errorf("missing optional mount should be dropped, got %q", raw)
+		}
+	}
 }
 
 func TestResolve_DeviceConcatenation(t *testing.T) {
@@ -186,10 +194,10 @@ func TestResolve_DeviceConcatenation(t *testing.T) {
 	c, _ := NewCatalog("")
 	m := &Manifest{Profiles: []string{"!default-limits", "gpu-amd", "gpu-nvidia"}}
 	r, err := Resolve(c, m, statHostFromMap(map[string]bool{
-		"/dev/dri":         true,
-		"/dev/nvidiactl":   true,
-		"/dev/nvidia-uvm":  true,
-		"/dev/nvidia0":     true,
+		"/dev/dri":        true,
+		"/dev/nvidiactl":  true,
+		"/dev/nvidia-uvm": true,
+		"/dev/nvidia0":    true,
 	}))
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -258,6 +266,18 @@ func TestValidateProfile_DeviceCgroupPerms(t *testing.T) {
 	}
 }
 
+func TestValidateProfile_RejectsNegativeLimits(t *testing.T) {
+	p := &Profile{
+		APIVersion: ProfileAPIVersion,
+		Kind:       ProfileKind,
+		Metadata:   ProfileMetadata{Name: "x"},
+		Container:  ProfileContainer{HostConfig: ProfileHostConfig{Memory: -1}},
+	}
+	if err := ValidateProfile(p); err == nil || !strings.Contains(err.Error(), "memory") {
+		t.Fatalf("err = %v, want memory validation error", err)
+	}
+}
+
 func TestPayload_ProfileFragmentsApplied(t *testing.T) {
 	in := fakePayloadInputs(t, "llama.yaml")
 	pidsLimit := int64(2048)
@@ -268,6 +288,7 @@ func TestPayload_ProfileFragmentsApplied(t *testing.T) {
 			{Path: "/dev/dri", CgroupPermissions: "rwm"},
 		},
 		Env:         map[string]string{"FROM_PROFILE": "yes"},
+		Memory:      16 << 30,
 		PidsLimit:   pidsLimit,
 		OomScoreAdj: &oom,
 		LXCRaw: []string{
@@ -281,6 +302,9 @@ func TestPayload_ProfileFragmentsApplied(t *testing.T) {
 	}
 	if got.HostConfig.PidsLimit != pidsLimit {
 		t.Errorf("PidsLimit = %d want %d", got.HostConfig.PidsLimit, pidsLimit)
+	}
+	if got.HostConfig.Memory != 16<<30 {
+		t.Errorf("Memory = %d want %d", got.HostConfig.Memory, int64(16<<30))
 	}
 	if got.HostConfig.OomScoreAdj != -100 {
 		t.Errorf("OomScoreAdj = %d", got.HostConfig.OomScoreAdj)

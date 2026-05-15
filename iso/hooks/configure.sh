@@ -131,6 +131,12 @@ if [ -d /smoothnas/tierd-ui ]; then
     mkdir -p "$TARGET/usr/share/tierd-ui"
     cp -r /smoothnas/tierd-ui/. "$TARGET/usr/share/tierd-ui/"
 fi
+if [ -f /smoothnas/docker-lxc-daemon ]; then
+    install -m 755 -D /smoothnas/docker-lxc-daemon "$TARGET/usr/lib/smoothnas/docker-lxc-daemon"
+fi
+if [ -f /smoothnas/smoothnas-runtime.service ]; then
+    install -m 644 /smoothnas/smoothnas-runtime.service "$TARGET/etc/systemd/system/smoothnas-runtime.service"
+fi
 mkdir -p "$TARGET/var/lib/tierd"
 
 cat > "$TARGET/etc/systemd/system/tierd-host-init.service" << 'UNIT'
@@ -151,8 +157,8 @@ UNIT
 cat > "$TARGET/etc/systemd/system/tierd.service" << 'UNIT'
 [Unit]
 Description=SmoothNAS Storage Management Daemon
-After=multi-user.target network-online.target smoothnas-firstboot.service tierd-host-init.service
-Wants=network-online.target tierd-host-init.service
+After=multi-user.target network-online.target smoothnas-firstboot.service smoothnas-runtime.service tierd-host-init.service
+Wants=network-online.target smoothnas-runtime.service tierd-host-init.service
 
 [Service]
 Type=simple
@@ -173,12 +179,14 @@ NoNewPrivileges=false
 WantedBy=multi-user.target
 UNIT
 
+chroot "$TARGET" systemctl enable smoothnas-runtime.service 2>/dev/null || true
 chroot "$TARGET" systemctl enable tierd-host-init.service 2>/dev/null || true
 chroot "$TARGET" systemctl enable tierd.service 2>/dev/null || true
 
 ui_status "Configuring system" "Configuring nginx reverse proxy for the SmoothNAS web UI." 4 6
 
 # nginx reverse proxy in front of tierd. TLS cert is generated at firstboot.
+mkdir -p "$TARGET/etc/nginx/conf.d/plugins.d"
 cat > "$TARGET/etc/nginx/sites-available/tierd" << 'NGINX'
 server {
     listen 443 ssl http2;
@@ -207,6 +215,8 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
     }
+
+    include /etc/nginx/conf.d/plugins.d/*.conf;
 
     location / {
         try_files $uri $uri/ /index.html;

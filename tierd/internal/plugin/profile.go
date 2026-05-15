@@ -35,12 +35,12 @@ const (
 // profiles ship with tierd; operator profiles live in
 // /etc/smoothnas/plugin-profiles.d/<name>.yaml.
 type Profile struct {
-	APIVersion string             `yaml:"apiVersion"`
-	Kind       string             `yaml:"kind"`
-	Metadata   ProfileMetadata    `yaml:"metadata"`
-	Container  ProfileContainer   `yaml:"container"`
-	LXC        ProfileLXC         `yaml:"lxc"`
-	Preflight  ProfilePreflight   `yaml:"preflight"`
+	APIVersion string           `yaml:"apiVersion"`
+	Kind       string           `yaml:"kind"`
+	Metadata   ProfileMetadata  `yaml:"metadata"`
+	Container  ProfileContainer `yaml:"container"`
+	LXC        ProfileLXC       `yaml:"lxc"`
+	Preflight  ProfilePreflight `yaml:"preflight"`
 
 	// Source is set by the catalog loader. "builtin" for embedded
 	// profiles, "operator" for operator-supplied overrides. Used by
@@ -68,6 +68,7 @@ type ProfileContainer struct {
 type ProfileHostConfig struct {
 	Devices     []ProfileDevice `yaml:"devices,omitempty"`
 	CapAdd      []string        `yaml:"capAdd,omitempty"`
+	Memory      int64           `yaml:"memory,omitempty"` // bytes; 0 leaves unlimited
 	PidsLimit   int64           `yaml:"pidsLimit,omitempty"`
 	OomScoreAdj *int            `yaml:"oomScoreAdj,omitempty"` // pointer so 0 is distinguishable from unset
 }
@@ -163,6 +164,7 @@ func (c *Catalog) List() []*Profile {
 type Resolved struct {
 	Devices     []ProfileDevice
 	CapAdd      []string
+	Memory      int64
 	PidsLimit   int64
 	OomScoreAdj *int
 	Env         map[string]string
@@ -273,6 +275,9 @@ func mergeProfile(into *Resolved, p *Profile) error {
 	if p.Container.HostConfig.PidsLimit != 0 {
 		into.PidsLimit = p.Container.HostConfig.PidsLimit
 	}
+	if p.Container.HostConfig.Memory != 0 {
+		into.Memory = p.Container.HostConfig.Memory
+	}
 	if p.Container.HostConfig.OomScoreAdj != nil {
 		v := *p.Container.HostConfig.OomScoreAdj
 		into.OomScoreAdj = &v
@@ -295,12 +300,44 @@ func runPreflight(into *Resolved, p *Profile, statHost func(string) error) error
 				return errors.New(msg)
 			case "optional", "":
 				into.PreflightWarnings = append(into.PreflightWarnings, msg)
+				dropOptionalHostPath(into, check.Path)
 			default:
 				return fmt.Errorf("profile %s: unknown requirement %q", p.Metadata.Name, check.Requirement)
 			}
 		}
 	}
 	return nil
+}
+
+func dropOptionalHostPath(into *Resolved, path string) {
+	devices := into.Devices[:0]
+	for _, d := range into.Devices {
+		if d.Path != path {
+			devices = append(devices, d)
+		}
+	}
+	into.Devices = devices
+
+	raw := into.LXCRaw[:0]
+	for _, line := range into.LXCRaw {
+		if !lxcMountEntryUsesHostPath(line, path) {
+			raw = append(raw, line)
+		}
+	}
+	into.LXCRaw = raw
+}
+
+func lxcMountEntryUsesHostPath(line, path string) bool {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "lxc.mount.entry") {
+		return false
+	}
+	key, value, ok := strings.Cut(line, "=")
+	if !ok || strings.TrimSpace(key) != "lxc.mount.entry" {
+		return false
+	}
+	fields := strings.Fields(value)
+	return len(fields) > 0 && fields[0] == path
 }
 
 // osStatHost is the production statHost — just os.Stat plus
@@ -411,6 +448,12 @@ func ValidateProfile(p *Profile) error {
 		default:
 			return fmt.Errorf("devices[%d].cgroupPermissions must be a subset of r/w/m (got %q)", i, d.CgroupPermissions)
 		}
+	}
+	if p.Container.HostConfig.Memory < 0 {
+		return fmt.Errorf("container.hostConfig.memory must be >= 0")
+	}
+	if p.Container.HostConfig.PidsLimit < 0 {
+		return fmt.Errorf("container.hostConfig.pidsLimit must be >= 0")
 	}
 	for i, c := range p.Preflight.HostHas {
 		if c.Path == "" {

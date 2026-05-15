@@ -166,6 +166,12 @@ DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get install -y -qq \
     targetcli-fb python3-rtslib-fb \
     2>/dev/null || true
 
+ui_status "Installing packages" "Installing SmoothNAS plugin runtime dependencies." 3 6
+echo "  Installing plugin runtime dependencies..."
+DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get install -y -qq \
+    lxc lxc-templates skopeo umoci rsync nftables iptables iproute2 uidmap \
+    2>/dev/null || true
+
 # OpenZFS, smoothfs, and Samba VFS DKMS builds are deferred to firstboot
 # (see /smoothiso-hooks/firstboot.sh) where the booted kernel matches the
 # installed SmoothKernel headers.

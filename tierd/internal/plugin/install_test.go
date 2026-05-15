@@ -389,6 +389,20 @@ func TestInstaller_BearerInjectedIssuesToken(t *testing.T) {
 	if len(tok) != 64 {
 		t.Errorf("token = %q (length %d, want 64 hex chars)", tok, len(tok))
 	}
+	rec, err := inst.store.Get("llama-cpp")
+	if err != nil {
+		t.Fatalf("get record: %v", err)
+	}
+	gotEnv := ""
+	for _, c := range rec.Config {
+		if c.Key == bearerExpectedConfigKey {
+			gotEnv = c.Value
+			break
+		}
+	}
+	if gotEnv != tok {
+		t.Errorf("%s = %q, want issued bearer token", bearerExpectedConfigKey, gotEnv)
+	}
 }
 
 func TestInstaller_NoEmbedAuthSkipsToken(t *testing.T) {
@@ -429,6 +443,40 @@ func TestStore_IssueBearerTokenIsIdempotentAndRotates(t *testing.T) {
 	got, _ := s.GetBearerToken("llama-cpp")
 	if got != t2 {
 		t.Errorf("Get returned %q, want last-issued %q", got, t2)
+	}
+	rec, err := s.Get("llama-cpp")
+	if err != nil {
+		t.Fatalf("get plugin: %v", err)
+	}
+	gotEnv := ""
+	for _, c := range rec.Config {
+		if c.Key == bearerExpectedConfigKey {
+			gotEnv = c.Value
+			break
+		}
+	}
+	if gotEnv != t2 {
+		t.Errorf("%s = %q, want rotated token", bearerExpectedConfigKey, gotEnv)
+	}
+	if err := s.ReplaceConfig("llama-cpp", map[string]string{
+		"MODEL_PATH":            "/models/qwen3.6-27b-128k-q5.gguf",
+		bearerExpectedConfigKey: "",
+	}); err != nil {
+		t.Fatalf("replace config: %v", err)
+	}
+	rec, err = s.Get("llama-cpp")
+	if err != nil {
+		t.Fatalf("get plugin after replace: %v", err)
+	}
+	gotEnv = ""
+	for _, c := range rec.Config {
+		if c.Key == bearerExpectedConfigKey {
+			gotEnv = c.Value
+			break
+		}
+	}
+	if gotEnv != t2 {
+		t.Errorf("ReplaceConfig should preserve generated bearer token, got %q want %q", gotEnv, t2)
 	}
 }
 
