@@ -35,111 +35,111 @@ const (
 
 // UI auth modes.
 const (
-	AuthNone            = "none"
-	AuthBearerInjected  = "bearer-injected"
+	AuthNone           = "none"
+	AuthBearerInjected = "bearer-injected"
 )
 
 // Manifest is the parsed in-memory form of smoothnas-plugin.yaml.
 // Field-level validation lives in ValidateManifest.
 type Manifest struct {
-	APIVersion string         `yaml:"apiVersion"`
-	Kind       string         `yaml:"kind"`
-	Metadata   Metadata       `yaml:"metadata"`
-	Artifact   Artifact       `yaml:"artifact"`
-	Container  Container      `yaml:"container"`
-	Instances  Instances      `yaml:"instances"`
-	Volumes    []Volume       `yaml:"volumes"`
-	Ports      []Port         `yaml:"ports"`
-	UI         *UI            `yaml:"ui,omitempty"`
-	Profiles   []string       `yaml:"profiles"`
-	Config     []ConfigField  `yaml:"config"`
+	APIVersion string        `json:"apiVersion" yaml:"apiVersion"`
+	Kind       string        `json:"kind" yaml:"kind"`
+	Metadata   Metadata      `json:"metadata" yaml:"metadata"`
+	Artifact   Artifact      `json:"artifact" yaml:"artifact"`
+	Container  Container     `json:"container" yaml:"container"`
+	Instances  Instances     `json:"instances" yaml:"instances"`
+	Volumes    []Volume      `json:"volumes,omitempty" yaml:"volumes"`
+	Ports      []Port        `json:"ports,omitempty" yaml:"ports"`
+	UI         *UI           `json:"ui,omitempty" yaml:"ui,omitempty"`
+	Profiles   []string      `json:"profiles,omitempty" yaml:"profiles"`
+	Config     []ConfigField `json:"config,omitempty" yaml:"config"`
 }
 
 // Metadata is the descriptive header.
 type Metadata struct {
-	Name        string `yaml:"name"`
-	Version     string `yaml:"version"`
-	Description string `yaml:"description"`
-	Vendor      string `yaml:"vendor"`
-	Homepage    string `yaml:"homepage"`
+	Name        string `json:"name" yaml:"name"`
+	Version     string `json:"version" yaml:"version"`
+	Description string `json:"description,omitempty" yaml:"description"`
+	Vendor      string `json:"vendor,omitempty" yaml:"vendor"`
+	Homepage    string `json:"homepage,omitempty" yaml:"homepage"`
 }
 
 // Artifact is a tagged union over Type. The unselected sub-struct is
 // ignored at validation time, but yaml.v3 happily deserialises both
 // since we use inline embedding with a discriminator.
 type Artifact struct {
-	Type   string `yaml:"type"`
+	Type string `json:"type" yaml:"type"`
 
 	// oci-image fields
-	Image  string `yaml:"image,omitempty"`
-	Digest string `yaml:"digest,omitempty"`
+	Image  string `json:"image,omitempty" yaml:"image,omitempty"`
+	Digest string `json:"digest,omitempty" yaml:"digest,omitempty"`
 
 	// lxc-distro fields
-	Distro   string   `yaml:"distro,omitempty"`
-	Release  string   `yaml:"release,omitempty"`
-	Arch     string   `yaml:"arch,omitempty"`
-	Packages []string `yaml:"packages,omitempty"`
-	Setup    []string `yaml:"setup,omitempty"`
+	Distro   string   `json:"distro,omitempty" yaml:"distro,omitempty"`
+	Release  string   `json:"release,omitempty" yaml:"release,omitempty"`
+	Arch     string   `json:"arch,omitempty" yaml:"arch,omitempty"`
+	Packages []string `json:"packages,omitempty" yaml:"packages,omitempty"`
+	Setup    []string `json:"setup,omitempty" yaml:"setup,omitempty"`
 }
 
 // Container holds runtime knobs that apply to both artifact types.
 type Container struct {
-	Command       []string `yaml:"command,omitempty"`
-	WorkingDir    string   `yaml:"workingDir,omitempty"`
-	User          string   `yaml:"user,omitempty"`
-	RestartPolicy string   `yaml:"restartPolicy"`
+	Command       []string `json:"command,omitempty" yaml:"command,omitempty"`
+	WorkingDir    string   `json:"workingDir,omitempty" yaml:"workingDir,omitempty"`
+	User          string   `json:"user,omitempty" yaml:"user,omitempty"`
+	RestartPolicy string   `json:"restartPolicy" yaml:"restartPolicy"`
 }
 
 // Instances controls replica fan-out. When omitted entirely the
 // manifest is treated as { Count: 1, Configurable: false }.
 type Instances struct {
-	Count        int  `yaml:"count"`
-	Configurable bool `yaml:"configurable"`
+	Count        int  `json:"count" yaml:"count"`
+	Configurable bool `json:"configurable" yaml:"configurable"`
 }
 
 // Volume describes one persistent mount. PerInstance has no effect
 // when Count == 1.
 type Volume struct {
-	Name        string `yaml:"name"`
-	Mode        string `yaml:"mode"`
-	Slot        string `yaml:"slot,omitempty"`
-	MinSize     string `yaml:"minSize,omitempty"`
-	Bind        string `yaml:"bind"`
-	PerInstance bool   `yaml:"perInstance,omitempty"`
+	Name        string `json:"name" yaml:"name"`
+	Mode        string `json:"mode" yaml:"mode"`
+	Slot        string `json:"slot,omitempty" yaml:"slot,omitempty"`
+	MinSize     string `json:"minSize,omitempty" yaml:"minSize,omitempty"`
+	Bind        string `json:"bind" yaml:"bind"`
+	PerInstance bool   `json:"perInstance,omitempty" yaml:"perInstance,omitempty"`
 }
 
 // Port describes one port the container listens on. Phase 04 reads
 // Expose to decide whether to render an nginx route. HostExpose is
 // reserved for phase 09 and ignored in phase 1–4.
 type Port struct {
-	Name        string `yaml:"name"`
-	Port        int    `yaml:"port"`
-	Protocol    string `yaml:"protocol"`
-	Expose      bool   `yaml:"expose"`
-	HostExpose  bool   `yaml:"hostExpose,omitempty"`
+	Name       string `json:"name" yaml:"name"`
+	Port       int    `json:"port" yaml:"port"`
+	Protocol   string `json:"protocol" yaml:"protocol"`
+	Expose     bool   `json:"expose" yaml:"expose"`
+	HostExpose bool   `json:"hostExpose,omitempty" yaml:"hostExpose,omitempty"`
 }
 
 // UI describes how the plugin's own HTTP UI should be embedded in
 // the SmoothNAS browser. Phase 07 owns the embed page.
 type UI struct {
-	Embed UIEmbed `yaml:"embed"`
+	Embed UIEmbed `json:"embed" yaml:"embed"`
 }
 
 // UIEmbed is the embed sub-block.
 type UIEmbed struct {
-	Path string `yaml:"path"`
-	Auth string `yaml:"auth"`
+	Path string `json:"path" yaml:"path"`
+	Auth string `json:"auth" yaml:"auth"`
 }
 
 // ConfigField declares an operator-tunable parameter. The value
 // chosen at install time is recorded in plugin_config and passed
 // to the container as an environment variable named Key.
 type ConfigField struct {
-	Key         string `yaml:"key"`
-	Type        string `yaml:"type"`
-	Default     string `yaml:"default,omitempty"`
-	Description string `yaml:"description,omitempty"`
-	Secret      bool   `yaml:"secret,omitempty"`
+	Key         string `json:"key" yaml:"key"`
+	Type        string `json:"type" yaml:"type"`
+	Default     string `json:"default,omitempty" yaml:"default,omitempty"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+	Secret      bool   `json:"secret,omitempty" yaml:"secret,omitempty"`
 }
 
 // ParseManifest parses a manifest YAML document. Strict decoding is
@@ -399,4 +399,3 @@ func (m *Manifest) DistroSummary() string {
 	}
 	return strings.Join([]string{m.Artifact.Distro, m.Artifact.Release, arch}, "/")
 }
-

@@ -15,19 +15,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Close non-testing PRs to main
-        if: ${{ github.head_ref != 'testing' && github.event.pull_request.head.repo.full_name != github.repository }}
+        if: ${{ github.head_ref != 'testing' || github.event.pull_request.head.repo.full_name != github.repository }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
-          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Closing automatically: pull requests into \`main\` must come from \`testing\`. Open or retarget this change against \`testing\` instead."
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Closing automatically: pull requests into \`main\` must come from \`$REPO:testing\`. Got \`$HEAD_REPO:$HEAD_REF\`. Open or retarget this change against \`testing\` instead."
           gh pr close "$PR_NUMBER" --repo "$REPO"
 
       - name: Require testing as the source branch
+        env:
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
-          if [ "${{ github.head_ref }}" != "testing" ] && [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
-            echo "Pull requests into main must come from testing unless they originate from this repository. Got '${{ github.head_ref }}' from '${{ github.event.pull_request.head.repo.full_name }}'."
+          if [ "$HEAD_REF" != "testing" ] || [ "$HEAD_REPO" != "$REPO" ]; then
+            echo "Pull requests into main must come from $REPO:testing. Got $HEAD_REPO:$HEAD_REF."
             exit 1
           fi

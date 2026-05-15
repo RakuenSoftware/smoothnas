@@ -121,6 +121,51 @@ func TestPluginsAPI_ListEmpty(t *testing.T) {
 	}
 }
 
+func TestPluginsAPI_ParseReturnsManifestJSONShape(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/parse", map[string]any{
+		"manifest": readManifestFixture(t, "llama.yaml"),
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Manifest map[string]any `json:"manifest"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := resp.Manifest["Metadata"]; ok {
+		t.Fatalf("manifest used Go field name Metadata; body=%s", rr.Body.String())
+	}
+	metadata, ok := resp.Manifest["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("manifest.metadata missing or wrong type: %#v", resp.Manifest["metadata"])
+	}
+	if got := metadata["name"]; got != "llama-cpp" {
+		t.Fatalf("manifest.metadata.name = %#v", got)
+	}
+	artifact, ok := resp.Manifest["artifact"].(map[string]any)
+	if !ok {
+		t.Fatalf("manifest.artifact missing or wrong type: %#v", resp.Manifest["artifact"])
+	}
+	if got := artifact["image"]; got != "ghcr.io/ggml-org/llama.cpp:server-cuda-b3500" {
+		t.Fatalf("manifest.artifact.image = %#v", got)
+	}
+	volumes, ok := resp.Manifest["volumes"].([]any)
+	if !ok || len(volumes) != 1 {
+		t.Fatalf("manifest.volumes = %#v", resp.Manifest["volumes"])
+	}
+	firstVolume, ok := volumes[0].(map[string]any)
+	if !ok {
+		t.Fatalf("manifest.volumes[0] wrong type: %#v", volumes[0])
+	}
+	if got := firstVolume["minSize"]; got != "50G" {
+		t.Fatalf("manifest.volumes[0].minSize = %#v", got)
+	}
+}
+
 func TestPluginsAPI_PreflightFailureSurfacesPlacements(t *testing.T) {
 	h, _ := newPluginsHandlerForTest(t)
 	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/preflight", map[string]any{
