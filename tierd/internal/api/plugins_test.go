@@ -2,16 +2,20 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/runtime"
 )
 
 // readManifestFixture pulls a YAML manifest from the plugin
@@ -347,6 +351,98 @@ func TestPluginsAPI_UpdateConfig_MissingPlugin404(t *testing.T) {
 	}
 }
 
+func TestPluginsAPI_ModelInstallDownloadsUpdatesConfigAndStarts(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	rt := &fakeModelRuntime{}
+	h.lifecycle = plugin.NewLifecycle(h.store, rt)
+
+	doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{
+		"manifest":        readManifestFixture(t, "llama.yaml"),
+		"tierAssignments": map[string]any{"default": "media"},
+	})
+
+	modelBytes := []byte("GGUF test model")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(modelBytes)
+	}))
+	defer srv.Close()
+
+	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/llama-cpp/models/install", map[string]any{
+		"url": srv.URL + "/tiny.gguf",
+	})
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp installModelResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	job := waitForJobDone(t, resp.JobID)
+	if job.Status != "completed" {
+		t.Fatalf("job status = %s error=%s progress=%s", job.Status, job.Error, job.Progress)
+	}
+
+	rec, err := h.store.Get("llama-cpp")
+	if err != nil {
+		t.Fatalf("get plugin: %v", err)
+	}
+	cfg := map[string]string{}
+	for _, row := range rec.Config {
+		cfg[row.Key] = row.Value
+	}
+	if cfg["MODEL_PATH"] != "/models/tiny.gguf" {
+		t.Fatalf("MODEL_PATH = %q", cfg["MODEL_PATH"])
+	}
+	modelDir := rec.Volumes[0].Paths[1]
+	got, err := os.ReadFile(filepath.Join(modelDir, "tiny.gguf"))
+	if err != nil {
+		t.Fatalf("read installed model: %v", err)
+	}
+	if string(got) != string(modelBytes) {
+		t.Fatalf("model bytes = %q", string(got))
+	}
+	if len(rt.created) != 1 || len(rt.started) != 1 {
+		t.Fatalf("runtime created=%d started=%d", len(rt.created), len(rt.started))
+	}
+}
+
+func TestPluginsAPI_ModelInstallRejectsBadURL(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{
+		"manifest":        readManifestFixture(t, "llama.yaml"),
+		"tierAssignments": map[string]any{"default": "media"},
+	})
+
+	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/llama-cpp/models/install", map[string]any{
+		"url": "file:///tmp/model.gguf",
+	})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "plugins.models.url_invalid") {
+		t.Fatalf("expected url_invalid code, got %s", rr.Body.String())
+	}
+}
+
+func TestPluginsAPI_ModelInstallRequiresRuntime(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{
+		"manifest":        readManifestFixture(t, "llama.yaml"),
+		"tierAssignments": map[string]any{"default": "media"},
+	})
+
+	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/llama-cpp/models/install", map[string]any{
+		"url": "https://example.com/model.gguf",
+	})
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "plugins.runtime_unavailable") {
+		t.Fatalf("expected runtime_unavailable code, got %s", rr.Body.String())
+	}
+}
+
 func TestPluginsAPI_Uninstall(t *testing.T) {
 	h, _ := newPluginsHandlerForTest(t)
 	doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{
@@ -387,4 +483,82 @@ func TestPluginsAPI_PreflightBadManifest400(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("status = %d want 400; body=%s", rr.Code, rr.Body.String())
 	}
+}
+
+func waitForJobDone(t *testing.T, id string) *JobStatus {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if job := jobs.Get(id); job != nil && job.Status != "running" {
+			return job
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("job %s did not finish", id)
+	return nil
+}
+
+type fakeModelRuntime struct {
+	created []runtime.CreateContainerRequest
+	started []string
+}
+
+func (f *fakeModelRuntime) Ping(context.Context) error { return nil }
+
+func (f *fakeModelRuntime) Info(context.Context) (runtime.Info, error) { return runtime.Info{}, nil }
+
+func (f *fakeModelRuntime) PullImage(_ context.Context, ref string, _ func(runtime.PullEvent)) (string, error) {
+	return ref, nil
+}
+
+func (f *fakeModelRuntime) RemoveImage(context.Context, string) error { return nil }
+
+func (f *fakeModelRuntime) CreateContainer(_ context.Context, _ string, req runtime.CreateContainerRequest) (runtime.CreateContainerResponse, error) {
+	f.created = append(f.created, req)
+	return runtime.CreateContainerResponse{ID: "ctr-1"}, nil
+}
+
+func (f *fakeModelRuntime) StartContainer(_ context.Context, id string) error {
+	f.started = append(f.started, id)
+	return nil
+}
+
+func (f *fakeModelRuntime) StopContainer(context.Context, string, int) error { return nil }
+
+func (f *fakeModelRuntime) RestartContainer(context.Context, string, int) error { return nil }
+
+func (f *fakeModelRuntime) RemoveContainer(context.Context, string, bool) error { return nil }
+
+func (f *fakeModelRuntime) InspectContainer(context.Context, string) (runtime.ContainerInspect, error) {
+	return runtime.ContainerInspect{}, nil
+}
+
+func (f *fakeModelRuntime) ListManagedContainers(context.Context) ([]runtime.ContainerSummary, error) {
+	return nil, nil
+}
+
+func (f *fakeModelRuntime) WaitContainer(context.Context, string) (int, error) { return 0, nil }
+
+func (f *fakeModelRuntime) CommitContainer(context.Context, string, string, string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeModelRuntime) StreamLogs(context.Context, string, runtime.LogsOptions) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+
+func (f *fakeModelRuntime) SubscribeEvents(context.Context) (<-chan runtime.Event, <-chan error, error) {
+	events := make(chan runtime.Event)
+	errs := make(chan error)
+	close(events)
+	close(errs)
+	return events, errs, nil
+}
+
+func (f *fakeModelRuntime) EnsurePluginBridge(context.Context) (string, error) {
+	return "smoothnas-plugins", nil
+}
+
+func (f *fakeModelRuntime) InspectContainerBridgeIP(context.Context, string) (string, error) {
+	return "172.28.0.2", nil
 }

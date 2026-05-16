@@ -57,6 +57,7 @@ func NewPluginsHandler(
 //	POST   /api/plugins/<name>/stop           lifecycle
 //	POST   /api/plugins/<name>/restart        lifecycle
 //	POST   /api/plugins/<name>/materialise    pull image + create containers
+//	POST   /api/plugins/<name>/models/install download model, set MODEL_PATH, start
 //	PUT    /api/plugins/<name>/config         update plugin_config
 //	GET    /api/plugins/<name>/instances      per-instance state (phase 09)
 //	POST   /api/plugins/<name>/instances      scale to {count: N}    (phase 09)
@@ -123,6 +124,12 @@ func (h *PluginsHandler) routeNamed(w http.ResponseWriter, r *http.Request, rest
 			return
 		}
 		h.lifecycleVerb(w, r, name, verb)
+	case "models/install":
+		if r.Method != http.MethodPost {
+			jsonMethodNotAllowed(w)
+			return
+		}
+		h.installModel(w, r, name)
 	case "rotate-token":
 		if r.Method != http.MethodPost {
 			jsonMethodNotAllowed(w)
@@ -238,12 +245,12 @@ func toPluginListItem(r plugin.PluginRow) pluginListItem {
 // detail returns the full PluginRecord (plugin row + per-instance
 // state + volumes + ports + config) for one plugin.
 type pluginDetail struct {
-	Plugin    pluginListItem        `json:"plugin"`
-	Instances []plugin.InstanceRow  `json:"instances"`
-	Volumes   []plugin.VolumeRow    `json:"volumes"`
-	Ports     []plugin.PortRow      `json:"ports"`
-	Config    []plugin.ConfigRow    `json:"config"`
-	Manifest  string                `json:"manifest"`
+	Plugin    pluginListItem       `json:"plugin"`
+	Instances []plugin.InstanceRow `json:"instances"`
+	Volumes   []plugin.VolumeRow   `json:"volumes"`
+	Ports     []plugin.PortRow     `json:"ports"`
+	Config    []plugin.ConfigRow   `json:"config"`
+	Manifest  string               `json:"manifest"`
 }
 
 func (h *PluginsHandler) detail(w http.ResponseWriter, _ *http.Request, name string) {
@@ -302,8 +309,8 @@ func (h *PluginsHandler) parse(w http.ResponseWriter, r *http.Request) {
 // `tierAssignments` mirrors plugin.TierAssignments — operator's
 // choices for tier-bound volumes.
 type preflightRequest struct {
-	Manifest        string                 `json:"manifest"`
-	TierAssignments preflightTierAssign    `json:"tierAssignments"`
+	Manifest        string              `json:"manifest"`
+	TierAssignments preflightTierAssign `json:"tierAssignments"`
 }
 
 type preflightTierAssign struct {
@@ -313,8 +320,8 @@ type preflightTierAssign struct {
 
 // preflightResponse mirrors plugin.PreflightResult for JSON output.
 type preflightResponse struct {
-	OK         bool                       `json:"ok"`
-	Placements []plugin.VolumePlacement   `json:"placements"`
+	OK         bool                     `json:"ok"`
+	Placements []plugin.VolumePlacement `json:"placements"`
 }
 
 func (h *PluginsHandler) preflight(w http.ResponseWriter, r *http.Request) {
@@ -691,4 +698,3 @@ func (h *PluginsHandler) scaleInstances(w http.ResponseWriter, r *http.Request, 
 	}
 	_ = json.NewEncoder(w).Encode(res)
 }
-

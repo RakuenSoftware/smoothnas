@@ -154,8 +154,8 @@ config:
   - key: MODEL_PATH
     type: string
     label: Model GGUF path
-    default: "/models/Qwen_Qwen3.6-35B-A3B-Q5_K_M.gguf"
-    description: Model file inside the container. Default targets Qwen3.6 35B-A3B Q5_K_M.
+    default: "/models/default.gguf"
+    description: Model file inside the container. The Models tab updates this after download.
   - key: N_GPU_LAYERS
     type: number
     label: GPU layers
@@ -277,8 +277,8 @@ config:
   - key: MODEL_PATH
     type: string
     label: Model GGUF path
-    default: "/models/Qwen_Qwen3.6-35B-A3B-Q5_K_M.gguf"
-    description: Model file inside the container. Default targets Qwen3.6 35B-A3B Q5_K_M.
+    default: "/models/default.gguf"
+    description: Model file inside the container. The Models tab updates this after download.
   - key: N_GPU_LAYERS
     type: number
     label: GPU layers
@@ -399,8 +399,8 @@ config:
   - key: MODEL_PATH
     type: string
     label: Model GGUF path
-    default: "/models/Qwen_Qwen3.6-35B-A3B-Q5_K_M.gguf"
-    description: Model file inside the container. Default targets Qwen3.6 35B-A3B Q5_K_M.
+    default: "/models/default.gguf"
+    description: Model file inside the container. The Models tab updates this after download.
   - key: CTX_SIZE
     type: number
     label: Context window
