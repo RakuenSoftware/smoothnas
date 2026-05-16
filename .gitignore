@@ -35,6 +35,7 @@ tierd-ui/tsconfig.tsbuildinfo
 iso/cache/
 iso/work/
 iso/output/
+runtime/build/
 
 # IDE
 .vscode/

@@ -1,8 +1,8 @@
 [Unit]
 Description=SmoothNAS storage management daemon
 Documentation=https://github.com/JBailes/SmoothNAS
-After=multi-user.target network-online.target tierd-host-init.service
-Wants=network-online.target tierd-host-init.service
+After=multi-user.target network-online.target smoothnas-runtime.service tierd-host-init.service
+Wants=network-online.target smoothnas-runtime.service tierd-host-init.service
 
 [Service]
 Type=simple

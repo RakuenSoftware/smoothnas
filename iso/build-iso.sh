@@ -165,6 +165,12 @@ prepare_smoothnas_payload() {
         echo "ERROR: bin/tierd not found at ${base_dir}/bin/tierd."
         exit 1
     }
+    cp "${base_dir}/bin/docker-lxc-daemon" "$payload_dir/docker-lxc-daemon" || {
+        echo "ERROR: bin/docker-lxc-daemon not found at ${base_dir}/bin/docker-lxc-daemon."
+        echo "       Run 'make build-runtime' before building the ISO."
+        exit 1
+    }
+    cp "${base_dir}/runtime/smoothnas-runtime.service" "$payload_dir/smoothnas-runtime.service"
     if [ -d "${base_dir}/tierd-ui/dist/smoothnas-ui" ]; then
         mkdir -p "${payload_dir}/tierd-ui"
         cp -r "${base_dir}/tierd-ui/dist/smoothnas-ui/." "${payload_dir}/tierd-ui/"
@@ -238,6 +244,20 @@ main() {
         echo "  bin/tierd not found, building backend..."
         (cd "${PROJECT_DIR}/tierd" && CGO_ENABLED=1 go build -o ../bin/tierd ./cmd/tierd/) || {
             echo "ERROR: backend build failed."
+            exit 1
+        }
+    fi
+    if [ ! -f "${PROJECT_DIR}/bin/docker-lxc-daemon" ]; then
+        local host_arch
+        host_arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+        if [ "$host_arch" != "$DEB_ARCH" ]; then
+            echo "ERROR: bin/docker-lxc-daemon missing and host arch ${host_arch} != target ${DEB_ARCH}." >&2
+            echo "       Pre-build the runtime on a ${DEB_ARCH} host (CGO requires native liblxc)." >&2
+            exit 1
+        fi
+        echo "  bin/docker-lxc-daemon not found, building SmoothNAS runtime..."
+        "${PROJECT_DIR}/scripts/build-smoothnas-runtime.sh" || {
+            echo "ERROR: SmoothNAS runtime build failed."
             exit 1
         }
     fi

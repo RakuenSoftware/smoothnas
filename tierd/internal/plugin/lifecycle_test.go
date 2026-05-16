@@ -18,15 +18,15 @@ type fakeRuntime struct {
 	mu sync.Mutex
 
 	// Recorded calls — useful in assertions.
-	createCalls   []runtime.CreateContainerRequest
-	createNames   []string
-	startCalls    []string
-	stopCalls     []string
-	removeCalls   []string
-	pullCalls     []string
-	commitCalls   []string
-	waitCalls     []string
-	bridgeCalls   int
+	createCalls []runtime.CreateContainerRequest
+	createNames []string
+	startCalls  []string
+	stopCalls   []string
+	removeCalls []string
+	pullCalls   []string
+	commitCalls []string
+	waitCalls   []string
+	bridgeCalls int
 
 	// Behaviour knobs.
 	pullErr        error
@@ -35,6 +35,7 @@ type fakeRuntime struct {
 	waitExit       int
 	commitErr      error
 	inspectMissing map[string]bool // container IDs that 404 on inspect
+	containers     map[string]runtime.CreateContainerRequest
 	// bridgeIP is what InspectContainerBridgeIP returns. Default
 	// empty string makes captureBridgeIP retry; tests that exercise
 	// the success path set this to a real-looking IP.
@@ -44,9 +45,11 @@ type fakeRuntime struct {
 	nextID int
 }
 
-func (f *fakeRuntime) Ping(ctx context.Context) error                            { return nil }
-func (f *fakeRuntime) Info(ctx context.Context) (runtime.Info, error)            { return runtime.Info{}, nil }
-func (f *fakeRuntime) EnsurePluginBridge(ctx context.Context) (string, error)    { return "fake-bridge", nil }
+func (f *fakeRuntime) Ping(ctx context.Context) error                 { return nil }
+func (f *fakeRuntime) Info(ctx context.Context) (runtime.Info, error) { return runtime.Info{}, nil }
+func (f *fakeRuntime) EnsurePluginBridge(ctx context.Context) (string, error) {
+	return "fake-bridge", nil
+}
 func (f *fakeRuntime) InspectContainerBridgeIP(ctx context.Context, id string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -94,6 +97,10 @@ func (f *fakeRuntime) CreateContainer(ctx context.Context, name string, req runt
 	id := "fake-" + name
 	f.createCalls = append(f.createCalls, req)
 	f.createNames = append(f.createNames, name)
+	if f.containers == nil {
+		f.containers = map[string]runtime.CreateContainerRequest{}
+	}
+	f.containers[id] = req
 	return runtime.CreateContainerResponse{ID: id}, nil
 }
 
@@ -117,6 +124,7 @@ func (f *fakeRuntime) RemoveContainer(ctx context.Context, id string, _ bool) er
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removeCalls = append(f.removeCalls, id)
+	delete(f.containers, id)
 	return nil
 }
 
@@ -125,6 +133,21 @@ func (f *fakeRuntime) InspectContainer(ctx context.Context, id string) (runtime.
 	defer f.mu.Unlock()
 	if f.inspectMissing[id] {
 		return runtime.ContainerInspect{}, &runtime.APIError{StatusCode: 404, Message: "no such container"}
+	}
+	if req, ok := f.containers[id]; ok {
+		return runtime.ContainerInspect{
+			ID:    id,
+			Image: req.Image,
+			Config: runtime.ContainerConfig{
+				Image:      req.Image,
+				Cmd:        append([]string(nil), req.Cmd...),
+				Env:        append([]string(nil), req.Env...),
+				WorkingDir: req.WorkingDir,
+				User:       req.User,
+				Labels:     req.Labels,
+			},
+			HostConfig: req.HostConfig,
+		}, nil
 	}
 	return runtime.ContainerInspect{ID: id}, nil
 }
@@ -415,6 +438,47 @@ func TestLifecycle_Materialise_RecreatesGhostContainer(t *testing.T) {
 	}
 	if len(rt.createCalls) != 2 {
 		t.Errorf("create calls = %d want 2 (initial + ghost recreate)", len(rt.createCalls))
+	}
+}
+
+func TestLifecycle_Materialise_RecreatesWhenPayloadChanges(t *testing.T) {
+	lc, rt, store := installFixture(t, "llama.yaml")
+	if _, err := store.db.Exec(
+		`UPDATE plugin_volume_paths SET host_path = '/mnt/m' WHERE plugin_name = 'llama-cpp'`,
+	); err != nil {
+		t.Fatalf("fake tier resolution: %v", err)
+	}
+	if err := lc.Materialise(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("first materialise: %v", err)
+	}
+	rec, _ := store.Get("llama-cpp")
+	cfg := map[string]string{}
+	for _, c := range rec.Config {
+		cfg[c.Key] = c.Value
+	}
+	cfg["MODEL_PATH"] = "/models/changed.gguf"
+	if err := store.ReplaceConfig("llama-cpp", cfg); err != nil {
+		t.Fatalf("replace config: %v", err)
+	}
+
+	if err := lc.Materialise(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("second materialise: %v", err)
+	}
+	if len(rt.removeCalls) == 0 {
+		t.Fatal("expected stale container to be removed")
+	}
+	if len(rt.createCalls) != 2 {
+		t.Fatalf("create calls = %d want 2 (initial + changed payload)", len(rt.createCalls))
+	}
+	found := false
+	for _, e := range rt.createCalls[1].Env {
+		if e == "MODEL_PATH=/models/changed.gguf" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("changed env was not rendered into replacement payload: %v", rt.createCalls[1].Env)
 	}
 }
 

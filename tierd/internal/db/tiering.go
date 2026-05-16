@@ -247,6 +247,15 @@ func (s *Store) pruneEmptyPlacementDomain(id string) error {
 // CreateTierTarget inserts a new tier target row and auto-creates its placement
 // domain if it does not already exist.
 func (s *Store) CreateTierTarget(t *TierTargetRow) error {
+	if t.TargetFillPct == 0 {
+		t.TargetFillPct = 50
+	}
+	if t.FullThresholdPct == 0 {
+		t.FullThresholdPct = 95
+	}
+	if err := validateFillPolicy(t.TargetFillPct, t.FullThresholdPct); err != nil {
+		return err
+	}
 	if t.ID == "" {
 		id, err := newControlPlaneID()
 		if err != nil {
@@ -337,6 +346,9 @@ func (s *Store) ListTierTargets() ([]TierTargetRow, error) {
 // increments policy_revision, and marks any movement jobs in the target's
 // placement domain as stale.
 func (s *Store) UpdateTierTargetPolicy(id string, targetFillPct, fullThresholdPct int) error {
+	if err := validateFillPolicy(targetFillPct, fullThresholdPct); err != nil {
+		return err
+	}
 	t, err := s.GetTierTarget(id)
 	if err != nil {
 		return err
@@ -352,6 +364,19 @@ func (s *Store) UpdateTierTargetPolicy(id string, targetFillPct, fullThresholdPc
 		return fmt.Errorf("update tier target policy: %w", err)
 	}
 	return s.invalidateMovementJobsByDomainPolicy(t.PlacementDomain, newRevision)
+}
+
+func validateFillPolicy(targetFillPct, fullThresholdPct int) error {
+	if targetFillPct < 1 || targetFillPct > 100 {
+		return fmt.Errorf("target_fill_pct must be between 1 and 100")
+	}
+	if fullThresholdPct < 1 || fullThresholdPct > 100 {
+		return fmt.Errorf("full_threshold_pct must be between 1 and 100")
+	}
+	if targetFillPct >= fullThresholdPct {
+		return fmt.Errorf("target_fill_pct must be less than full_threshold_pct")
+	}
+	return nil
 }
 
 // DeleteTierTarget removes a tier target and prunes its placement domain if

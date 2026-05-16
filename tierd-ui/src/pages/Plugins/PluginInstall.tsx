@@ -43,10 +43,16 @@ type ManifestVolume = {
 
 type ManifestConfigField = {
   key: string;
-  type: string;       // 'string' in v1
+  type: string;
+  label?: string;
   default?: string;
   description?: string;
   secret?: boolean;
+  options?: { value: string; label?: string }[];
+  min?: string;
+  max?: string;
+  step?: string;
+  unit?: string;
 };
 
 type Tier = {
@@ -545,18 +551,61 @@ function ConfigStep({
       <p>{t('plugins.install.config.description')}</p>
       {fields.map(f => (
         <div key={f.key} className="wizard-config-row">
-          <span className="config-key">{f.key}</span>
-          <input
-            className="config-input"
-            type={f.secret ? 'password' : 'text'}
-            value={values[f.key] ?? ''}
-            onChange={e => onChange(f.key, e.target.value)}
-            placeholder={f.default ?? ''}
-          />
+          <span className="config-key">{f.label || f.key}</span>
+          <ConfigInput field={f} value={values[f.key] ?? ''} onChange={v => onChange(f.key, v)} />
           {f.description && <span className="config-description">{f.description}</span>}
         </div>
       ))}
     </>
+  );
+}
+
+function ConfigInput({
+  field,
+  value,
+  onChange,
+}: {
+  field: ManifestConfigField;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  if (field.type === 'select') {
+    return (
+      <select
+        className="config-input"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+      >
+        {(field.options ?? []).map(opt => (
+          <option key={opt.value} value={opt.value}>{opt.label || opt.value}</option>
+        ))}
+      </select>
+    );
+  }
+  if (field.type === 'boolean') {
+    return (
+      <input
+        className="config-checkbox"
+        type="checkbox"
+        checked={value === 'true' || value === '1'}
+        onChange={e => onChange(e.target.checked ? 'true' : 'false')}
+      />
+    );
+  }
+  return (
+    <div className="config-input-with-unit">
+      <input
+        className="config-input"
+        type={field.secret ? 'password' : field.type === 'number' ? 'number' : 'text'}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={field.default ?? ''}
+        min={field.min}
+        max={field.max}
+        step={field.step}
+      />
+      {field.unit && <span>{field.unit}</span>}
+    </div>
   );
 }
 

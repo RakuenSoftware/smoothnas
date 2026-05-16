@@ -64,7 +64,7 @@ func TestSyncManagedSmoothfsAdmissionThresholdUsesConfiguredFastTierFullPct(t *t
 	if err := store.SetTierSlotFill("media", "Optane2", 50, 88); err != nil {
 		t.Fatalf("set Optane2 fill: %v", err)
 	}
-	if err := store.SetTierSlotFill("media", "HDD", 95, 95); err != nil {
+	if err := store.SetTierSlotFill("media", "HDD", 50, 95); err != nil {
 		t.Fatalf("set HDD fill: %v", err)
 	}
 	_, err := store.CreateSmoothfsPool(db.SmoothfsPool{

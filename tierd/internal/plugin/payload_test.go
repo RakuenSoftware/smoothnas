@@ -9,10 +9,10 @@ import (
 
 func TestContainerName(t *testing.T) {
 	cases := []struct {
-		plugin   string
-		inst     int
-		count    int
-		want     string
+		plugin string
+		inst   int
+		count  int
+		want   string
 	}{
 		{"llama-cpp", 1, 1, "llama-cpp"},
 		{"gh-runner", 1, 2, "gh-runner-1"},
@@ -156,6 +156,59 @@ func TestBuildCreatePayload_LlamaSingleInstance(t *testing.T) {
 	// Env is sorted; with one MODEL_PATH key we should have exactly one entry.
 	if len(got.Env) != 1 || !strings.HasPrefix(got.Env[0], "MODEL_PATH=") {
 		t.Errorf("env = %v", got.Env)
+	}
+}
+
+func TestBuildCreatePayload_ExpandsCommandConfigValues(t *testing.T) {
+	in := fakePayloadInputs(t, "llama.yaml")
+	in.Manifest.Container.Command = []string{"--model", "${MODEL_PATH}", "--ctx-size", "$CTX_SIZE", "--keep", "${UNKNOWN}"}
+	in.Config = append(in.Config, ConfigRow{PluginName: "llama-cpp", Key: "CTX_SIZE", Value: "131072"})
+
+	got, err := BuildCreatePayload(in)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	want := []string{"--model", "/models/default.gguf", "--ctx-size", "131072", "--keep", "${UNKNOWN}"}
+	if strings.Join(got.Cmd, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("cmd = %v want %v", got.Cmd, want)
+	}
+}
+
+func TestBuildCreatePayload_AppliesConfigurableMemoryLimit(t *testing.T) {
+	in := fakePayloadInputs(t, "llama.yaml")
+	in.Manifest.Container.Resources.Memory = "${MEMORY_LIMIT}"
+	in.Config = append(in.Config, ConfigRow{PluginName: "llama-cpp", Key: "MEMORY_LIMIT", Value: "64GiB"})
+
+	got, err := BuildCreatePayload(in)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got.HostConfig.Memory != 64<<30 {
+		t.Errorf("memory = %d want %d", got.HostConfig.Memory, int64(64<<30))
+	}
+}
+
+func TestBuildCreatePayload_ManifestMemoryOverridesProfileMemory(t *testing.T) {
+	in := fakePayloadInputs(t, "llama.yaml")
+	in.Manifest.Container.Resources.Memory = "64GiB"
+	in.Profiles = &Resolved{Memory: 32 << 30, Env: map[string]string{}}
+
+	got, err := BuildCreatePayload(in)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got.HostConfig.Memory != 64<<30 {
+		t.Errorf("memory = %d want %d", got.HostConfig.Memory, int64(64<<30))
+	}
+}
+
+func TestBuildCreatePayload_InvalidMemoryLimitFails(t *testing.T) {
+	in := fakePayloadInputs(t, "llama.yaml")
+	in.Manifest.Container.Resources.Memory = "64XB"
+
+	_, err := BuildCreatePayload(in)
+	if err == nil || !strings.Contains(err.Error(), "container.resources.memory") {
+		t.Fatalf("err = %v, want container.resources.memory error", err)
 	}
 }
 

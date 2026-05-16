@@ -209,7 +209,7 @@ func TestGetSetPolicy(t *testing.T) {
 	}
 }
 
-func TestGetSetPolicySlowestTierUsesFullThresholdAsTarget(t *testing.T) {
+func TestGetSetPolicyPreservesTargetFillForSlowestTier(t *testing.T) {
 	store := openStore(t)
 	seedPool(t, store, "pool1", "HDD", 3)
 	a := mdadmadapter.NewAdapter(store, t.TempDir())
@@ -222,8 +222,8 @@ func TestGetSetPolicySlowestTierUsesFullThresholdAsTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPolicy: %v", err)
 	}
-	if pol.TargetFillPct != 90 {
-		t.Errorf("TargetFillPct = %d, want 90 for slowest tier", pol.TargetFillPct)
+	if pol.TargetFillPct != 70 {
+		t.Errorf("TargetFillPct = %d, want 70", pol.TargetFillPct)
 	}
 	if pol.FullThresholdPct != 90 {
 		t.Errorf("FullThresholdPct = %d, want 90", pol.FullThresholdPct)
@@ -237,8 +237,8 @@ func TestGetSetPolicySlowestTierUsesFullThresholdAsTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTierSlot: %v", err)
 	}
-	if slot.TargetFillPct != 85 {
-		t.Errorf("stored TargetFillPct = %d, want 85 for slowest tier", slot.TargetFillPct)
+	if slot.TargetFillPct != 60 {
+		t.Errorf("stored TargetFillPct = %d, want 60", slot.TargetFillPct)
 	}
 	if slot.FullThresholdPct != 85 {
 		t.Errorf("stored FullThresholdPct = %d, want 85", slot.FullThresholdPct)

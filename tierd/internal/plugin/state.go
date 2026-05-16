@@ -26,6 +26,8 @@ const (
 	StateDegraded  = "degraded"
 )
 
+const bearerExpectedConfigKey = "SMOOTHNAS_BEARER_EXPECTED"
+
 // Store is the persistence layer for the plugin subsystem. It wraps
 // the shared db.Store and exposes plugin-shaped CRUD on the six
 // tables introduced in migration 00011_plugins.sql.
@@ -427,16 +429,32 @@ func (s *Store) IssueBearerToken(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, err = s.db.Exec(
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err = tx.Exec(
 		`INSERT INTO plugin_secrets (plugin_name, bearer_token)
 		 VALUES (?, ?)
 		 ON CONFLICT(plugin_name) DO UPDATE SET
 		   bearer_token = excluded.bearer_token,
 		   issued_at    = datetime('now')`,
 		name, token,
-	)
-	if err != nil {
+	); err != nil {
 		return "", fmt.Errorf("upsert plugin_secrets: %w", err)
+	}
+	if _, err = tx.Exec(
+		`INSERT INTO plugin_config (plugin_name, key, value)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(plugin_name, key) DO UPDATE SET
+		   value = excluded.value`,
+		name, bearerExpectedConfigKey, token,
+	); err != nil {
+		return "", fmt.Errorf("upsert bearer config: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit bearer token: %w", err)
 	}
 	return token, nil
 }
@@ -501,13 +519,27 @@ func (s *Store) RawDB() *db.Store { return s.store }
 
 // ReplaceConfig wipes every existing plugin_config row for the
 // named plugin and inserts the supplied key→value map in one
-// transaction. Returns ErrPluginNotFound when the plugin does not
+// transaction. Generated bearer auth config is preserved when callers
+// omit it or submit it empty, because the installer/detail UI should
+// not be able to blank the wrapper's auth secret during ordinary
+// config edits. Returns ErrPluginNotFound when the plugin does not
 // exist (cascades from the SELECT before the DELETE so a typo
 // doesn't silently no-op).
 func (s *Store) ReplaceConfig(name string, cfg map[string]string) error {
 	// Verify plugin exists first so a typo doesn't quietly return ok.
 	if _, err := s.getPluginRow(name); err != nil {
 		return err
+	}
+	cfg = cloneConfig(cfg)
+	if existing, err := s.listConfig(name); err == nil {
+		for _, c := range existing {
+			if c.Key == bearerExpectedConfigKey && c.Value != "" {
+				if cfg[bearerExpectedConfigKey] == "" {
+					cfg[bearerExpectedConfigKey] = c.Value
+				}
+				break
+			}
+		}
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -531,6 +563,14 @@ func (s *Store) ReplaceConfig(name string, cfg map[string]string) error {
 		return fmt.Errorf("touch plugin row: %w", err)
 	}
 	return tx.Commit()
+}
+
+func cloneConfig(cfg map[string]string) map[string]string {
+	out := make(map[string]string, len(cfg))
+	for k, v := range cfg {
+		out[k] = v
+	}
+	return out
 }
 
 // SetResolvedProfiles records the merged-profile-name list applied

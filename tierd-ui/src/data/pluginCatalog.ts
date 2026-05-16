@@ -128,7 +128,11 @@ container:
     - "\${N_GPU_LAYERS}"
     - "--ctx-size"
     - "\${CTX_SIZE}"
+    - "--parallel"
+    - "\${PARALLEL_SLOTS}"
   restartPolicy: unless-stopped
+  resources:
+    memory: "\${MEMORY_LIMIT}"
 
 ${llamaCppCommonVolumes}
 ports:
@@ -149,16 +153,78 @@ profiles:
 config:
   - key: MODEL_PATH
     type: string
-    default: "/models/model.gguf"
-    description: Path to the GGUF model file inside the container.
+    label: Model GGUF path
+    default: "/models/Qwen_Qwen3.6-35B-A3B-Q5_K_M.gguf"
+    description: Model file inside the container. Default targets Qwen3.6 35B-A3B Q5_K_M.
   - key: N_GPU_LAYERS
-    type: string
+    type: number
+    label: GPU layers
     default: "999"
+    min: "0"
+    step: "1"
     description: Number of model layers to offload to GPU. 999 = all.
   - key: CTX_SIZE
+    type: number
+    label: Context window
+    default: "524288"
+    min: "1024"
+    step: "1024"
+    unit: tokens
+    description: Total server context. With 4 request slots, 524288 gives 128K per slot.
+  - key: PARALLEL_SLOTS
+    type: number
+    label: Request slots
+    default: "4"
+    min: "1"
+    max: "16"
+    step: "1"
+    description: llama.cpp parallel request slots passed to --parallel.
+  - key: MEMORY_LIMIT
     type: string
-    default: "8192"
-    description: Maximum context length in tokens.
+    label: Container memory
+    default: "64GiB"
+    description: LXC memory limit for the llama.cpp container.
+  - key: LLAMA_ARG_FLASH_ATTN
+    type: select
+    label: Flash attention
+    default: "on"
+    options:
+      - value: "on"
+      - value: "off"
+    description: Enables llama.cpp flash attention.
+  - key: LLAMA_ARG_CACHE_TYPE_K
+    type: select
+    label: K cache type
+    default: q8_0
+    options:
+      - value: q8_0
+      - value: q5_0
+      - value: q4_0
+    description: KV cache K quantization. Q8 preserves quality.
+  - key: LLAMA_ARG_CACHE_TYPE_V
+    type: select
+    label: V cache type
+    default: q8_0
+    options:
+      - value: q8_0
+      - value: q5_0
+      - value: q4_0
+    description: KV cache V quantization. Q8 preserves quality.
+  - key: LLAMA_ARG_N_CPU_MOE
+    type: number
+    label: CPU MoE layers
+    default: "10"
+    min: "0"
+    step: "1"
+    description: Number of MoE layers left on CPU/system RAM so active experts can fit VRAM.
+  - key: LLAMA_ARG_FIT
+    type: select
+    label: Fit model to VRAM
+    default: "off"
+    options:
+      - value: "off"
+      - value: "on"
+    description: Leave off to allow overfill/GTT when model weights exceed VRAM.
 `;
 
 const llamaCppVulkanManifest = `apiVersion: smoothnas.io/v1
@@ -185,7 +251,11 @@ container:
     - "\${N_GPU_LAYERS}"
     - "--ctx-size"
     - "\${CTX_SIZE}"
+    - "--parallel"
+    - "\${PARALLEL_SLOTS}"
   restartPolicy: unless-stopped
+  resources:
+    memory: "\${MEMORY_LIMIT}"
 
 ${llamaCppCommonVolumes}
 ports:
@@ -206,16 +276,78 @@ profiles:
 config:
   - key: MODEL_PATH
     type: string
-    default: "/models/model.gguf"
-    description: Path to the GGUF model file inside the container.
+    label: Model GGUF path
+    default: "/models/Qwen_Qwen3.6-35B-A3B-Q5_K_M.gguf"
+    description: Model file inside the container. Default targets Qwen3.6 35B-A3B Q5_K_M.
   - key: N_GPU_LAYERS
-    type: string
+    type: number
+    label: GPU layers
     default: "999"
+    min: "0"
+    step: "1"
     description: Number of model layers to offload to GPU. 999 = all.
   - key: CTX_SIZE
+    type: number
+    label: Context window
+    default: "524288"
+    min: "1024"
+    step: "1024"
+    unit: tokens
+    description: Total server context. With 4 request slots, 524288 gives 128K per slot.
+  - key: PARALLEL_SLOTS
+    type: number
+    label: Request slots
+    default: "4"
+    min: "1"
+    max: "16"
+    step: "1"
+    description: llama.cpp parallel request slots passed to --parallel.
+  - key: MEMORY_LIMIT
     type: string
-    default: "8192"
-    description: Maximum context length in tokens.
+    label: Container memory
+    default: "64GiB"
+    description: LXC memory limit for the llama.cpp container.
+  - key: LLAMA_ARG_FLASH_ATTN
+    type: select
+    label: Flash attention
+    default: "on"
+    options:
+      - value: "on"
+      - value: "off"
+    description: Enables llama.cpp flash attention.
+  - key: LLAMA_ARG_CACHE_TYPE_K
+    type: select
+    label: K cache type
+    default: q8_0
+    options:
+      - value: q8_0
+      - value: q5_0
+      - value: q4_0
+    description: KV cache K quantization. Q8 preserves quality.
+  - key: LLAMA_ARG_CACHE_TYPE_V
+    type: select
+    label: V cache type
+    default: q8_0
+    options:
+      - value: q8_0
+      - value: q5_0
+      - value: q4_0
+    description: KV cache V quantization. Q8 preserves quality.
+  - key: LLAMA_ARG_N_CPU_MOE
+    type: number
+    label: CPU MoE layers
+    default: "10"
+    min: "0"
+    step: "1"
+    description: Number of MoE layers left on CPU/system RAM so active experts can fit VRAM.
+  - key: LLAMA_ARG_FIT
+    type: select
+    label: Fit model to VRAM
+    default: "off"
+    options:
+      - value: "off"
+      - value: "on"
+    description: Leave off to allow overfill/GTT when model weights exceed VRAM.
 `;
 
 const llamaCppCpuManifest = `apiVersion: smoothnas.io/v1
@@ -240,9 +372,13 @@ container:
     - "\${MODEL_PATH}"
     - "--ctx-size"
     - "\${CTX_SIZE}"
+    - "--parallel"
+    - "\${PARALLEL_SLOTS}"
     - "--threads"
     - "\${THREADS}"
   restartPolicy: unless-stopped
+  resources:
+    memory: "\${MEMORY_LIMIT}"
 
 ${llamaCppCommonVolumes}
 ports:
@@ -262,16 +398,63 @@ profiles:
 config:
   - key: MODEL_PATH
     type: string
-    default: "/models/model.gguf"
-    description: Path to the GGUF model file inside the container.
+    label: Model GGUF path
+    default: "/models/Qwen_Qwen3.6-35B-A3B-Q5_K_M.gguf"
+    description: Model file inside the container. Default targets Qwen3.6 35B-A3B Q5_K_M.
   - key: CTX_SIZE
+    type: number
+    label: Context window
+    default: "524288"
+    min: "1024"
+    step: "1024"
+    unit: tokens
+    description: Total server context. With 4 request slots, 524288 gives 128K per slot; CPU mode may need a smaller value.
+  - key: PARALLEL_SLOTS
+    type: number
+    label: Request slots
+    default: "4"
+    min: "1"
+    max: "16"
+    step: "1"
+    description: llama.cpp parallel request slots passed to --parallel.
+  - key: MEMORY_LIMIT
     type: string
-    default: "8192"
-    description: Maximum context length in tokens.
+    label: Container memory
+    default: "64GiB"
+    description: LXC memory limit for the llama.cpp container.
+  - key: LLAMA_ARG_FLASH_ATTN
+    type: select
+    label: Flash attention
+    default: "on"
+    options:
+      - value: "on"
+      - value: "off"
+    description: Enables llama.cpp flash attention.
+  - key: LLAMA_ARG_CACHE_TYPE_K
+    type: select
+    label: K cache type
+    default: q8_0
+    options:
+      - value: q8_0
+      - value: q5_0
+      - value: q4_0
+    description: KV cache K quantization. Q8 preserves quality.
+  - key: LLAMA_ARG_CACHE_TYPE_V
+    type: select
+    label: V cache type
+    default: q8_0
+    options:
+      - value: q8_0
+      - value: q5_0
+      - value: q4_0
+    description: KV cache V quantization. Q8 preserves quality.
   - key: THREADS
-    type: string
-    default: "8"
-    description: Worker thread count for inference.
+    type: number
+    label: CPU threads
+    default: "0"
+    min: "0"
+    step: "1"
+    description: CPU threads. 0 = let llama.cpp auto-detect.
 `;
 
 export const pluginCatalog: CatalogEntry[] = [
