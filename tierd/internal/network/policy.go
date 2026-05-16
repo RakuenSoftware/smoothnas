@@ -77,21 +77,7 @@ type ConfigStore interface {
 //   - <name>/type       must read "1" (ARPHRD_ETHER)
 //   - <name>            non-empty name (skips "" / "lo" / "bond*")
 func IsPhysicalEthernet(sysRoot, name string) bool {
-	if name == "" || name == "lo" {
-		return false
-	}
-	// Filter virtual / docker / vmbr / veth name patterns up front
-	// so we don't even stat the sysfs entries.
-	for _, prefix := range []string{
-		"bond", "br-", "br0", "virbr", "veth", "vnet",
-		"docker", "tap", "tun", "wg", "ppp",
-	} {
-		if strings.HasPrefix(name, prefix) {
-			return false
-		}
-	}
-	if strings.Contains(name, ".") {
-		// Standard VLAN naming: <parent>.<vid>
+	if IsBondIneligibleInterfaceName(name) {
 		return false
 	}
 	base := filepath.Join(sysRoot, name)
@@ -170,8 +156,8 @@ func GenerateDefaultBondMembersNetwork() string {
 	b.WriteString("# plugged-in NICs join the default bond automatically.\n")
 	b.WriteString("[Match]\n")
 	b.WriteString("Type=ether\n")
-	b.WriteString("Kind=!bond\n")
-	b.WriteString("Name=!lo !bond* !br-* !br0 !virbr* !veth* !vnet* !docker* !tap* !tun* !wg* !ppp*\n")
+	b.WriteString("Kind=!bond !bridge !veth !tun !tap !dummy !wireguard !vxlan\n")
+	b.WriteString("Name=!lo !bond* !br-* !br0 !virbr* !veth* !vnet* !docker* !tap* !tun* !wg* !ppp* !gow*\n")
 	b.WriteString("\n")
 	b.WriteString("[Network]\n")
 	fmt.Fprintf(&b, "Bond=%s\n", DefaultBondName)
@@ -199,9 +185,23 @@ func ApplyDefaultBondPolicy(store ConfigStore, networkDir, sysRoot string) error
 		return fmt.Errorf("read bootstrap marker: %w", err)
 	}
 	if done {
+		if err := refreshDefaultBondMembersIfPresent(networkDir); err != nil {
+			return fmt.Errorf("refresh default bond members: %w", err)
+		}
 		return nil
 	}
 	return writeDefaultBondFiles(store, networkDir, sysRoot)
+}
+
+func refreshDefaultBondMembersIfPresent(networkDir string) error {
+	path := filepath.Join(networkDir, DefaultBondMembersFilename)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return WriteConfigFile(networkDir, DefaultBondMembersFilename, GenerateDefaultBondMembersNetwork())
 }
 
 // writeDefaultBondFiles writes the three default-bond systemd-networkd

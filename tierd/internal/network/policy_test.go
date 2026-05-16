@@ -231,9 +231,12 @@ func TestGenerateDefaultBondMembersNetworkSyntax(t *testing.T) {
 		"[Match]",
 		"Type=ether",
 		"Kind=!bond",
+		"!bridge",
+		"!veth",
 		"!bond*",
 		"!virbr*",
 		"!docker*",
+		"!gow*",
 		"[Network]",
 		"Bond=" + DefaultBondName,
 	} {
@@ -306,6 +309,31 @@ func TestApplyDefaultBondPolicyIsNoOpAfterMarker(t *testing.T) {
 	entries, _ := os.ReadDir(netDir)
 	if len(entries) != 0 {
 		t.Fatalf("apply should be a no-op after marker; got files %v", entries)
+	}
+}
+
+func TestApplyDefaultBondPolicyRefreshesExistingCatchAllAfterMarker(t *testing.T) {
+	store := newStubConfigStore()
+	store.bools[NetworkBootstrapCompleteKey] = true
+	netDir := t.TempDir()
+	oldCatchAll := filepath.Join(netDir, DefaultBondMembersFilename)
+	if err := os.WriteFile(oldCatchAll, []byte("[Match]\nType=ether\n\n[Network]\nBond=bond0\n"), 0o644); err != nil {
+		t.Fatalf("write old catch-all: %v", err)
+	}
+	sysRoot := makeFakeSysClassNet(t, map[string]string{
+		"enp1s0": "physical-eth",
+	})
+
+	if err := ApplyDefaultBondPolicy(store, netDir, sysRoot); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	data, err := os.ReadFile(oldCatchAll)
+	if err != nil {
+		t.Fatalf("read catch-all: %v", err)
+	}
+	if !strings.Contains(string(data), "!veth") || !strings.Contains(string(data), "!gow*") {
+		t.Fatalf("catch-all was not refreshed with runtime exclusions\n%s", data)
 	}
 }
 

@@ -10,13 +10,14 @@ package runtime
 // CreateContainerRequest is the body of POST /containers/create.
 // LXC2Docker accepts the same JSON shape Docker proper does.
 type CreateContainerRequest struct {
-	Image      string            `json:"Image"`
-	Cmd        []string          `json:"Cmd,omitempty"`
-	Env        []string          `json:"Env,omitempty"`
-	WorkingDir string            `json:"WorkingDir,omitempty"`
-	User       string            `json:"User,omitempty"`
-	Labels     map[string]string `json:"Labels,omitempty"`
-	HostConfig HostConfig        `json:"HostConfig"`
+	Image        string              `json:"Image"`
+	Cmd          []string            `json:"Cmd,omitempty"`
+	Env          []string            `json:"Env,omitempty"`
+	WorkingDir   string              `json:"WorkingDir,omitempty"`
+	User         string              `json:"User,omitempty"`
+	Labels       map[string]string   `json:"Labels,omitempty"`
+	ExposedPorts map[string]struct{} `json:"ExposedPorts,omitempty"`
+	HostConfig   HostConfig          `json:"HostConfig"`
 }
 
 // HostConfig is the subset of HostConfig tierd populates. The Docker
@@ -31,7 +32,7 @@ type HostConfig struct {
 	Memory        int64                    `json:"Memory,omitempty"`       // bytes; 0 = unlimited
 	PidsLimit     int64                    `json:"PidsLimit,omitempty"`    // 0 = unlimited; profiles can cap
 	OomScoreAdj   int                      `json:"OomScoreAdj,omitempty"`  // -1000..1000; default-limits sets 100
-	PortBindings  map[string][]PortBinding `json:"PortBindings,omitempty"` // empty for v1; phase 09 may populate
+	PortBindings  map[string][]PortBinding `json:"PortBindings,omitempty"` // populated for manifest ports with hostExpose=true
 }
 
 // RestartPolicy maps the manifest's container.restartPolicy to
@@ -49,8 +50,7 @@ type DeviceMapping struct {
 	CgroupPermissions string `json:"CgroupPermissions"` // "rwm" typical
 }
 
-// PortBinding is a host-side binding for a container port. Reserved
-// for phase 09; tierd does not populate these in phase 02.
+// PortBinding is a host-side binding for a container port.
 type PortBinding struct {
 	HostIP   string `json:"HostIp,omitempty"`
 	HostPort string `json:"HostPort"` // string per Docker's wire shape
@@ -91,12 +91,13 @@ type ContainerState struct {
 
 // ContainerConfig is the subset of the Config block tierd reads back.
 type ContainerConfig struct {
-	Image      string            `json:"Image"`
-	Cmd        []string          `json:"Cmd"`
-	Env        []string          `json:"Env"`
-	WorkingDir string            `json:"WorkingDir"`
-	User       string            `json:"User"`
-	Labels     map[string]string `json:"Labels"`
+	Image        string              `json:"Image"`
+	Cmd          []string            `json:"Cmd"`
+	Env          []string            `json:"Env"`
+	WorkingDir   string              `json:"WorkingDir"`
+	User         string              `json:"User"`
+	Labels       map[string]string   `json:"Labels"`
+	ExposedPorts map[string]struct{} `json:"ExposedPorts"`
 }
 
 // ContainerNetworkSettings exposes the bridge IP phase 04's nginx

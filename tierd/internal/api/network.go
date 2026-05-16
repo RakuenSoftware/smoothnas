@@ -256,6 +256,10 @@ func (h *NetworkHandler) createBond(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, member := range bond.Members {
+		if network.IsBondIneligibleInterfaceName(member) {
+			jsonError(w, fmt.Sprintf("interface %s cannot be used as a bond member", member), http.StatusBadRequest)
+			return
+		}
 		if err := network.ValidateInterfaceName(member); err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
@@ -438,6 +442,10 @@ func (h *NetworkHandler) updateBond(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 	for _, member := range bond.Members {
+		if network.IsBondIneligibleInterfaceName(member) {
+			jsonError(w, fmt.Sprintf("interface %s cannot be used as a bond member", member), http.StatusBadRequest)
+			return
+		}
 		if err := network.ValidateInterfaceName(member); err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return

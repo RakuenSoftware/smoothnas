@@ -2,6 +2,38 @@
 
 // --- SmoothNAS-specific styles ---
 
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid #e0e0e0;
+
+  .tab {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: #666;
+    cursor: pointer;
+    font-size: 13px;
+    padding: 8px 12px;
+
+    &:hover {
+      color: #222;
+    }
+
+    &.active {
+      border-bottom-color: #2a6df4;
+      color: #222;
+      font-weight: 600;
+    }
+
+    &:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+  }
+}
+
 // --- Tier cards ---
 .create-card {
   background: #fff;
@@ -657,6 +689,61 @@
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+.plugin-model-form {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 10px 16px;
+  align-items: center;
+  margin-top: 20px;
+
+  label {
+    font-weight: 600;
+    font-size: 13px;
+  }
+
+  input {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    font-size: 13px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .plugin-model-actions {
+    grid-column: 2;
+    display: flex;
+    gap: 8px;
+    padding-top: 4px;
+  }
+}
+
+.plugin-model-job {
+  margin-top: 16px;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+
+  &.completed {
+    border-color: #c8e6c9;
+    background: #f1f8f2;
+  }
+  &.failed {
+    border-color: #ffcdd2;
+    background: #fff5f5;
+  }
+
+  pre {
+    margin: 0;
+    white-space: pre-wrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
 }
 
 .plugin-config-form {

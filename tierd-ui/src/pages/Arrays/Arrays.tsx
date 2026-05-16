@@ -7,7 +7,12 @@ import { extractError } from '../../utils/errors';
 import Spinner from '../../components/Spinner/Spinner';
 import ConfirmDialog from '../../components/ConfirmDialog/ConfirmDialog';
 
-type CreateTab = 'mdadm' | 'nonraid' | 'filesystem' | 'zfs';
+type FilesystemArrayKind = 'btrfs' | 'bcachefs';
+type CreateTab = 'mdadm' | 'nonraid' | FilesystemArrayKind | 'zfs';
+
+function isFilesystemCreateTab(tab: CreateTab): tab is FilesystemArrayKind {
+  return tab === 'btrfs' || tab === 'bcachefs';
+}
 
 function formatBytes(n: number): string {
   if (!n || n <= 0) return '0 B';
@@ -52,7 +57,13 @@ export default function Arrays() {
   const [selectedZfsMembers, setSelectedZfsMembers] = useState<string[]>([]);
 
   // btrfs / bcachefs create state
-  const [newFSArray, setNewFSArray] = useState({
+  const [newFSArray, setNewFSArray] = useState<{
+    name: string;
+    kind: FilesystemArrayKind;
+    data_profile: string;
+    metadata_profile: string;
+    replicas: number;
+  }>({
     name: 'fs0',
     kind: 'btrfs',
     data_profile: '',
@@ -98,9 +109,11 @@ export default function Arrays() {
   }
 
   function openCreate() {
+    setCreateTab('mdadm');
     setNewArray({ name: nextArrayName(), level: 'raid5' });
     setNewNonRaidArray({ name: nextNonRaidName(), filesystem: 'xfs', mount_base: '' });
     setNewPool({ name: 'tank', vdev_type: 'raidz1' });
+    setNewFSArray({ name: 'fs0', kind: 'btrfs', data_profile: '', metadata_profile: '', replicas: 1 });
     setSelectedDisks([]);
     setSelectedNonRaidData([]);
     setSelectedNonRaidParity([]);
@@ -257,15 +270,35 @@ export default function Arrays() {
     setSelectedFSDisks(prev => prev.includes(path) ? prev.filter(p => p !== path) : [...prev, path]);
   }
 
+  function selectCreateTab(tab: CreateTab) {
+    setCreateTab(tab);
+    if (isFilesystemCreateTab(tab)) {
+      setNewFSArray(p => ({ ...p, kind: tab }));
+    }
+  }
+
+  function createTabLabel(tab: CreateTab): string {
+    if (tab === 'mdadm') return t('arrays.tab.mdadm');
+    if (tab === 'nonraid') return t('arrays.tab.nonraid');
+    if (tab === 'btrfs') return t('arrays.tab.btrfs');
+    if (tab === 'bcachefs') return t('arrays.tab.bcachefs');
+    return t('arrays.tab.zfs');
+  }
+
+  function currentFilesystemKind(): FilesystemArrayKind {
+    return isFilesystemCreateTab(createTab) ? createTab : newFSArray.kind;
+  }
+
   function submitFilesystemArray() {
     if (selectedFSDisks.length === 0) { toast.warning(t('arrays.warn.selectAtLeastOneDisk')); return; }
+    const kind = currentFilesystemKind();
     setSubmitting(true);
     setCreateStatus(t('arrays.status.starting'));
     api.createFilesystemArray({
       name: newFSArray.name,
-      kind: newFSArray.kind,
+      kind,
       disks: selectedFSDisks,
-      ...(newFSArray.kind === 'btrfs' ? {
+      ...(kind === 'btrfs' ? {
         data_profile: newFSArray.data_profile,
         metadata_profile: newFSArray.metadata_profile,
       } : {
@@ -508,20 +541,14 @@ export default function Arrays() {
       {showCreate && (
         <div className="create-form">
           <div className="tabs" style={{ marginBottom: 12 }}>
-            {(['mdadm', 'nonraid', 'filesystem', 'zfs'] as CreateTab[]).map(tab => (
+            {(['mdadm', 'nonraid', 'btrfs', 'bcachefs', 'zfs'] as CreateTab[]).map(tab => (
               <button
                 key={tab}
                 className={`tab${createTab === tab ? ' active' : ''}`}
-                onClick={() => setCreateTab(tab)}
+                onClick={() => selectCreateTab(tab)}
                 disabled={submitting}
               >
-                {tab === 'mdadm'
-                  ? t('arrays.tab.mdadm')
-                  : tab === 'nonraid'
-                    ? t('arrays.tab.nonraid')
-                    : tab === 'filesystem'
-                      ? t('arrays.tab.filesystem')
-                      : t('arrays.tab.zfs')}
+                {createTabLabel(tab)}
               </button>
             ))}
           </div>
@@ -674,20 +701,14 @@ export default function Arrays() {
             </>
           )}
 
-          {createTab === 'filesystem' && (
+          {isFilesystemCreateTab(createTab) && (
             <>
-              <h3>{t('arrays.create.filesystemTitle')}</h3>
+              <h3>{createTab === 'btrfs' ? t('arrays.create.btrfsTitle') : t('arrays.create.bcachefsTitle')}</h3>
               <div className="form-row">
                 <label>{t('arrays.field.name')}
                   <input value={newFSArray.name} onChange={e => setNewFSArray(p => ({ ...p, name: e.target.value }))} placeholder="fs0" />
                 </label>
-                <label>{t('arrays.field.filesystem')}
-                  <select value={newFSArray.kind} onChange={e => setNewFSArray(p => ({ ...p, kind: e.target.value }))}>
-                    <option value="btrfs">{t('arrays.filesystem.btrfs')}</option>
-                    <option value="bcachefs">{t('arrays.filesystem.bcachefs')}</option>
-                  </select>
-                </label>
-                {newFSArray.kind === 'btrfs' ? (
+                {createTab === 'btrfs' ? (
                   <>
                     <label>{t('arrays.field.dataProfile')}
                       <select value={newFSArray.data_profile} onChange={e => setNewFSArray(p => ({ ...p, data_profile: e.target.value }))}>

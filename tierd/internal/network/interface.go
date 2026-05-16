@@ -46,6 +46,36 @@ func ValidateInterfaceName(name string) error {
 	return nil
 }
 
+// IsRuntimeInterfaceName reports interfaces created by local container,
+// VM, tunnel, or VPN runtimes. These are not appliance NICs and should not
+// be shown as configurable physical links.
+func IsRuntimeInterfaceName(name string) bool {
+	for _, prefix := range []string{
+		"br-", "br0", "virbr", "veth", "vnet",
+		"docker", "tap", "tun", "wg", "ppp",
+		"gow",
+	} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsBondIneligibleInterfaceName is the name-pattern guard used before
+// adding an interface to a systemd-networkd bond. It filters appliance
+// virtual links in addition to runtime links.
+func IsBondIneligibleInterfaceName(name string) bool {
+	if name == "" || name == "lo" || strings.HasPrefix(name, "bond") {
+		return true
+	}
+	if strings.Contains(name, ".") {
+		// Standard VLAN naming: <parent>.<vid>
+		return true
+	}
+	return IsRuntimeInterfaceName(name)
+}
+
 // ValidateIPv4CIDR validates an IPv4 address in CIDR notation.
 var ipv4CIDRRegex = regexp.MustCompile(`^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}$`)
 
@@ -101,6 +131,9 @@ func ListInterfacesWithConfig(networkDir string) ([]Interface, error) {
 		Operstate string `json:"operstate"`
 		Mtu       int    `json:"mtu"`
 		LinkType  string `json:"link_type"`
+		LinkInfo  struct {
+			InfoKind string `json:"info_kind"`
+		} `json:"linkinfo"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, fmt.Errorf("parse ip output: %w", err)
@@ -110,6 +143,9 @@ func ListInterfacesWithConfig(networkDir string) ([]Interface, error) {
 	for _, r := range raw {
 		// Skip loopback and virtual interfaces.
 		if r.Ifname == "lo" || r.LinkType == "loopback" {
+			continue
+		}
+		if shouldHideRuntimeInterface(r.Ifname, r.LinkInfo.InfoKind) {
 			continue
 		}
 
@@ -145,6 +181,14 @@ func ListInterfacesWithConfig(networkDir string) ([]Interface, error) {
 	}
 
 	return ifaces, nil
+}
+
+func shouldHideRuntimeInterface(name, kind string) bool {
+	switch kind {
+	case "bridge", "veth", "tun", "tap", "dummy", "wireguard", "vxlan":
+		return true
+	}
+	return IsRuntimeInterfaceName(name)
 }
 
 type networkFileSettings struct {

@@ -14,11 +14,11 @@ type Detail = {
   instances: any[];
   volumes: any[];
   ports: any[];
-  config: { plugin_name: string; key: string; value: string }[];
+  config: any[];
   manifest: string;
 };
 
-type Tab = 'overview' | 'logs' | 'config' | 'instances' | 'profiles' | 'danger';
+type Tab = 'overview' | 'models' | 'logs' | 'config' | 'instances' | 'profiles' | 'danger';
 
 // instancesTabVisible decides whether to render the Instances tab on
 // the detail header. Hidden for plugins that are single-instance and
@@ -26,6 +26,26 @@ type Tab = 'overview' | 'logs' | 'config' | 'instances' | 'profiles' | 'danger';
 // scaling makes no sense and the tab would add visual noise.
 function instancesTabVisible(plugin: any): boolean {
   return plugin?.instanceCount > 1 || !!plugin?.instanceConfigurable;
+}
+
+function modelsTabVisible(detail: Detail): boolean {
+  return !!modelVolume(detail) && detail.config.some(c => configKey(c) === 'MODEL_PATH');
+}
+
+function modelVolume(detail: Detail): any | null {
+  return (detail.volumes ?? []).find(v => v.BindPath === '/models' || v.Name === 'models') ?? null;
+}
+
+function configKey(row: any): string {
+  return row?.key ?? row?.Key ?? '';
+}
+
+function configValue(row: any): string {
+  return row?.value ?? row?.Value ?? '';
+}
+
+function configMap(rows: any[]): Record<string, string> {
+  return Object.fromEntries((rows ?? []).map(c => [configKey(c), configValue(c)]).filter(([k]) => !!k));
 }
 
 function stateClass(state: string): string {
@@ -116,7 +136,8 @@ export default function PluginDetail() {
       {error && <div className="alert error">{error}</div>}
 
       <nav className="plugin-detail-tabs">
-        {(['overview', 'logs', 'config', 'instances', 'profiles', 'danger'] as Tab[])
+        {(['overview', 'models', 'logs', 'config', 'instances', 'profiles', 'danger'] as Tab[])
+          .filter(n => n !== 'models' || modelsTabVisible(detail))
           .filter(n => n !== 'instances' || instancesTabVisible(detail.plugin))
           .map(n => (
             <button
@@ -131,11 +152,12 @@ export default function PluginDetail() {
 
       <div className="plugin-detail-pane">
         {tab === 'overview' && <OverviewTab detail={detail} />}
+        {tab === 'models' && <ModelsTab name={name} detail={detail} onInstalled={refresh} />}
         {tab === 'logs' && <LogsTab name={name} state={detail.plugin.state} />}
         {tab === 'config' && (
           <ConfigTab
             name={name}
-            initial={Object.fromEntries(detail.config.map(c => [c.key, c.value]))}
+            initial={configMap(detail.config)}
             manifest={detail.manifest}
             onSaved={refresh}
           />
@@ -297,6 +319,152 @@ function OverviewTab({ detail }: { detail: Detail }) {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+    </>
+  );
+}
+
+type JobStatus = {
+  id: string;
+  status: 'running' | 'completed' | 'failed';
+  progress?: string;
+  error?: string;
+  result?: any;
+};
+
+function ModelsTab({
+  name, detail, onInstalled,
+}: {
+  name: string;
+  detail: Detail;
+  onInstalled: () => void;
+}) {
+  const { t } = useI18n();
+  const currentConfig = configMap(detail.config);
+  const volume = modelVolume(detail);
+  const [url, setUrl] = useState('');
+  const [filename, setFilename] = useState('');
+  const [sha256, setSha256] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [jobId, setJobId] = useState('');
+  const [job, setJob] = useState<JobStatus | null>(null);
+
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const poll = () => {
+      api.getJobStatus(jobId)
+        .then((next: JobStatus) => {
+          if (cancelled) return;
+          setJob(next);
+          if (next.status === 'completed') {
+            onInstalled();
+            if (timer) clearInterval(timer);
+          }
+          if (next.status === 'failed' && timer) clearInterval(timer);
+        })
+        .catch(e => {
+          if (!cancelled) setError(extractError(e, t('plugins.detail.models.error.job')));
+          if (timer) clearInterval(timer);
+        });
+    };
+    poll();
+    timer = setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId]);
+
+  function installModel() {
+    if (!url.trim()) {
+      setError(t('plugins.detail.models.error.url'));
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setJob(null);
+    api.installPluginModel(name, {
+      url: url.trim(),
+      ...(filename.trim() ? { filename: filename.trim() } : {}),
+      ...(sha256.trim() ? { sha256: sha256.trim() } : {}),
+      start: true,
+    })
+      .then(resp => setJobId(resp.jobId))
+      .catch(e => setError(extractError(e, t('plugins.detail.models.error.install'))))
+      .finally(() => setBusy(false));
+  }
+
+  const running = job?.status === 'running';
+  const currentModel = currentConfig.MODEL_PATH || t('plugins.label.none');
+  const hostPath = volume?.Paths?.[1] ?? Object.values(volume?.Paths ?? {})[0] ?? '';
+
+  return (
+    <>
+      <h2>{t('plugins.detail.models.heading')}</h2>
+      <p className="subtitle">{t('plugins.detail.models.description')}</p>
+
+      <dl className="plugin-kv-list">
+        <dt>{t('plugins.detail.models.current')}</dt>
+        <dd className="mono">{currentModel}</dd>
+        {hostPath && (
+          <>
+            <dt>{t('plugins.detail.models.volume')}</dt>
+            <dd className="mono">{String(hostPath)}</dd>
+          </>
+        )}
+      </dl>
+
+      <div className="plugin-model-form">
+        <label htmlFor="model-url">{t('plugins.detail.models.url')}</label>
+        <input
+          id="model-url"
+          type="url"
+          value={url}
+          onChange={e => setUrl(e.target.value)}
+          placeholder="https://..."
+          disabled={busy || running}
+        />
+
+        <label htmlFor="model-filename">{t('plugins.detail.models.filename')}</label>
+        <input
+          id="model-filename"
+          type="text"
+          value={filename}
+          onChange={e => setFilename(e.target.value)}
+          placeholder={t('plugins.detail.models.filename.placeholder')}
+          disabled={busy || running}
+        />
+
+        <label htmlFor="model-sha">{t('plugins.detail.models.sha256')}</label>
+        <input
+          id="model-sha"
+          type="text"
+          value={sha256}
+          onChange={e => setSha256(e.target.value)}
+          placeholder="sha256:..."
+          disabled={busy || running}
+        />
+
+        <div className="plugin-model-actions">
+          <button className="btn primary" onClick={installModel} disabled={busy || running}>
+            {busy || running
+              ? t('plugins.detail.models.action.installing')
+              : t('plugins.detail.models.action.install')}
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="alert error"><pre>{error}</pre></div>}
+      {job && (
+        <div className={`plugin-model-job ${job.status}`}>
+          <strong>{t(`plugins.detail.models.job.${job.status}`)}</strong>
+          {job.progress && <span>{job.progress}</span>}
+          {job.error && <pre>{job.error}</pre>}
         </div>
       )}
     </>
