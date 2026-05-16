@@ -25,6 +25,43 @@ func TestValidateInterfaceName(t *testing.T) {
 	}
 }
 
+func TestRuntimeInterfaceNameFiltersContainerLinks(t *testing.T) {
+	for _, name := range []string{"veth1234", "vnet0", "docker0", "br-abcd", "virbr0", "tap0", "tun0", "wg0", "gow0"} {
+		if !IsRuntimeInterfaceName(name) {
+			t.Fatalf("%s should be treated as a runtime interface", name)
+		}
+	}
+	for _, name := range []string{"enp1s0", "ens192", "bond0"} {
+		if IsRuntimeInterfaceName(name) {
+			t.Fatalf("%s should not be treated as a runtime interface", name)
+		}
+	}
+}
+
+func TestBondIneligibleInterfaceNameFiltersRuntimeAndVirtualLinks(t *testing.T) {
+	for _, name := range []string{"lo", "bond0", "enp1s0.100", "veth1234", "gow0", "docker0"} {
+		if !IsBondIneligibleInterfaceName(name) {
+			t.Fatalf("%s should not be allowed as a bond member", name)
+		}
+	}
+	for _, name := range []string{"enp1s0", "ens192"} {
+		if IsBondIneligibleInterfaceName(name) {
+			t.Fatalf("%s should be allowed by the name-pattern bond guard", name)
+		}
+	}
+}
+
+func TestShouldHideRuntimeInterfaceUsesKernelKind(t *testing.T) {
+	for _, kind := range []string{"bridge", "veth", "tun", "tap", "dummy", "wireguard", "vxlan"} {
+		if !shouldHideRuntimeInterface("not-obvious0", kind) {
+			t.Fatalf("kind %s should be hidden", kind)
+		}
+	}
+	if shouldHideRuntimeInterface("enp1s0", "") {
+		t.Fatalf("physical-looking interface should not be hidden")
+	}
+}
+
 func TestValidateIPv4CIDR(t *testing.T) {
 	valid := []string{"192.168.1.50/24", "10.0.0.1/8", "172.16.0.1/16"}
 	for _, addr := range valid {

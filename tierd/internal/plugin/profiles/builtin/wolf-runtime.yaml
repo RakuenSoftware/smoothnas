@@ -1,0 +1,42 @@
+apiVersion: smoothnas.io/v1
+kind: PluginProfile
+metadata:
+  name: wolf-runtime
+  description: |
+    Runtime access profile for Games-on-Whales Wolf. Wolf is a control-plane
+    service that starts per-session application containers on demand, so it
+    needs access to the SmoothNAS LXC2Docker socket plus Linux input, udev, and
+    capabilities required by virtual input and game application containers.
+container:
+  env:
+    HOST_APPS_STATE_FOLDER: /etc/wolf
+    WOLF_DOCKER_SOCKET: /var/run/docker.sock
+    XDG_RUNTIME_DIR: /run/user/wolf
+  hostConfig:
+    devices:
+      - { path: /dev/uinput, cgroupPermissions: rwm }
+      - { path: /dev/uhid, cgroupPermissions: rwm }
+      - { path: /dev/input, cgroupPermissions: rwm }
+    capAdd:
+      - NET_RAW
+      - MKNOD
+      - NET_ADMIN
+      - SYS_ADMIN
+      - SYS_NICE
+lxc:
+  rawConfig:
+    - "lxc.cgroup2.devices.allow = c 10:223 rwm"
+    - "lxc.cgroup2.devices.allow = c 10:239 rwm"
+    - "lxc.cgroup2.devices.allow = c 13:* rwm"
+    - "lxc.cgroup2.devices.allow = c 244:* rwm"
+    - "lxc.mount.entry = /run/smoothnas-runtime/docker.sock var/run/docker.sock none bind,optional,create=file 0 0"
+    - "lxc.mount.entry = /run/udev run/udev none bind,optional,create=dir 0 0"
+    - "lxc.mount.entry = /dev/uinput dev/uinput none bind,optional,create=file 0 0"
+    - "lxc.mount.entry = /dev/uhid dev/uhid none bind,optional,create=file 0 0"
+    - "lxc.mount.entry = /dev/input dev/input none bind,optional,create=dir 0 0"
+preflight:
+  hostHas:
+    - { path: /run/smoothnas-runtime/docker.sock, requirement: required }
+    - { path: /dev/uinput, requirement: required }
+    - { path: /dev/uhid, requirement: optional }
+    - { path: /dev/input, requirement: required }

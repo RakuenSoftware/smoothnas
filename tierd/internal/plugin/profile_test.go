@@ -24,7 +24,7 @@ func TestNewCatalog_LoadsBuiltins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("catalog: %v", err)
 	}
-	for _, want := range []string{"default-limits", "gpu-amd", "gpu-intel", "gpu-nvidia"} {
+	for _, want := range []string{"default-limits", "gpu-amd", "gpu-intel", "gpu-nvidia", "wolf-runtime"} {
 		if _, ok := c.Get(want); !ok {
 			t.Errorf("built-in %q missing from catalog", want)
 		}
@@ -185,6 +185,67 @@ func TestResolve_OptionalPreflightWarnsAndContinues(t *testing.T) {
 		if strings.Contains(raw, "lxc.mount.entry = /dev/dri ") {
 			t.Errorf("missing optional mount should be dropped, got %q", raw)
 		}
+	}
+}
+
+func TestResolve_WolfRuntimeProfile(t *testing.T) {
+	c, _ := NewCatalog("")
+	m := &Manifest{Profiles: []string{"!default-limits", "wolf-runtime"}}
+	r, err := Resolve(c, m, statHostFromMap(map[string]bool{
+		"/run/smoothnas-runtime/docker.sock": true,
+		"/dev/uinput":                        true,
+		"/dev/input":                         true,
+	}))
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if r.Env["WOLF_DOCKER_SOCKET"] != "/var/run/docker.sock" {
+		t.Errorf("WOLF_DOCKER_SOCKET = %q", r.Env["WOLF_DOCKER_SOCKET"])
+	}
+	if r.Env["HOST_APPS_STATE_FOLDER"] != "/etc/wolf" || r.Env["XDG_RUNTIME_DIR"] != "/run/user/wolf" {
+		t.Errorf("wolf env = %+v", r.Env)
+	}
+	for _, cap := range []string{"NET_RAW", "MKNOD", "NET_ADMIN", "SYS_ADMIN", "SYS_NICE"} {
+		if !containsString(r.CapAdd, cap) {
+			t.Errorf("CapAdd missing %q: %v", cap, r.CapAdd)
+		}
+	}
+	if len(r.Devices) != 2 {
+		t.Fatalf("Devices = %+v, want required /dev/uinput and /dev/input only", r.Devices)
+	}
+	for _, path := range []string{"/dev/uinput", "/dev/input"} {
+		found := false
+		for _, d := range r.Devices {
+			if d.Path == path {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("Devices missing %s: %+v", path, r.Devices)
+		}
+	}
+	if len(r.PreflightWarnings) == 0 || !strings.Contains(r.PreflightWarnings[0], "/dev/uhid") {
+		t.Errorf("PreflightWarnings = %+v, want optional /dev/uhid warning", r.PreflightWarnings)
+	}
+	if !containsString(r.LXCRaw, "lxc.mount.entry = /run/smoothnas-runtime/docker.sock var/run/docker.sock none bind,optional,create=file 0 0") {
+		t.Errorf("LXCRaw missing docker socket bind: %+v", r.LXCRaw)
+	}
+	for _, raw := range r.LXCRaw {
+		if strings.Contains(raw, "lxc.mount.entry = /dev/uhid ") {
+			t.Errorf("missing optional /dev/uhid mount should be dropped, got %q", raw)
+		}
+	}
+}
+
+func TestResolve_WolfRuntimeRequiredPreflightFails(t *testing.T) {
+	c, _ := NewCatalog("")
+	m := &Manifest{Profiles: []string{"!default-limits", "wolf-runtime"}}
+	_, err := Resolve(c, m, statHostFromMap(map[string]bool{
+		"/dev/uinput": true,
+		"/dev/input":  true,
+	}))
+	if err == nil || !strings.Contains(err.Error(), "/run/smoothnas-runtime/docker.sock") {
+		t.Errorf("err = %v, want missing docker socket error", err)
 	}
 }
 

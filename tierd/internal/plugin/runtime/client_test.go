@@ -178,10 +178,18 @@ func TestCreateContainer_BodyShape(t *testing.T) {
 			PluginNameLabel:     "llama-cpp",
 			PluginInstanceLabel: "1",
 		},
+		ExposedPorts: map[string]struct{}{
+			"47989/tcp": {},
+			"47998/udp": {},
+		},
 		HostConfig: HostConfig{
 			Binds:         []string{"/host:/container"},
 			Memory:        64 << 30,
 			RestartPolicy: RestartPolicy{Name: "unless-stopped"},
+			PortBindings: map[string][]PortBinding{
+				"47989/tcp": []PortBinding{{HostPort: "47989"}},
+				"47998/udp": []PortBinding{{HostPort: "47998"}},
+			},
 		},
 	})
 	if err != nil {
@@ -198,6 +206,12 @@ func TestCreateContainer_BodyShape(t *testing.T) {
 	}
 	if body.HostConfig.Memory != 64<<30 {
 		t.Errorf("memory = %d", body.HostConfig.Memory)
+	}
+	if _, ok := body.ExposedPorts["47989/tcp"]; !ok {
+		t.Errorf("ExposedPorts missing tcp binding: %+v", body.ExposedPorts)
+	}
+	if bindings := body.HostConfig.PortBindings["47998/udp"]; len(bindings) != 1 || bindings[0].HostPort != "47998" {
+		t.Errorf("udp PortBindings = %+v", bindings)
 	}
 }
 

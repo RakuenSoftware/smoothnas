@@ -216,6 +216,9 @@ func containerMatchesDesired(existing runtime.ContainerInspect, desired runtime.
 	if !labelsContainDesired(existing.Config.Labels, desired.Labels) {
 		return false
 	}
+	if !exposedPortsMatchDesired(existing.Config.ExposedPorts, desired.ExposedPorts) {
+		return false
+	}
 	return hostConfigMatchesDesired(existing.HostConfig, desired.HostConfig)
 }
 
@@ -244,7 +247,24 @@ func hostConfigMatchesDesired(existing, desired runtime.HostConfig) bool {
 	if desired.RestartPolicy.Name != "" && existing.RestartPolicy.Name != desired.RestartPolicy.Name {
 		return false
 	}
+	if !portBindingsMatchDesired(existing.PortBindings, desired.PortBindings) {
+		return false
+	}
 	return true
+}
+
+func exposedPortsMatchDesired(existing, desired map[string]struct{}) bool {
+	if len(existing) == 0 && len(desired) == 0 {
+		return true
+	}
+	return reflect.DeepEqual(existing, desired)
+}
+
+func portBindingsMatchDesired(existing, desired map[string][]runtime.PortBinding) bool {
+	if len(existing) == 0 && len(desired) == 0 {
+		return true
+	}
+	return reflect.DeepEqual(existing, desired)
 }
 
 func envContainsDesired(existing, desired []string) bool {
