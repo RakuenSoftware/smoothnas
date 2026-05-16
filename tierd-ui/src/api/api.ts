@@ -358,6 +358,8 @@ export const api = {
   restartPlugin: (name: string) => apiFetch<any>('POST', `/plugins/${name}/restart`, {}),
   updatePluginConfig: (name: string, config: Record<string, string>) =>
     apiFetch<any>('PUT', `/plugins/${name}/config`, { config }),
+  installPluginModel: (name: string, req: { url: string; filename?: string; sha256?: string; start?: boolean }) =>
+    apiFetch<{ jobId: string; tag: string }>('POST', `/plugins/${name}/models/install`, req),
   rotatePluginToken: (name: string) =>
     apiFetch<{ name: string; token: string }>('POST', `/plugins/${name}/rotate-token`, {}),
   // Phase 09: per-plugin instance scaling.

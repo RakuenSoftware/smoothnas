@@ -193,21 +193,24 @@ wrapper.
 Immich — the wrapper is unnecessary and the manifest references
 upstream directly. llama.cpp is the awkward case.)
 
-### Model staging
+### Model install
 
-`/mnt/<tier>/.plugins/llama-cpp/models/` is empty after install.
-The README walks operators through staging models:
+`/mnt/<tier>/.plugins/llama-cpp/models/` is empty after plugin
+install. The SmoothNAS detail page exposes a **Models** tab for
+plugins with a `/models` volume and `MODEL_PATH` config key.
+Operators paste an HTTPS model URL; tierd downloads the GGUF into
+the resolved tier-bound models volume, updates `MODEL_PATH` to the
+container path, materialises the plugin, and starts it.
+
+Manual staging remains supported for offline operators:
 
 ```
 sudo cp my-model.gguf /mnt/media/.plugins/llama-cpp/models/default.gguf
 ```
 
-A future enhancement (out of v1 scope) is a "model browser" page
-inside the SmoothNAS UI that downloads from Hugging Face. For
-now: SCP, browse-via-SMB, or curl-from-inside-the-container via
-`tierd-cli plugin exec llama-cpp -- curl -L ... -o ...`
-(`exec` exposed via the runtime client; CLI verb added in this
-phase).
+The first UI is URL-based rather than a full Hugging Face browser:
+it validates `http`/`https`, requires a `.gguf` filename, optionally
+checks SHA-256, and reports progress through the existing job API.
 
 ### CI / release flow
 
@@ -256,6 +259,10 @@ the plugin contract.
   slot of a chosen tier, exposes port 8080 through nginx, embeds
   the llama.cpp UI in `/plugins/llama-cpp`, and rejects requests
   without a valid bearer.
+- From the SmoothNAS plugin detail page, an operator can download a
+  GGUF model from an HTTPS URL, have `MODEL_PATH` updated to the
+  installed file, and have the plugin materialised and started by
+  tierd.
 - The sibling AMD manifest works on a host with `gpu-amd`
   profile applied (different image variant, otherwise identical).
 - The CPU manifest works on a host with no GPU.

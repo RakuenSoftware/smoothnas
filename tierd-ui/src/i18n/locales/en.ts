@@ -1322,6 +1322,7 @@ const en: LanguageTranslations = {
 
   // --- Detail page (phase 06d) ---
   'plugins.detail.tab.overview': 'Overview',
+  'plugins.detail.tab.models': 'Models',
   'plugins.detail.tab.logs': 'Logs',
   'plugins.detail.tab.config': 'Config',
   'plugins.detail.tab.instances': 'Instances',
@@ -1343,6 +1344,23 @@ const en: LanguageTranslations = {
   'plugins.detail.overview.ports': 'Ports',
   'plugins.detail.overview.bridge': 'Bridge IP',
   'plugins.detail.overview.container': 'Container',
+
+  'plugins.detail.models.heading': 'Models',
+  'plugins.detail.models.description': 'Download a GGUF model into this plugin and start it with the new model path.',
+  'plugins.detail.models.current': 'Current model',
+  'plugins.detail.models.volume': 'Model volume',
+  'plugins.detail.models.url': 'Download URL',
+  'plugins.detail.models.filename': 'Filename',
+  'plugins.detail.models.filename.placeholder': 'Use URL filename',
+  'plugins.detail.models.sha256': 'SHA-256',
+  'plugins.detail.models.action.install': 'Download and start',
+  'plugins.detail.models.action.installing': 'Installing…',
+  'plugins.detail.models.job.running': 'Installing',
+  'plugins.detail.models.job.completed': 'Ready',
+  'plugins.detail.models.job.failed': 'Failed',
+  'plugins.detail.models.error.url': 'Enter a model download URL.',
+  'plugins.detail.models.error.install': 'Could not install model',
+  'plugins.detail.models.error.job': 'Could not load model install job',
 
   'plugins.detail.logs.heading': 'Live logs',
   'plugins.detail.logs.subtitle': 'Streamed from the runtime daemon. Auto-scrolls to tail; pauses scroll when you scroll up.',
