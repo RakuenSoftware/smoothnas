@@ -17,21 +17,21 @@ import (
 
 // Interface represents a physical network interface.
 type Interface struct {
-	Name      string   `json:"name"`       // e.g. "eth0", "enp3s0"
-	MAC       string   `json:"mac"`
-	State     string   `json:"state"`      // "up", "down", "unknown"
-	Speed     string   `json:"speed"`      // e.g. "1000Mbps"
-	MTU       int      `json:"mtu"`
-	Driver    string   `json:"driver"`
-	IPv4Addrs []string `json:"ipv4_addrs"` // CIDR notation
-	IPv6Addrs []string `json:"ipv6_addrs"` // CIDR notation
-	Gateway4  string   `json:"gateway4"`
-	Gateway6  string   `json:"gateway6"`
-	DHCP4     bool     `json:"dhcp4"`
-	DHCP6     bool     `json:"dhcp6"`
-	SLAAC     bool     `json:"slaac"`      // IPv6 SLAAC (accept RA)
-	Assignment string  `json:"assignment"` // "standalone", "bond-member", "unused"
-	BondName  string   `json:"bond_name"`  // non-empty if bond member
+	Name       string   `json:"name"` // e.g. "eth0", "enp3s0"
+	MAC        string   `json:"mac"`
+	State      string   `json:"state"` // "up", "down", "unknown"
+	Speed      string   `json:"speed"` // e.g. "1000Mbps"
+	MTU        int      `json:"mtu"`
+	Driver     string   `json:"driver"`
+	IPv4Addrs  []string `json:"ipv4_addrs"` // CIDR notation
+	IPv6Addrs  []string `json:"ipv6_addrs"` // CIDR notation
+	Gateway4   string   `json:"gateway4"`
+	Gateway6   string   `json:"gateway6"`
+	DHCP4      bool     `json:"dhcp4"`
+	DHCP6      bool     `json:"dhcp6"`
+	SLAAC      bool     `json:"slaac"`      // IPv6 SLAAC (accept RA)
+	Assignment string   `json:"assignment"` // "standalone", "bond-member", "unused"
+	BondName   string   `json:"bond_name"`  // non-empty if bond member
 }
 
 var ifaceNameRegex = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9._-]{0,15}$`)
@@ -88,11 +88,11 @@ func ListInterfaces() ([]Interface, error) {
 	}
 
 	var raw []struct {
-		Ifname   string `json:"ifname"`
-		Address  string `json:"address"`
+		Ifname    string `json:"ifname"`
+		Address   string `json:"address"`
 		Operstate string `json:"operstate"`
-		Mtu      int    `json:"mtu"`
-		LinkType string `json:"link_type"`
+		Mtu       int    `json:"mtu"`
+		LinkType  string `json:"link_type"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, fmt.Errorf("parse ip output: %w", err)
@@ -191,15 +191,13 @@ func GenerateNetworkFile(iface InterfaceConfig) string {
 
 	b.WriteString("[Network]\n")
 
-	if iface.DHCP4 {
-		b.WriteString("DHCP=ipv4\n")
-	}
-	if iface.DHCP6 {
-		b.WriteString("DHCP=ipv6\n")
-	}
-	if iface.DHCP4 && iface.DHCP6 {
-		// Override: both
+	switch {
+	case iface.DHCP4 && iface.DHCP6:
 		b.WriteString("DHCP=yes\n")
+	case iface.DHCP4:
+		b.WriteString("DHCP=ipv4\n")
+	case iface.DHCP6:
+		b.WriteString("DHCP=ipv6\n")
 	}
 
 	for _, addr := range iface.IPv4Addrs {
@@ -252,6 +250,74 @@ func WriteConfigFile(networkDir, filename, content string) error {
 	return os.WriteFile(filepath.Join(networkDir, filename), []byte(content), 0644)
 }
 
+// RemoveLegacyCatchAllDHCP removes the old installer fallback DHCP file when
+// it is still the broad Type=ether catch-all. Specific tierd-generated network
+// files use the same 10- prefix, so leaving this file in place makes static IP
+// and bond-member configs inert under systemd-networkd's first-match rule.
+func RemoveLegacyCatchAllDHCP(networkDir string) error {
+	path := filepath.Join(networkDir, LegacyDHCPNetworkFilename)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if !isLegacyCatchAllDHCP(data) {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func isLegacyCatchAllDHCP(data []byte) bool {
+	lines := strings.Split(string(data), "\n")
+	inMatch := false
+	inNetwork := false
+	matchTypeEther := false
+	matchHasSpecificSelector := false
+	networkDHCP := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		switch line {
+		case "[Match]":
+			inMatch = true
+			inNetwork = false
+			continue
+		case "[Network]":
+			inMatch = false
+			inNetwork = true
+			continue
+		default:
+			if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+				inMatch = false
+				inNetwork = false
+			}
+		}
+		if inMatch {
+			key, value, ok := strings.Cut(line, "=")
+			if !ok {
+				matchHasSpecificSelector = true
+				continue
+			}
+			if strings.TrimSpace(key) == "Type" && strings.TrimSpace(value) == "ether" {
+				matchTypeEther = true
+			} else {
+				matchHasSpecificSelector = true
+			}
+		}
+		if inNetwork && line == "DHCP=yes" {
+			networkDHCP = true
+		}
+	}
+	return matchTypeEther && !matchHasSpecificSelector && networkDHCP
+}
+
 // RemoveConfigFiles removes files matching a prefix from the network dir.
 func RemoveConfigFiles(networkDir, prefix string) error {
 	entries, err := os.ReadDir(networkDir)
@@ -263,7 +329,9 @@ func RemoveConfigFiles(networkDir, prefix string) error {
 	}
 	for _, e := range entries {
 		if !e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
-			os.Remove(filepath.Join(networkDir, e.Name()))
+			if err := os.Remove(filepath.Join(networkDir, e.Name())); err != nil && !os.IsNotExist(err) {
+				return err
+			}
 		}
 	}
 	return nil
@@ -328,8 +396,8 @@ func ListVLANs() ([]VLANConfig, error) {
 	}
 
 	var raw []struct {
-		Ifname  string `json:"ifname"`
-		Link    string `json:"link"`
+		Ifname   string `json:"ifname"`
+		Link     string `json:"link"`
 		Linkinfo struct {
 			InfoData struct {
 				ID int `json:"id"`

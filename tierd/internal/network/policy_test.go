@@ -165,13 +165,13 @@ func TestIsPhysicalEthernetRejectsVLANNamingPattern(t *testing.T) {
 
 func TestEnumeratePhysicalEthernetSorted(t *testing.T) {
 	root := makeFakeSysClassNet(t, map[string]string{
-		"enp3s0":   "physical-eth",
-		"enp1s0":   "physical-eth",
-		"enp2s0":   "physical-eth",
-		"lo":       "loopback",
-		"wlan0":    "wireless",
-		"bond0":    "virtual",
-		"docker0":  "virtual",
+		"enp3s0":  "physical-eth",
+		"enp1s0":  "physical-eth",
+		"enp2s0":  "physical-eth",
+		"lo":      "loopback",
+		"wlan0":   "wireless",
+		"bond0":   "virtual",
+		"docker0": "virtual",
 	})
 	got, err := EnumeratePhysicalEthernet(root)
 	if err != nil {
@@ -306,6 +306,27 @@ func TestApplyDefaultBondPolicyIsNoOpAfterMarker(t *testing.T) {
 	entries, _ := os.ReadDir(netDir)
 	if len(entries) != 0 {
 		t.Fatalf("apply should be a no-op after marker; got files %v", entries)
+	}
+}
+
+func TestApplyDefaultBondPolicyRemovesLegacyDHCPAfterMarker(t *testing.T) {
+	store := newStubConfigStore()
+	store.bools[NetworkBootstrapCompleteKey] = true
+	netDir := t.TempDir()
+	legacy := filepath.Join(netDir, LegacyDHCPNetworkFilename)
+	if err := os.WriteFile(legacy, []byte("[Match]\nType=ether\n\n[Network]\nDHCP=yes\nIPv6AcceptRA=yes\n"), 0o644); err != nil {
+		t.Fatalf("write legacy dhcp: %v", err)
+	}
+	sysRoot := makeFakeSysClassNet(t, map[string]string{
+		"enp1s0": "physical-eth",
+	})
+
+	if err := ApplyDefaultBondPolicy(store, netDir, sysRoot); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy catch-all should be removed after marker; stat err=%v", err)
 	}
 }
 
@@ -468,12 +489,12 @@ func TestBreakBondRejectsBadMember(t *testing.T) {
 
 func TestStripCIDR(t *testing.T) {
 	cases := map[string]string{
-		"192.168.1.10/24":  "192.168.1.10",
-		"10.0.0.5/8":       "10.0.0.5",
-		"2001:db8::10/64":  "2001:db8::10",
-		"plain":            "plain",
-		"":                 "",
-		"no-slash-here":    "no-slash-here",
+		"192.168.1.10/24": "192.168.1.10",
+		"10.0.0.5/8":      "10.0.0.5",
+		"2001:db8::10/64": "2001:db8::10",
+		"plain":           "plain",
+		"":                "",
+		"no-slash-here":   "no-slash-here",
 	}
 	for in, want := range cases {
 		if got := stripCIDR(in); got != want {
