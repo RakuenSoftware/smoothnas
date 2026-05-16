@@ -138,6 +138,19 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 			Name: dockerRestartPolicyName(in.Manifest.EffectiveRestartPolicy()),
 		},
 	}
+	exposedPorts := map[string]struct{}{}
+	portBindings := map[string][]runtime.PortBinding{}
+	for _, p := range in.Manifest.Ports {
+		if !p.HostExpose {
+			continue
+		}
+		key := fmt.Sprintf("%d/%s", p.Port, strings.ToLower(p.Protocol))
+		exposedPorts[key] = struct{}{}
+		portBindings[key] = []runtime.PortBinding{{HostPort: strconv.Itoa(p.Port)}}
+	}
+	if len(portBindings) > 0 {
+		host.PortBindings = portBindings
+	}
 	if in.Profiles != nil {
 		// Devices: profile-contributed mappings.
 		for _, d := range in.Profiles.Devices {
@@ -174,7 +187,7 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 		host.Memory = memory
 	}
 
-	return runtime.CreateContainerRequest{
+	req := runtime.CreateContainerRequest{
 		Image:      in.ImageRef,
 		Cmd:        expandCommand(in.Manifest.Container.Command, envMap),
 		Env:        env,
@@ -182,7 +195,11 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 		User:       in.Manifest.Container.User,
 		Labels:     labels,
 		HostConfig: host,
-	}, nil
+	}
+	if len(exposedPorts) > 0 {
+		req.ExposedPorts = exposedPorts
+	}
+	return req, nil
 }
 
 func expandCommand(cmd []string, env map[string]string) []string {

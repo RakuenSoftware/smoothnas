@@ -139,12 +139,13 @@ func (f *fakeRuntime) InspectContainer(ctx context.Context, id string) (runtime.
 			ID:    id,
 			Image: req.Image,
 			Config: runtime.ContainerConfig{
-				Image:      req.Image,
-				Cmd:        append([]string(nil), req.Cmd...),
-				Env:        append([]string(nil), req.Env...),
-				WorkingDir: req.WorkingDir,
-				User:       req.User,
-				Labels:     req.Labels,
+				Image:        req.Image,
+				Cmd:          append([]string(nil), req.Cmd...),
+				Env:          append([]string(nil), req.Env...),
+				WorkingDir:   req.WorkingDir,
+				User:         req.User,
+				Labels:       req.Labels,
+				ExposedPorts: req.ExposedPorts,
 			},
 			HostConfig: req.HostConfig,
 		}, nil
@@ -479,6 +480,43 @@ func TestLifecycle_Materialise_RecreatesWhenPayloadChanges(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("changed env was not rendered into replacement payload: %v", rt.createCalls[1].Env)
+	}
+}
+
+func TestContainerMatchesDesired_HostExposeChanges(t *testing.T) {
+	existing := runtime.ContainerInspect{
+		Config: runtime.ContainerConfig{
+			Image:        "ghcr.io/example/wolf:1",
+			ExposedPorts: map[string]struct{}{"47989/tcp": {}},
+		},
+		HostConfig: runtime.HostConfig{
+			PortBindings: map[string][]runtime.PortBinding{
+				"47989/tcp": []runtime.PortBinding{{HostPort: "47989"}},
+			},
+		},
+	}
+	desired := runtime.CreateContainerRequest{
+		Image:        "ghcr.io/example/wolf:1",
+		ExposedPorts: map[string]struct{}{"47989/tcp": {}},
+		HostConfig: runtime.HostConfig{
+			PortBindings: map[string][]runtime.PortBinding{
+				"47989/tcp": []runtime.PortBinding{{HostPort: "47989"}},
+			},
+		},
+	}
+	if !containerMatchesDesired(existing, desired) {
+		t.Fatal("matching host-exposed ports should not force recreate")
+	}
+
+	desired.HostConfig.PortBindings["47989/tcp"] = []runtime.PortBinding{{HostPort: "47990"}}
+	if containerMatchesDesired(existing, desired) {
+		t.Fatal("changed host port should force recreate")
+	}
+
+	desired.HostConfig.PortBindings["47989/tcp"] = []runtime.PortBinding{{HostPort: "47989"}}
+	desired.ExposedPorts = map[string]struct{}{"47990/tcp": {}}
+	if containerMatchesDesired(existing, desired) {
+		t.Fatal("changed exposed port set should force recreate")
 	}
 }
 

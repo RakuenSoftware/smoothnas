@@ -117,9 +117,9 @@ type Volume struct {
 	PerInstance bool   `json:"perInstance,omitempty" yaml:"perInstance,omitempty"`
 }
 
-// Port describes one port the container listens on. Phase 04 reads
-// Expose to decide whether to render an nginx route. HostExpose is
-// reserved for phase 09 and ignored in phase 1–4.
+// Port describes one port the container listens on. Expose renders
+// an nginx route; HostExpose publishes the same container port on the
+// SmoothNAS host through the runtime daemon.
 type Port struct {
 	Name       string `json:"name" yaml:"name"`
 	Port       int    `json:"port" yaml:"port"`

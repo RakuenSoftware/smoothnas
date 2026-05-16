@@ -205,7 +205,7 @@ func readNICs() []NICInfo {
 
 func skipNIC(name string) bool {
 	prefixes := []string{
-		"docker", "veth", "br-", "virbr", "tun", "tap",
+		"docker", "veth", "br-", "virbr", "tun", "tap", "gow",
 		"kube", "flannel", "cni", "cali", "weave", "vnet", "ifb",
 	}
 	for _, p := range prefixes {

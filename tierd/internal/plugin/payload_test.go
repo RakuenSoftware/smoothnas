@@ -159,6 +159,35 @@ func TestBuildCreatePayload_LlamaSingleInstance(t *testing.T) {
 	}
 }
 
+func TestBuildCreatePayload_HostExposePorts(t *testing.T) {
+	in := fakePayloadInputs(t, "llama.yaml")
+	in.Manifest.Ports = []Port{
+		{Name: "http", Port: 8080, Protocol: "tcp", Expose: true},
+		{Name: "wolf-control", Port: 47989, Protocol: "tcp", HostExpose: true},
+		{Name: "wolf-stream", Port: 47998, Protocol: "udp", HostExpose: true},
+	}
+
+	got, err := BuildCreatePayload(in)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(got.ExposedPorts) != 2 {
+		t.Fatalf("ExposedPorts = %+v, want 2 host-exposed ports", got.ExposedPorts)
+	}
+	if _, ok := got.ExposedPorts["8080/tcp"]; ok {
+		t.Errorf("non-hostExpose port should not be in ExposedPorts: %+v", got.ExposedPorts)
+	}
+	for _, key := range []string{"47989/tcp", "47998/udp"} {
+		if _, ok := got.ExposedPorts[key]; !ok {
+			t.Errorf("ExposedPorts missing %q: %+v", key, got.ExposedPorts)
+		}
+		bindings := got.HostConfig.PortBindings[key]
+		if len(bindings) != 1 || bindings[0].HostPort != strings.Split(key, "/")[0] {
+			t.Errorf("PortBindings[%q] = %+v", key, bindings)
+		}
+	}
+}
+
 func TestBuildCreatePayload_ExpandsCommandConfigValues(t *testing.T) {
 	in := fakePayloadInputs(t, "llama.yaml")
 	in.Manifest.Container.Command = []string{"--model", "${MODEL_PATH}", "--ctx-size", "$CTX_SIZE", "--keep", "${UNKNOWN}"}

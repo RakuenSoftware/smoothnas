@@ -9,6 +9,15 @@ import (
 	"testing"
 )
 
+func TestPluginBridgeNameAvoidsVethPrefix(t *testing.T) {
+	if strings.HasPrefix(PluginBridgeName, "veth") {
+		t.Fatalf("PluginBridgeName = %q, must not look like an LXC veth", PluginBridgeName)
+	}
+	if PluginBridgeName != "gow" {
+		t.Fatalf("PluginBridgeName = %q, want gow", PluginBridgeName)
+	}
+}
+
 func TestEnsurePluginBridge_CreatesWhenMissing(t *testing.T) {
 	var seenCreate CreateNetworkRequest
 	createCalls := 0
