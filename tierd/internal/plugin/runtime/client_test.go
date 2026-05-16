@@ -180,6 +180,7 @@ func TestCreateContainer_BodyShape(t *testing.T) {
 		},
 		HostConfig: HostConfig{
 			Binds:         []string{"/host:/container"},
+			Memory:        64 << 30,
 			RestartPolicy: RestartPolicy{Name: "unless-stopped"},
 		},
 	})
@@ -194,6 +195,9 @@ func TestCreateContainer_BodyShape(t *testing.T) {
 	}
 	if body.Labels[PluginManagedLabel] != "true" {
 		t.Errorf("managed label not propagated: %+v", body.Labels)
+	}
+	if body.HostConfig.Memory != 64<<30 {
+		t.Errorf("memory = %d", body.HostConfig.Memory)
 	}
 }
 

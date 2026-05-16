@@ -154,7 +154,7 @@ func TestInspectContainerBridgeIP_ReturnsAddressWhenReady(t *testing.T) {
 			ID: "abc",
 			NetworkSettings: ContainerNetworkSettings{
 				Networks: map[string]ContainerNetwork{
-					PluginBridgeName: {IPAddress: "10.66.0.42"},
+					PluginBridgeName: {IPAddress: "10.100.0.42"},
 				},
 			},
 		})
@@ -164,7 +164,7 @@ func TestInspectContainerBridgeIP_ReturnsAddressWhenReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inspect: %v", err)
 	}
-	if ip != "10.66.0.42" {
+	if ip != "10.100.0.42" {
 		t.Errorf("ip = %q", ip)
 	}
 }

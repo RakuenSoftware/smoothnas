@@ -80,7 +80,7 @@ func TestPreflight_HappyPath_TierBound(t *testing.T) {
 }
 
 func TestPreflight_FlatVolumeBypassesGates(t *testing.T) {
-	tp := newFakeTP() // no tiers registered
+	tp := newFakeTP()                       // no tiers registered
 	m := mustParse(t, "ubuntu-python.yaml") // flat volume only
 	res, err := PreflightTierAssignments(tp, fakeStatfs{}.avail, m,
 		TierAssignments{}, "/var/lib/smoothnas/plugins")
@@ -160,7 +160,7 @@ func TestPreflight_DegradedTierAllowed(t *testing.T) {
 func TestPreflight_FreeSpaceWarnsButDoesNotBlock(t *testing.T) {
 	tp := newFakeTP()
 	tp.put("media", "/mnt/media", db.TierPoolStateHealthy, "NVME")
-	m := mustParse(t, "llama.yaml") // declares minSize 50G
+	m := mustParse(t, "llama.yaml")             // declares minSize 50G
 	tinyFs := fakeStatfs{"/mnt/media": 1 << 20} // 1 MB available
 
 	res, _ := PreflightTierAssignments(tp, tinyFs.avail, m,
@@ -268,9 +268,9 @@ func TestPreflightError_AsErrorListsVolumes(t *testing.T) {
 
 func TestParseSize(t *testing.T) {
 	cases := []struct {
-		in       string
-		want     uint64
-		wantOK   bool
+		in     string
+		want   uint64
+		wantOK bool
 	}{
 		{"50G", 50 << 30, true},
 		{"100M", 100 << 20, true},

@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -22,6 +23,24 @@ func loadFixture(t *testing.T, name string) *Manifest {
 		t.Fatalf("parse fixture %s: %v", name, err)
 	}
 	return m
+}
+
+func TestManifestJSONUsesYAMLFieldNames(t *testing.T) {
+	m := loadFixture(t, "llama.yaml")
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := got["metadata"]; !ok {
+		t.Fatalf("json missing metadata key: %s", data)
+	}
+	if _, ok := got["Metadata"]; ok {
+		t.Fatalf("json should not expose Go field name Metadata: %s", data)
+	}
 }
 
 func TestParseManifest_Fixtures(t *testing.T) {
@@ -137,6 +156,16 @@ func TestValidateManifest_FailureModes(t *testing.T) {
 			wantField: "container.restartPolicy",
 		},
 		{
+			name:      "bad container.resources.memory",
+			mutate:    func(m *Manifest) { m.Container.Resources.Memory = "64XB" },
+			wantField: "container.resources.memory",
+		},
+		{
+			name:      "container.resources.memory references unknown config",
+			mutate:    func(m *Manifest) { m.Container.Resources.Memory = "${MEMORY_LIMIT}" },
+			wantField: "container.resources.memory",
+		},
+		{
 			name:      "instances.count negative",
 			mutate:    func(m *Manifest) { m.Instances.Count = -3 },
 			wantField: "instances.count",
@@ -184,6 +213,16 @@ func TestValidateManifest_FailureModes(t *testing.T) {
 			mutate:    func(m *Manifest) { m.Config[0].Key = "model_path" },
 			wantField: "config[0].key",
 		},
+		{
+			name:      "bad config type",
+			mutate:    func(m *Manifest) { m.Config[0].Type = "range" },
+			wantField: "config[0].type",
+		},
+		{
+			name:      "select config missing options",
+			mutate:    func(m *Manifest) { m.Config[0].Type = "select" },
+			wantField: "config[0].options",
+		},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -212,6 +251,20 @@ func TestValidateManifest_FailureModes(t *testing.T) {
 				t.Errorf("expected issue on field %q, got fields %v", tc.wantField, fields)
 			}
 		})
+	}
+}
+
+func TestValidateManifest_AllowsConfigurableMemoryResource(t *testing.T) {
+	m := loadFixture(t, "llama.yaml")
+	m.Config = append(m.Config, ConfigField{
+		Key:     "MEMORY_LIMIT",
+		Type:    "string",
+		Default: "64GiB",
+	})
+	m.Container.Resources.Memory = "${MEMORY_LIMIT}"
+
+	if err := ValidateManifest(m); err != nil {
+		t.Fatalf("ValidateManifest: %v", err)
 	}
 }
 

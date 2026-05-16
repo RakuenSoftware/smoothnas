@@ -349,20 +349,6 @@ func mdadmCapabilities() tiering.TargetCapabilities {
 	}
 }
 
-func (a *Adapter) slowestTierRank(poolName string) (int, error) {
-	slots, err := a.store.ListTierSlots(poolName)
-	if err != nil {
-		return 0, err
-	}
-	slowest := 0
-	for _, slot := range slots {
-		if slot.Rank > slowest {
-			slowest = slot.Rank
-		}
-	}
-	return slowest, nil
-}
-
 func (a *Adapter) targetMountReady(target db.MdadmManagedTargetRow) bool {
 	if backingMountActive(target.MountPath) {
 		return true
@@ -514,6 +500,14 @@ func (a *Adapter) updateTierTargetActivity(id, health, band, trend string) error
 		return nil
 	}
 	return a.store.UpdateTierTargetActivity(id, health, band, trend)
+}
+
+func (a *Adapter) updateTierTargetPolicy(id string, targetFillPct, fullThresholdPct int) error {
+	if a.cache != nil {
+		a.cache.updateTierTargetPolicy(id, targetFillPct, fullThresholdPct)
+		return nil
+	}
+	return a.store.UpdateTierTargetPolicy(id, targetFillPct, fullThresholdPct)
 }
 
 // getManagedNamespace returns the mdadm managed namespace, preferring
@@ -1363,16 +1357,8 @@ func (a *Adapter) GetPolicy(targetID string) (tiering.TargetPolicy, error) {
 			Cause:   err,
 		}
 	}
-	slowestRank, err := a.slowestTierRank(poolName)
-	if err != nil {
-		return tiering.TargetPolicy{}, &tiering.AdapterError{
-			Kind:    tiering.ErrTransient,
-			Message: "list tier slots",
-			Cause:   err,
-		}
-	}
 	return tiering.TargetPolicy{
-		TargetFillPct:    effectiveTargetFillPct(slot.Rank, slot.TargetFillPct, slot.FullThresholdPct, slowestRank),
+		TargetFillPct:    slot.TargetFillPct,
 		FullThresholdPct: slot.FullThresholdPct,
 	}, nil
 }
@@ -1387,7 +1373,7 @@ func (a *Adapter) SetPolicy(targetID string, policy tiering.TargetPolicy) error 
 			Cause:   err,
 		}
 	}
-	slot, err := a.store.GetTierSlot(poolName, slotName)
+	_, err = a.store.GetTierSlot(poolName, slotName)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			return &tiering.AdapterError{
@@ -1401,18 +1387,8 @@ func (a *Adapter) SetPolicy(targetID string, policy tiering.TargetPolicy) error 
 			Cause:   err,
 		}
 	}
-	slowestRank, err := a.slowestTierRank(poolName)
-	if err != nil {
-		return &tiering.AdapterError{
-			Kind:    tiering.ErrTransient,
-			Message: "list tier slots",
-			Cause:   err,
-		}
-	}
 	targetFillPct := policy.TargetFillPct
-	if slot.Rank == slowestRank {
-		targetFillPct = policy.FullThresholdPct
-	} else if targetFillPct >= policy.FullThresholdPct {
+	if targetFillPct >= policy.FullThresholdPct {
 		return &tiering.AdapterError{
 			Kind:    tiering.ErrPermanent,
 			Message: "target_fill_pct must be less than full_threshold_pct",
@@ -1428,6 +1404,21 @@ func (a *Adapter) SetPolicy(targetID string, policy tiering.TargetPolicy) error 
 		return &tiering.AdapterError{
 			Kind:    tiering.ErrTransient,
 			Message: "set tier slot fill",
+			Cause:   err,
+		}
+	}
+	if target, err := a.getTierTargetByBackingRef(backingRefTarget(poolName, slotName), BackendKind); err == nil {
+		if err := a.updateTierTargetPolicy(target.ID, targetFillPct, policy.FullThresholdPct); err != nil {
+			return &tiering.AdapterError{
+				Kind:    tiering.ErrTransient,
+				Message: "sync tier target policy",
+				Cause:   err,
+			}
+		}
+	} else if !errors.Is(err, db.ErrNotFound) {
+		return &tiering.AdapterError{
+			Kind:    tiering.ErrTransient,
+			Message: "lookup tier target policy",
 			Cause:   err,
 		}
 	}
@@ -1499,15 +1490,26 @@ func (a *Adapter) Reconcile() error {
 						Cause:   err,
 					}
 				}
-			} else if existing.Health != health {
-				if err := a.updateTierTargetActivity(
-					existing.ID, health,
-					existing.ActivityBand, existing.ActivityTrend,
-				); err != nil {
-					return &tiering.AdapterError{
-						Kind:    tiering.ErrTransient,
-						Message: "update tier target activity",
-						Cause:   err,
+			} else {
+				if existing.TargetFillPct != slot.TargetFillPct || existing.FullThresholdPct != slot.FullThresholdPct {
+					if err := a.updateTierTargetPolicy(existing.ID, slot.TargetFillPct, slot.FullThresholdPct); err != nil {
+						return &tiering.AdapterError{
+							Kind:    tiering.ErrTransient,
+							Message: "sync tier target policy",
+							Cause:   err,
+						}
+					}
+				}
+				if existing.Health != health {
+					if err := a.updateTierTargetActivity(
+						existing.ID, health,
+						existing.ActivityBand, existing.ActivityTrend,
+					); err != nil {
+						return &tiering.AdapterError{
+							Kind:    tiering.ErrTransient,
+							Message: "update tier target activity",
+							Cause:   err,
+						}
 					}
 				}
 			}

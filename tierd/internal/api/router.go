@@ -25,6 +25,18 @@ func NewRouter(store *db.Store, version string, startTime time.Time) http.Handle
 // NewRouterFull builds the HTTP handler tree with all dependencies.
 // adapters are registered with the tiering handler before the first request.
 func NewRouterFull(store *db.Store, version string, startTime time.Time, historyStore *smart.HistoryStore, alarmStore *smart.AlarmStore, mon *monitor.Monitor, adapters ...tiering.TieringAdapter) http.Handler {
+	return newRouterFull(store, version, startTime, historyStore, alarmStore, mon, nil, nil, adapters...)
+}
+
+// NewRouterFullWithPlugins builds the HTTP handler tree with the
+// production plugin runtime lifecycle wired in. Tests and runtimeless
+// developer environments can keep using NewRouterFull, which leaves
+// lifecycle verbs returning 503.
+func NewRouterFullWithPlugins(store *db.Store, version string, startTime time.Time, historyStore *smart.HistoryStore, alarmStore *smart.AlarmStore, mon *monitor.Monitor, pluginLifecycle *plugin.Lifecycle, pluginCatalog *plugin.Catalog, adapters ...tiering.TieringAdapter) http.Handler {
+	return newRouterFull(store, version, startTime, historyStore, alarmStore, mon, pluginLifecycle, pluginCatalog, adapters...)
+}
+
+func newRouterFull(store *db.Store, version string, startTime time.Time, historyStore *smart.HistoryStore, alarmStore *smart.AlarmStore, mon *monitor.Monitor, pluginLifecycle *plugin.Lifecycle, pluginCatalog *plugin.Catalog, adapters ...tiering.TieringAdapter) http.Handler {
 	healthHandler := health.NewHandler(version, startTime, health.RuntimeChecks(store))
 	sessions := sgauth.NewSessionStore(store.DB(), 24*time.Hour)
 	rateLimiter := sgauth.NewRateLimiter(store.DB(), 5, 15*time.Minute)
@@ -41,9 +53,12 @@ func NewRouterFull(store *db.Store, version string, startTime time.Time, history
 	arraysHandler.SetPluginTierConsumers(pluginStore.TierConsumers)
 
 	// Plugin profile catalog — phase 05.
-	pluginCatalog, catalogErr := plugin.NewCatalog(plugin.DefaultOperatorProfilesDir)
-	if catalogErr != nil {
-		log.Printf("plugin profile catalog: %v (built-ins still loaded)", catalogErr)
+	if pluginCatalog == nil {
+		var catalogErr error
+		pluginCatalog, catalogErr = plugin.NewCatalog(plugin.DefaultOperatorProfilesDir)
+		if catalogErr != nil {
+			log.Printf("plugin profile catalog: %v (built-ins still loaded)", catalogErr)
+		}
 	}
 	pluginProfilesHandler := NewProfileHandler(pluginCatalog)
 
@@ -51,18 +66,14 @@ func NewRouterFull(store *db.Store, version string, startTime time.Time, history
 	// + Installer + Lifecycle the tier-deletion blocker uses, so
 	// every plugin-aware code path sees one consistent view of state.
 	//
-	// Lifecycle is wired with no runtime client when the runtime
-	// daemon socket is unreachable (e.g. CI without smoothnas-runtime
-	// installed). The HTTP layer surfaces that as 503 on lifecycle
-	// verbs; install/uninstall still work since they don't need it.
+	// Production passes a Lifecycle when smoothnas-runtime is ready.
+	// Runtimeless callers pass nil, and the HTTP layer surfaces that
+	// as 503 on lifecycle verbs while install/list still work.
 	pluginInstaller := plugin.NewInstaller(pluginStore)
 	pluginInstaller.SetTierProvider(store, plugin.StatAvail)
-	var pluginLifecycle *plugin.Lifecycle
-	// runtime/lifecycle wiring is left to a follow-up that owns the
-	// tierd ↔ smoothnas-runtime connection (the same wiring tierd-cli
-	// already does via openPluginLifecycle). For phase 06a the HTTP
-	// surface returns 503 from lifecycle verbs when this is nil,
-	// and install/list/uninstall still work fully.
+	if pluginLifecycle != nil {
+		pluginInstaller.SetDemolisher(pluginLifecycle)
+	}
 	pluginsHandler := NewPluginsHandler(pluginStore, pluginInstaller, pluginLifecycle, pluginCatalog, store)
 	zfsHandler := NewZFSHandler(store)
 	userPrefsHandler := NewUserPrefsHandler(store)
@@ -92,6 +103,12 @@ func NewRouterFull(store *db.Store, version string, startTime time.Time, history
 					return err
 				}
 				return ensureManagedSmoothfsPool(store, poolName)
+			})
+			arraysHandler.SetTierSlotPolicyUpdater(func(poolName, tierName string, targetFillPct, fullThresholdPct int) error {
+				return adapter.SetPolicy("mdadm:"+poolName+":"+tierName, tiering.TargetPolicy{
+					TargetFillPct:    targetFillPct,
+					FullThresholdPct: fullThresholdPct,
+				})
 			})
 			zfsHandler.SetAfterPoolImport(func(poolName string) error {
 				log.Printf("post-zfs-import reconcile for pool %q", poolName)

@@ -3,6 +3,7 @@ package plugin
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -84,10 +85,18 @@ type Artifact struct {
 
 // Container holds runtime knobs that apply to both artifact types.
 type Container struct {
-	Command       []string `json:"command,omitempty" yaml:"command,omitempty"`
-	WorkingDir    string   `json:"workingDir,omitempty" yaml:"workingDir,omitempty"`
-	User          string   `json:"user,omitempty" yaml:"user,omitempty"`
-	RestartPolicy string   `json:"restartPolicy" yaml:"restartPolicy"`
+	Command       []string  `json:"command,omitempty" yaml:"command,omitempty"`
+	WorkingDir    string    `json:"workingDir,omitempty" yaml:"workingDir,omitempty"`
+	User          string    `json:"user,omitempty" yaml:"user,omitempty"`
+	RestartPolicy string    `json:"restartPolicy" yaml:"restartPolicy"`
+	Resources     Resources `json:"resources,omitempty" yaml:"resources,omitempty"`
+}
+
+// Resources holds runtime resource limits that can be literal values or
+// interpolated from config keys. Values are rendered into HostConfig by the
+// payload builder rather than passed only as container environment.
+type Resources struct {
+	Memory string `json:"memory,omitempty" yaml:"memory,omitempty"`
 }
 
 // Instances controls replica fan-out. When omitted entirely the
@@ -135,11 +144,24 @@ type UIEmbed struct {
 // chosen at install time is recorded in plugin_config and passed
 // to the container as an environment variable named Key.
 type ConfigField struct {
-	Key         string `json:"key" yaml:"key"`
-	Type        string `json:"type" yaml:"type"`
-	Default     string `json:"default,omitempty" yaml:"default,omitempty"`
-	Description string `json:"description,omitempty" yaml:"description,omitempty"`
-	Secret      bool   `json:"secret,omitempty" yaml:"secret,omitempty"`
+	Key         string         `json:"key" yaml:"key"`
+	Type        string         `json:"type" yaml:"type"`
+	Label       string         `json:"label,omitempty" yaml:"label,omitempty"`
+	Default     string         `json:"default,omitempty" yaml:"default,omitempty"`
+	Description string         `json:"description,omitempty" yaml:"description,omitempty"`
+	Secret      bool           `json:"secret,omitempty" yaml:"secret,omitempty"`
+	Options     []ConfigOption `json:"options,omitempty" yaml:"options,omitempty"`
+	Min         string         `json:"min,omitempty" yaml:"min,omitempty"`
+	Max         string         `json:"max,omitempty" yaml:"max,omitempty"`
+	Step        string         `json:"step,omitempty" yaml:"step,omitempty"`
+	Unit        string         `json:"unit,omitempty" yaml:"unit,omitempty"`
+}
+
+// ConfigOption is one selectable value for a config field with
+// type=select. Values are still persisted as strings in plugin_config.
+type ConfigOption struct {
+	Value string `json:"value" yaml:"value"`
+	Label string `json:"label,omitempty" yaml:"label,omitempty"`
 }
 
 // ParseManifest parses a manifest YAML document. Strict decoding is
@@ -192,7 +214,7 @@ func ValidateManifest(m *Manifest) error {
 
 	validateMetadata(v, &m.Metadata)
 	validateArtifact(v, &m.Artifact)
-	validateContainer(v, &m.Container, &m.Artifact)
+	validateContainer(v, &m.Container, &m.Artifact, m.Config)
 	validateInstances(v, &m.Instances, m.Volumes)
 	validateVolumes(v, m.Volumes)
 	validatePorts(v, m.Ports)
@@ -247,7 +269,7 @@ func validateArtifact(v *ValidationError, a *Artifact) {
 	}
 }
 
-func validateContainer(v *ValidationError, c *Container, a *Artifact) {
+func validateContainer(v *ValidationError, c *Container, a *Artifact, config []ConfigField) {
 	switch c.RestartPolicy {
 	case "", RestartUnlessStopped, RestartOnFailure, RestartNo:
 		// "" means "use default" (unless-stopped) — install.go fills it in.
@@ -260,6 +282,88 @@ func validateContainer(v *ValidationError, c *Container, a *Artifact) {
 	if a.Type == ArtifactLXCDistro && len(c.Command) == 0 {
 		v.add("container.command", "is required when artifact.type is %q", ArtifactLXCDistro)
 	}
+	validateResources(v, &c.Resources, config)
+}
+
+func validateResources(v *ValidationError, r *Resources, config []ConfigField) {
+	if r.Memory == "" {
+		return
+	}
+	if key, ok := configReference(r.Memory); ok {
+		if !configKeyExists(config, key) {
+			v.add("container.resources.memory", "references unknown config key %q", key)
+		}
+		return
+	}
+	if _, err := parseByteSize(r.Memory); err != nil {
+		v.add("container.resources.memory", "%v", err)
+	}
+}
+
+func configReference(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "${") || !strings.HasSuffix(value, "}") {
+		return "", false
+	}
+	key := strings.TrimSuffix(strings.TrimPrefix(value, "${"), "}")
+	if !reConfigKey.MatchString(key) {
+		return "", false
+	}
+	return key, true
+}
+
+func configKeyExists(config []ConfigField, key string) bool {
+	for _, f := range config {
+		if f.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func parseByteSize(value string) (int64, error) {
+	s := strings.TrimSpace(value)
+	if s == "" {
+		return 0, fmt.Errorf("must be a positive byte size")
+	}
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return 0, fmt.Errorf("must start with a positive integer byte size")
+	}
+	n, err := strconv.ParseInt(s[:i], 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("must be a positive byte size")
+	}
+	mult := int64(1)
+	switch strings.ToLower(strings.TrimSpace(s[i:])) {
+	case "", "b", "byte", "bytes":
+		mult = 1
+	case "k", "kb":
+		mult = 1000
+	case "ki", "kib":
+		mult = 1 << 10
+	case "m", "mb":
+		mult = 1000 * 1000
+	case "mi", "mib":
+		mult = 1 << 20
+	case "g", "gb":
+		mult = 1000 * 1000 * 1000
+	case "gi", "gib":
+		mult = 1 << 30
+	case "t", "tb":
+		mult = 1000 * 1000 * 1000 * 1000
+	case "ti", "tib":
+		mult = 1 << 40
+	default:
+		return 0, fmt.Errorf("has unsupported size suffix %q", strings.TrimSpace(s[i:]))
+	}
+	if n > (1<<63-1)/mult {
+		return 0, fmt.Errorf("byte size overflows int64")
+	}
+	return n * mult, nil
 }
 
 func validateInstances(v *ValidationError, in *Instances, vols []Volume) {
@@ -367,6 +471,20 @@ func validateConfig(v *ValidationError, fields []ConfigField) {
 			v.add(field+".key", "duplicate key %q", f.Key)
 		}
 		seen[f.Key] = true
+		switch f.Type {
+		case "", "string", "number", "select", "boolean":
+			// "" is accepted for old manifests and rendered as string.
+		default:
+			v.add(field+".type", "must be string, number, select, or boolean (got %q)", f.Type)
+		}
+		if f.Type == "select" && len(f.Options) == 0 {
+			v.add(field+".options", "is required when type is select")
+		}
+		for j, opt := range f.Options {
+			if opt.Value == "" {
+				v.add(fmt.Sprintf("%s.options[%d].value", field, j), "is required")
+			}
+		}
 	}
 }
 

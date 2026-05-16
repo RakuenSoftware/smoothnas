@@ -438,7 +438,7 @@ function ConfigTab({
   // Pull the manifest's config[] field metadata so the form knows
   // which keys are secret. Re-parse via the backend rather than
   // re-export the type — keeps validation truth in one place.
-  const [fields, setFields] = useState<{ key: string; description?: string; secret?: boolean }[]>([]);
+  const [fields, setFields] = useState<ConfigFieldMeta[]>([]);
   const [values, setValues] = useState<Record<string, string>>({ ...initial });
   const [busy, setBusy] = useState(false);
   const [restartBusy, setRestartBusy] = useState(false);
@@ -449,7 +449,7 @@ function ConfigTab({
     if (!manifest) return;
     api.parsePlugin({ manifest })
       .then(resp => {
-        const parsed = resp.manifest as { config?: { key: string; description?: string; secret?: boolean }[] };
+        const parsed = resp.manifest as { config?: ConfigFieldMeta[] };
         setFields(parsed.config ?? []);
       })
       .catch(() => { /* leave fields empty; the keys still render */ });
@@ -498,12 +498,12 @@ function ConfigTab({
         <div className="plugin-config-form">
           {fields.map(f => (
             <div key={f.key} className="config-field">
-              <label htmlFor={`cfg-${f.key}`}>{f.key}</label>
-              <input
+              <label htmlFor={`cfg-${f.key}`}>{f.label || f.key}</label>
+              <PluginConfigInput
                 id={`cfg-${f.key}`}
-                type={f.secret ? 'password' : 'text'}
+                field={f}
                 value={values[f.key] ?? ''}
-                onChange={e => setValues({ ...values, [f.key]: e.target.value })}
+                onChange={value => setValues({ ...values, [f.key]: value })}
               />
               {f.description && <span className="help">{f.description}</span>}
             </div>
@@ -535,6 +535,69 @@ function ConfigTab({
         </div>
       )}
     </>
+  );
+}
+
+type ConfigFieldMeta = {
+  key: string;
+  type?: string;
+  label?: string;
+  description?: string;
+  secret?: boolean;
+  options?: { value: string; label?: string }[];
+  min?: string;
+  max?: string;
+  step?: string;
+  unit?: string;
+};
+
+function PluginConfigInput({
+  id,
+  field,
+  value,
+  onChange,
+}: {
+  id: string;
+  field: ConfigFieldMeta;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  if (field.type === 'select') {
+    return (
+      <select
+        id={id}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+      >
+        {(field.options ?? []).map(opt => (
+          <option key={opt.value} value={opt.value}>{opt.label || opt.value}</option>
+        ))}
+      </select>
+    );
+  }
+  if (field.type === 'boolean') {
+    return (
+      <input
+        id={id}
+        type="checkbox"
+        checked={value === 'true' || value === '1'}
+        onChange={e => onChange(e.target.checked ? 'true' : 'false')}
+      />
+    );
+  }
+  return (
+    <div className="config-input-with-unit">
+      <input
+        id={id}
+        type={field.secret ? 'password' : field.type === 'number' ? 'number' : 'text'}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        min={field.min}
+        max={field.max}
+        step={field.step}
+      />
+      {field.unit && <span>{field.unit}</span>}
+    </div>
   );
 }
 

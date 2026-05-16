@@ -5,9 +5,9 @@ export GIT_CONFIG_COUNT := 1
 export GIT_CONFIG_KEY_0 := url.git@github.com:.insteadOf
 export GIT_CONFIG_VALUE_0 := https://github.com/
 
-.PHONY: all build build-backend build-frontend build-backend-low build-frontend-low \
+.PHONY: all build build-backend build-frontend build-runtime build-backend-low build-frontend-low \
 	build-low iso iso-low kernel kernel-low zfs zfs-low smoothkernel-low \
-	test test-backend test-frontend lint lint-backend clean install deploy
+	test test-backend test-frontend lint lint-backend clean install install-runtime deploy deploy-runtime
 
 all: build
 
@@ -24,6 +24,9 @@ build-backend:
 
 build-frontend:
 	cd tierd-ui && npm install --prefer-offline && npm run build
+
+build-runtime:
+	./scripts/build-smoothnas-runtime.sh
 
 build-backend-low:
 	./scripts/low-impact-build.sh $(MAKE) build-backend
@@ -83,12 +86,19 @@ install: build
 	install -m 644 tierd/deploy/tierd-host-init.service /etc/systemd/system/tierd-host-init.service
 	install -m 644 tierd/deploy/tierd.service /etc/systemd/system/tierd.service
 	install -m 644 tierd/deploy/nginx.conf /etc/nginx/sites-available/tierd
+	mkdir -p /etc/nginx/conf.d/plugins.d
 	ln -sf /etc/nginx/sites-available/tierd /etc/nginx/sites-enabled/tierd
 	rm -f /etc/nginx/sites-enabled/default
 	bash tierd/deploy/generate-tls.sh
 	systemctl daemon-reload
 	systemctl enable tierd.service
 	systemctl enable nginx.service
+
+install-runtime: build-runtime
+	install -m 755 -D bin/docker-lxc-daemon /usr/lib/smoothnas/docker-lxc-daemon
+	install -m 644 runtime/smoothnas-runtime.service /etc/systemd/system/smoothnas-runtime.service
+	systemctl daemon-reload
+	systemctl enable smoothnas-runtime.service
 
 # --- Remote deploy (dev shortcut) ---
 # Usage: make deploy HOST=root@192.168.1.x
@@ -101,6 +111,12 @@ deploy: build
 	rsync -av --rsync-path="sudo rsync" tierd/deploy/tierd-host-init.service $(HOST):/etc/systemd/system/tierd-host-init.service
 	rsync -av --rsync-path="sudo rsync" tierd/deploy/tierd.service $(HOST):/etc/systemd/system/tierd.service
 	ssh -t $(HOST) 'sudo systemctl daemon-reload && sudo systemctl restart tierd'
+
+deploy-runtime: build-runtime
+	ssh -t $(HOST) 'sudo install -d -m 755 /usr/lib/smoothnas'
+	rsync -av --rsync-path="sudo rsync" bin/docker-lxc-daemon $(HOST):/usr/lib/smoothnas/docker-lxc-daemon
+	rsync -av --rsync-path="sudo rsync" runtime/smoothnas-runtime.service $(HOST):/etc/systemd/system/smoothnas-runtime.service
+	ssh -t $(HOST) 'sudo systemctl daemon-reload && sudo systemctl enable --now smoothnas-runtime.service'
 
 # --- Clean ---
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tiering"
+	mdadmadapter "github.com/JBailes/SmoothNAS/tierd/internal/tiering/mdadm"
 )
 
 // newTieringTestHandler returns a TieringHandler backed by a fresh in-memory
@@ -102,24 +103,24 @@ func TestTieringReconcileNoAdapters(t *testing.T) {
 
 // stubAdapter satisfies the TieringAdapter interface and records calls.
 type stubAdapter struct {
-	kind          string
+	kind           string
 	reconcileCalls int
 }
 
-func (s *stubAdapter) Kind() string           { return s.kind }
-func (s *stubAdapter) Reconcile() error       { s.reconcileCalls++; return nil }
+func (s *stubAdapter) Kind() string     { return s.kind }
+func (s *stubAdapter) Reconcile() error { s.reconcileCalls++; return nil }
 func (s *stubAdapter) CollectActivity() ([]tiering.ActivitySample, error) {
 	return nil, nil
 }
 func (s *stubAdapter) CreateTarget(tiering.TargetSpec) (*tiering.TargetState, error) {
 	return &tiering.TargetState{}, nil
 }
-func (s *stubAdapter) DestroyTarget(string) error { return nil }
+func (s *stubAdapter) DestroyTarget(string) error                  { return nil }
 func (s *stubAdapter) ListTargets() ([]tiering.TargetState, error) { return nil, nil }
 func (s *stubAdapter) CreateNamespace(tiering.NamespaceSpec) (*tiering.NamespaceState, error) {
 	return &tiering.NamespaceState{}, nil
 }
-func (s *stubAdapter) DestroyNamespace(string) error { return nil }
+func (s *stubAdapter) DestroyNamespace(string) error                     { return nil }
 func (s *stubAdapter) ListNamespaces() ([]tiering.NamespaceState, error) { return nil, nil }
 func (s *stubAdapter) ListManagedObjects(string) ([]tiering.ManagedObjectState, error) {
 	return nil, nil
@@ -130,15 +131,15 @@ func (s *stubAdapter) GetCapabilities(string) (tiering.TargetCapabilities, error
 func (s *stubAdapter) GetPolicy(string) (tiering.TargetPolicy, error) {
 	return tiering.TargetPolicy{}, nil
 }
-func (s *stubAdapter) SetPolicy(string, tiering.TargetPolicy) error { return nil }
-func (s *stubAdapter) PlanMovements() ([]tiering.MovementPlan, error) { return nil, nil }
+func (s *stubAdapter) SetPolicy(string, tiering.TargetPolicy) error       { return nil }
+func (s *stubAdapter) PlanMovements() ([]tiering.MovementPlan, error)     { return nil, nil }
 func (s *stubAdapter) StartMovement(tiering.MovementPlan) (string, error) { return "", nil }
 func (s *stubAdapter) GetMovement(string) (*tiering.MovementState, error) {
 	return &tiering.MovementState{}, nil
 }
-func (s *stubAdapter) CancelMovement(string) error { return nil }
-func (s *stubAdapter) Pin(tiering.PinScope, string, string) error { return nil }
-func (s *stubAdapter) Unpin(tiering.PinScope, string, string) error { return nil }
+func (s *stubAdapter) CancelMovement(string) error                        { return nil }
+func (s *stubAdapter) Pin(tiering.PinScope, string, string) error         { return nil }
+func (s *stubAdapter) Unpin(tiering.PinScope, string, string) error       { return nil }
 func (s *stubAdapter) GetDegradedState() ([]tiering.DegradedState, error) { return nil, nil }
 
 func TestTieringReconcileCallsAdapters(t *testing.T) {
@@ -227,6 +228,58 @@ func TestTieringTargetCRUD(t *testing.T) {
 	}
 	if domains[0].ID != "fast" {
 		t.Fatalf("domain id = %q, want fast", domains[0].ID)
+	}
+}
+
+func TestTieringTargetPolicyMdadmSyncsTierSlot(t *testing.T) {
+	h := newTieringTestHandler(t)
+	if err := h.store.CreateTierPool("media", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 2},
+	}); err != nil {
+		t.Fatalf("CreateTierPool: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "NVME", "md0"); err != nil {
+		t.Fatalf("AddArrayToTierSlot: %v", err)
+	}
+	tgt := &db.TierTargetRow{
+		Name:             "NVME",
+		PlacementDomain:  "media",
+		BackendKind:      "mdadm",
+		Rank:             1,
+		TargetFillPct:    50,
+		FullThresholdPct: 95,
+		Health:           "healthy",
+		BackingRef:       "mdadm:media:NVME",
+	}
+	if err := h.store.CreateTierTarget(tgt); err != nil {
+		t.Fatalf("CreateTierTarget: %v", err)
+	}
+	if err := h.store.SetControlPlaneConfig(mdadmadapter.ControlPlaneKeyCacheWriteThrough, "true"); err != nil {
+		t.Fatalf("SetControlPlaneConfig: %v", err)
+	}
+	if err := h.RegisterAdapter(mdadmadapter.NewAdapter(h.store, t.TempDir())); err != nil {
+		t.Fatalf("RegisterAdapter: %v", err)
+	}
+
+	rec := doRequest(t, h, http.MethodPut, "/api/tiering/targets/"+tgt.ID+"/policy",
+		map[string]int{"target_fill_pct": 70, "full_threshold_pct": 90})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT mdadm /policy: %d; body=%s", rec.Code, rec.Body)
+	}
+	slot, err := h.store.GetTierSlot("media", "NVME")
+	if err != nil {
+		t.Fatalf("GetTierSlot: %v", err)
+	}
+	if slot.TargetFillPct != 70 || slot.FullThresholdPct != 90 {
+		t.Fatalf("slot policy = %d/%d, want 70/90", slot.TargetFillPct, slot.FullThresholdPct)
+	}
+	updated, err := h.store.GetTierTarget(tgt.ID)
+	if err != nil {
+		t.Fatalf("GetTierTarget: %v", err)
+	}
+	if updated.TargetFillPct != 70 || updated.FullThresholdPct != 90 {
+		t.Fatalf("target policy = %d/%d, want 70/90", updated.TargetFillPct, updated.FullThresholdPct)
 	}
 }
 

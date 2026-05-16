@@ -581,7 +581,7 @@ func (h *TieringHandler) updateTargetPolicy(w http.ResponseWriter, r *http.Reque
 		jsonInvalidRequestBody(w)
 		return
 	}
-	err := h.store.UpdateTierTargetPolicy(id, req.TargetFillPct, req.FullThresholdPct)
+	t, err := h.store.GetTierTarget(id)
 	if errors.Is(err, db.ErrNotFound) {
 		jsonErrorCoded(w, "target not found", http.StatusNotFound, "tiering.target_not_found")
 		return
@@ -590,12 +590,54 @@ func (h *TieringHandler) updateTargetPolicy(w http.ResponseWriter, r *http.Reque
 		serverError(w, err)
 		return
 	}
-	t, err := h.store.GetTierTarget(id)
+	usedAdapter := false
+	priorRevision := t.PolicyRevision
+	if adapter := h.adapterForKind(t.BackendKind); adapter != nil {
+		usedAdapter = true
+		targetID := id
+		if t.BackendKind == "mdadm" && t.BackingRef != "" {
+			targetID = t.BackingRef
+		}
+		err = adapter.SetPolicy(targetID, tiering.TargetPolicy{
+			TargetFillPct:    req.TargetFillPct,
+			FullThresholdPct: req.FullThresholdPct,
+		})
+	} else {
+		err = h.store.UpdateTierTargetPolicy(id, req.TargetFillPct, req.FullThresholdPct)
+	}
+	if err != nil {
+		var adapterErr *tiering.AdapterError
+		if errors.As(err, &adapterErr) && adapterErr.Kind == tiering.ErrTransient {
+			serverError(w, err)
+			return
+		}
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	t, err = h.store.GetTierTarget(id)
 	if err != nil {
 		serverError(w, err)
 		return
 	}
+	if usedAdapter {
+		t.TargetFillPct = req.TargetFillPct
+		t.FullThresholdPct = req.FullThresholdPct
+		if t.PolicyRevision <= priorRevision {
+			t.PolicyRevision = priorRevision + 1
+		}
+	}
 	json.NewEncoder(w).Encode(dbTargetToResponse(*t))
+}
+
+func (h *TieringHandler) adapterForKind(kind string) tiering.TieringAdapter {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, adapter := range h.adapters {
+		if adapter.Kind() == kind {
+			return adapter
+		}
+	}
+	return nil
 }
 
 func (h *TieringHandler) listNamespaces(w http.ResponseWriter, r *http.Request) {

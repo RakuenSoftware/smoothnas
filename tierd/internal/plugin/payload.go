@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/runtime"
 )
@@ -57,17 +58,17 @@ func SetupHash(packages, setup []string) string {
 // from the database except the ImageRef, which the lifecycle layer
 // passes in after it resolves the pull.
 type PayloadInputs struct {
-	Plugin    *PluginRow
-	Manifest  *Manifest
-	Instance  int
-	ImageRef  string         // resolved by Materialise; e.g. "ghcr.io/...@sha256:..."
-	Volumes   []VolumeRow    // from the DB; expanded with per-instance host paths
-	Config    []ConfigRow    // already merged with manifest defaults
+	Plugin   *PluginRow
+	Manifest *Manifest
+	Instance int
+	ImageRef string      // resolved by Materialise; e.g. "ghcr.io/...@sha256:..."
+	Volumes  []VolumeRow // from the DB; expanded with per-instance host paths
+	Config   []ConfigRow // already merged with manifest defaults
 	// Profiles is the merged profile fragments (devices, env, capAdd,
 	// pidsLimit, oomScoreAdj, lxc raw config). When nil the renderer
 	// behaves as phase 1–4 (no profile contribution); production
 	// callers always pass a non-nil *Resolved from plugin.Resolve.
-	Profiles  *Resolved
+	Profiles *Resolved
 }
 
 // BuildCreatePayload renders the runtime.CreateContainerRequest for
@@ -150,6 +151,9 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 		if in.Profiles.PidsLimit != 0 {
 			host.PidsLimit = in.Profiles.PidsLimit
 		}
+		if in.Profiles.Memory != 0 {
+			host.Memory = in.Profiles.Memory
+		}
 		if in.Profiles.OomScoreAdj != nil {
 			host.OomScoreAdj = *in.Profiles.OomScoreAdj
 		}
@@ -161,16 +165,86 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 			labels[fmt.Sprintf("io.smoothnas.lxc.raw.%d", i)] = raw
 		}
 	}
+	if in.Manifest.Container.Resources.Memory != "" {
+		raw := expandArg(in.Manifest.Container.Resources.Memory, envMap)
+		memory, err := parseByteSize(raw)
+		if err != nil {
+			return runtime.CreateContainerRequest{}, fmt.Errorf("container.resources.memory: %w", err)
+		}
+		host.Memory = memory
+	}
 
 	return runtime.CreateContainerRequest{
 		Image:      in.ImageRef,
-		Cmd:        append([]string(nil), in.Manifest.Container.Command...),
+		Cmd:        expandCommand(in.Manifest.Container.Command, envMap),
 		Env:        env,
 		WorkingDir: in.Manifest.Container.WorkingDir,
 		User:       in.Manifest.Container.User,
 		Labels:     labels,
 		HostConfig: host,
 	}, nil
+}
+
+func expandCommand(cmd []string, env map[string]string) []string {
+	out := make([]string, 0, len(cmd))
+	for _, arg := range cmd {
+		out = append(out, expandArg(arg, env))
+	}
+	return out
+}
+
+func expandArg(arg string, env map[string]string) string {
+	if !strings.Contains(arg, "$") {
+		return arg
+	}
+	var b strings.Builder
+	for i := 0; i < len(arg); i++ {
+		if arg[i] != '$' {
+			b.WriteByte(arg[i])
+			continue
+		}
+		if i+1 >= len(arg) {
+			b.WriteByte(arg[i])
+			continue
+		}
+		if arg[i+1] == '{' {
+			end := strings.IndexByte(arg[i+2:], '}')
+			if end < 0 {
+				b.WriteByte(arg[i])
+				continue
+			}
+			key := arg[i+2 : i+2+end]
+			if val, ok := env[key]; ok {
+				b.WriteString(val)
+			} else {
+				b.WriteString("${")
+				b.WriteString(key)
+				b.WriteByte('}')
+			}
+			i += end + 2
+			continue
+		}
+		j := i + 1
+		for j < len(arg) && isEnvNameChar(arg[j]) {
+			j++
+		}
+		if j == i+1 {
+			b.WriteByte(arg[i])
+			continue
+		}
+		key := arg[i+1 : j]
+		if val, ok := env[key]; ok {
+			b.WriteString(val)
+		} else {
+			b.WriteString(arg[i:j])
+		}
+		i = j - 1
+	}
+	return b.String()
+}
+
+func isEnvNameChar(c byte) bool {
+	return c == '_' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9'
 }
 
 // cgroupPerms defaults empty permissions to "rwm". A profile that

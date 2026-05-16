@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"time"
 
@@ -141,17 +142,6 @@ func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 
 	count := rec.Plugin.InstanceCount
 	for _, inst := range rec.Instances {
-		if inst.ContainerID != "" {
-			// Already materialised. Verify the container still exists;
-			// if not, recreate it.
-			if _, err := l.rt.InspectContainer(ctx, inst.ContainerID); err == nil {
-				continue
-			} else if !runtime.IsNotFound(err) {
-				return fmt.Errorf("inspect existing container for instance %d: %w", inst.Instance, err)
-			}
-			// Fall through to recreate.
-		}
-
 		payload, err := BuildCreatePayload(PayloadInputs{
 			Plugin:   &rec.Plugin,
 			Manifest: manifest,
@@ -163,6 +153,29 @@ func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 		})
 		if err != nil {
 			return fmt.Errorf("build payload for instance %d: %w", inst.Instance, err)
+		}
+
+		if inst.ContainerID != "" {
+			// Already materialised. Verify the container still exists;
+			// if it does, verify it still matches the desired create
+			// payload. Config changes that affect env, args, host
+			// limits, devices, mounts, or networking require a recreate
+			// because Docker/LXC create-time fields cannot be edited
+			// reliably in-place.
+			existing, err := l.rt.InspectContainer(ctx, inst.ContainerID)
+			if err == nil && containerMatchesDesired(existing, payload) {
+				continue
+			}
+			if err != nil && !runtime.IsNotFound(err) {
+				return fmt.Errorf("inspect existing container for instance %d: %w", inst.Instance, err)
+			}
+			if err == nil {
+				_ = l.rt.StopContainer(ctx, inst.ContainerID, DefaultStopTimeoutSeconds)
+				if err := l.rt.RemoveContainer(ctx, inst.ContainerID, true); err != nil {
+					return fmt.Errorf("remove stale container for instance %d: %w", inst.Instance, err)
+				}
+				_ = l.store.SetInstanceContainerID(name, inst.Instance, "")
+			}
 		}
 
 		containerName := ContainerName(name, inst.Instance, count)
@@ -179,6 +192,91 @@ func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 	}
 
 	return nil
+}
+
+func containerMatchesDesired(existing runtime.ContainerInspect, desired runtime.CreateContainerRequest) bool {
+	if desired.Image != "" && existing.Config.Image != "" && existing.Config.Image != desired.Image {
+		return false
+	}
+	if desired.Image != "" && existing.Config.Image == "" && existing.Image != "" && existing.Image != desired.Image {
+		return false
+	}
+	if len(desired.Cmd) > 0 && !reflect.DeepEqual(existing.Config.Cmd, desired.Cmd) {
+		return false
+	}
+	if desired.WorkingDir != "" && existing.Config.WorkingDir != desired.WorkingDir {
+		return false
+	}
+	if desired.User != "" && existing.Config.User != desired.User {
+		return false
+	}
+	if !envContainsDesired(existing.Config.Env, desired.Env) {
+		return false
+	}
+	if !labelsContainDesired(existing.Config.Labels, desired.Labels) {
+		return false
+	}
+	return hostConfigMatchesDesired(existing.HostConfig, desired.HostConfig)
+}
+
+func hostConfigMatchesDesired(existing, desired runtime.HostConfig) bool {
+	if desired.NetworkMode != "" && existing.NetworkMode != desired.NetworkMode {
+		return false
+	}
+	if !reflect.DeepEqual(existing.Binds, desired.Binds) {
+		return false
+	}
+	if !reflect.DeepEqual(existing.Devices, desired.Devices) {
+		return false
+	}
+	if !reflect.DeepEqual(existing.CapAdd, desired.CapAdd) {
+		return false
+	}
+	if desired.Memory != existing.Memory {
+		return false
+	}
+	if desired.PidsLimit != existing.PidsLimit {
+		return false
+	}
+	if desired.OomScoreAdj != existing.OomScoreAdj {
+		return false
+	}
+	if desired.RestartPolicy.Name != "" && existing.RestartPolicy.Name != desired.RestartPolicy.Name {
+		return false
+	}
+	return true
+}
+
+func envContainsDesired(existing, desired []string) bool {
+	have := envSliceMap(existing)
+	want := envSliceMap(desired)
+	for k, v := range want {
+		if have[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func envSliceMap(values []string) map[string]string {
+	out := map[string]string{}
+	for _, item := range values {
+		k, v, ok := strings.Cut(item, "=")
+		if !ok {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func labelsContainDesired(existing, desired map[string]string) bool {
+	for k, v := range desired {
+		if existing[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // materialiseImage handles the artifact-type-specific pull (and, for

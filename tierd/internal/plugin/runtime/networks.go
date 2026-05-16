@@ -8,23 +8,23 @@ import (
 	"net/url"
 )
 
-// Network constants for the SmoothNAS plugin bridge. The subnet is
-// chosen to avoid common LAN ranges (192.168.x, 10.0.x, 172.16.x)
-// and Docker's default 172.17.0.0/16. Operators can override the
-// subnet via tierd_config (a follow-up); v1 hardcodes it.
+// Network constants for the LXC2Docker-managed plugin bridge. SmoothNAS
+// targets the runtime's built-in network rather than creating a second
+// Docker network: the create-network endpoint is a Docker API compatibility
+// surface, while the actual LXC veth bridge is runtime-managed.
 const (
-	PluginBridgeName    = "smoothnas-plugins"
-	PluginBridgeSubnet  = "10.66.0.0/16"
-	PluginBridgeGateway = "10.66.0.1"
+	PluginBridgeName    = "veth0"
+	PluginBridgeSubnet  = "10.100.0.0/24"
+	PluginBridgeGateway = "10.100.0.1"
 )
 
 // CreateNetworkRequest is the body of POST /networks/create.
 type CreateNetworkRequest struct {
-	Name    string                 `json:"Name"`
-	Driver  string                 `json:"Driver"`
-	IPAM    NetworkIPAM            `json:"IPAM"`
-	Options map[string]string      `json:"Options,omitempty"`
-	Labels  map[string]string      `json:"Labels,omitempty"`
+	Name    string            `json:"Name"`
+	Driver  string            `json:"Driver"`
+	IPAM    NetworkIPAM       `json:"IPAM"`
+	Options map[string]string `json:"Options,omitempty"`
+	Labels  map[string]string `json:"Labels,omitempty"`
 }
 
 // NetworkIPAM is the IPAM block of CreateNetworkRequest.
@@ -47,11 +47,11 @@ type CreateNetworkResponse struct {
 
 // NetworkInspect is the subset of GET /networks/<name> tierd reads.
 type NetworkInspect struct {
-	ID     string                 `json:"Id"`
-	Name   string                 `json:"Name"`
-	Driver string                 `json:"Driver"`
-	IPAM   NetworkIPAM            `json:"IPAM"`
-	Labels map[string]string      `json:"Labels"`
+	ID     string            `json:"Id"`
+	Name   string            `json:"Name"`
+	Driver string            `json:"Driver"`
+	IPAM   NetworkIPAM       `json:"IPAM"`
+	Labels map[string]string `json:"Labels"`
 }
 
 // CreateNetwork issues POST /networks/create. Returns the network
@@ -91,9 +91,9 @@ func (c *Client) RemoveNetwork(ctx context.Context, name string) error {
 	return nil
 }
 
-// EnsurePluginBridge creates the smoothnas-plugins bridge network
-// if it does not already exist, and returns the network ID either
-// way. Idempotent — safe to call at every tierd startup.
+// EnsurePluginBridge verifies the LXC2Docker-managed bridge network
+// exists and returns the network ID. Idempotent — safe to call at
+// every tierd startup.
 //
 // Returns an error if a network of the same name exists with a
 // different subnet (operator manually changed it), so the operator
@@ -161,10 +161,9 @@ func subnetMatches(ipam NetworkIPAM, want string) bool {
 // container create and start).
 var ErrBridgeIPNotReady = errors.New("bridge IP not yet assigned")
 
-// InspectContainerBridgeIP returns the container's IP on the
-// smoothnas-plugins bridge. Surfaces ErrBridgeIPNotReady when the
-// bridge is attached but the address hasn't been assigned yet, so
-// the caller can retry.
+// InspectContainerBridgeIP returns the container's IP on the plugin
+// bridge. Surfaces ErrBridgeIPNotReady when the bridge is attached
+// but the address hasn't been assigned yet, so the caller can retry.
 func (c *Client) InspectContainerBridgeIP(ctx context.Context, id string) (string, error) {
 	details, err := c.InspectContainer(ctx, id)
 	if err != nil {
