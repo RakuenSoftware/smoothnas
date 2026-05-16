@@ -2,7 +2,7 @@
 //
 // tierd owns all files in /etc/systemd/network/. It generates .network,
 // .netdev, and .link files from its internal state. Manual edits are
-// overwritten. Changes are applied via networkctl reload.
+// overwritten. Changes are applied via networkctl reload + reconfigure.
 package network
 
 import (
