@@ -52,7 +52,7 @@ const EMPTY_FORM = {
   remote_path: '',
   direction: 'push' as 'push' | 'pull',
   method: 'rsync' as 'cp' | 'rsync',
-  parallelism: 1,
+  parallelism: 4,
   use_ssh: false,
   compress: false,
   delete_mode: false,
@@ -132,6 +132,12 @@ export default function Backups() {
 
   function setField(key: keyof typeof EMPTY_FORM, value: string | number | boolean) {
     setForm(f => ({ ...f, [key]: value }));
+  }
+
+  function setWorkerCount(value: string) {
+    const n = Number(value);
+    if (!Number.isInteger(n)) return;
+    setField('parallelism', Math.min(16, Math.max(1, n)));
   }
 
   async function saveConfig() {
@@ -301,6 +307,17 @@ export default function Backups() {
                 <option value="cp">{t('backups.method.cp')}</option>
               </select>
             </label>
+            <label title={t('backups.tooltip.workerCount')}>
+              {t('backups.field.workerCount')}
+              <input
+                type="number"
+                min={1}
+                max={16}
+                step={1}
+                value={form.parallelism}
+                onChange={e => setWorkerCount(e.target.value)}
+              />
+            </label>
           </div>
 
           {form.method === 'rsync' && (
@@ -446,6 +463,7 @@ export default function Backups() {
                 <th>{t('datasets.col.name')}</th>
                 <th>{t('backups.col.direction')}</th>
                 <th>{t('backups.col.method')}</th>
+                <th>{t('backups.col.workers')}</th>
                 <th>{t('backups.col.target')}</th>
                 <th>{t('backups.col.localPath')}</th>
                 <th>{t('backups.col.remoteSubpath')}</th>
@@ -470,6 +488,7 @@ export default function Backups() {
                           {cfg.method === 'rsync' ? 'rsync' : 'cp+sha256'}
                         </span>
                       </td>
+                      <td>{cfg.parallelism}</td>
                       <td>
                         {cfg.method === 'rsync' && cfg.use_ssh ? (
                           <>
@@ -524,7 +543,7 @@ export default function Backups() {
                     </tr>
                     {run && (
                       <tr>
-                        <td colSpan={7}>
+                        <td colSpan={8}>
                           <BackupRunPanel
                             run={run}
                             onDismiss={() => dismissRun(cfg.id)}
