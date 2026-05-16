@@ -2,6 +2,7 @@ package mdadm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -185,6 +186,39 @@ type tierCapacity struct {
 // fallback when lower tiers cannot absorb a file at their own fill targets.
 func (c *tierCapacity) admissionCap() int64 {
 	return c.targetCap
+}
+
+func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked []rankedPoolTarget, fastestRank, slowestRank int) ([]int, []bool) {
+	assignments := make([]int, len(cands))
+	assigned := make([]bool, len(cands))
+
+	// Pass 1: forced (pinned) placements.
+	for i, c := range cands {
+		switch c.pin {
+		case meta.PinHot:
+			assignments[i] = admitWithFallback(caps, ranked, fastestRank, c.size)
+			assigned[i] = true
+		case meta.PinCold:
+			assignments[i] = admitWithFallback(caps, ranked, slowestRank, c.size)
+			assigned[i] = true
+		}
+	}
+
+	// Pass 2: unpinned, smallest-first fills from the top.
+	var unpinned []int
+	for i, c := range cands {
+		if c.pin == meta.PinNone && !assigned[i] {
+			unpinned = append(unpinned, i)
+		}
+	}
+	sort.Slice(unpinned, func(i, j int) bool { return cands[unpinned[i]].size < cands[unpinned[j]].size })
+	for _, idx := range unpinned {
+		c := cands[idx]
+		assignments[idx] = admitWithFallback(caps, ranked, fastestRank, c.size)
+		assigned[idx] = true
+	}
+
+	return assignments, assigned
 }
 
 // planPoolPlacement gathers every file in a pool, runs a size-aware
@@ -385,30 +419,7 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 	// smallest-first onto the fastest tier with room under target.
 	fastestRank := ranked[0].rank
 	slowestRank := ranked[len(ranked)-1].rank
-
-	assignments := make(map[uint64]int, len(cands)) // inode → assigned rank
-
-	// Pass 1: forced (pinned) placements.
-	for _, c := range cands {
-		switch c.pin {
-		case meta.PinHot:
-			assignments[c.inode] = admitWithFallback(caps, ranked, fastestRank, c.size)
-		case meta.PinCold:
-			assignments[c.inode] = admitWithFallback(caps, ranked, slowestRank, c.size)
-		}
-	}
-
-	// Pass 2: unpinned, smallest-first fills from the top.
-	var unpinned []candidate
-	for _, c := range cands {
-		if c.pin == meta.PinNone {
-			unpinned = append(unpinned, c)
-		}
-	}
-	sort.Slice(unpinned, func(i, j int) bool { return unpinned[i].size < unpinned[j].size })
-	for _, c := range unpinned {
-		assignments[c.inode] = admitWithFallback(caps, ranked, fastestRank, c.size)
-	}
+	assignments, assigned := assignCandidateRanks(cands, caps, ranked, fastestRank, slowestRank)
 
 	// Enqueue moves for any file whose assigned rank != current rank.
 	// Re-check the idle gate every few moves so the planner bails out
@@ -447,10 +458,10 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 				return
 			}
 		}
-		want, ok := assignments[c.inode]
-		if !ok || want == c.curRank {
+		if !assigned[i] || assignments[i] == c.curRank {
 			continue
 		}
+		want := assignments[i]
 		planned++
 		dest := caps[want]
 		if dest == nil {
@@ -829,6 +840,11 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir dest parent: %w", err)
 	}
+	if _, err := os.Lstat(dstPath); err == nil {
+		return fmt.Errorf("destination already exists: %s", dstPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat dest: %w", err)
+	}
 
 	srcInfo, err := os.Stat(srcPath)
 	if err != nil {
@@ -855,9 +871,9 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 		log.Printf("placement: chtimes %s: %v", tmpPath, err)
 	}
 
-	if err := os.Rename(tmpPath, dstPath); err != nil {
+	if err := installPlacementCopy(tmpPath, dstPath); err != nil {
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename tmp → dest: %w", err)
+		return fmt.Errorf("install tmp copy: %w", err)
 	}
 
 	// Source copy is now redundant. Unlinking it here preserves the
@@ -897,6 +913,13 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 	return nil
 }
 
+func installPlacementCopy(tmpPath, dstPath string) error {
+	if err := os.Link(tmpPath, dstPath); err != nil {
+		return err
+	}
+	return os.Remove(tmpPath)
+}
+
 // copyFileContents opens src for read and dst for exclusive create-write,
 // streams the bytes, and closes both.
 func copyFileContents(src, dst string, mode os.FileMode) error {
@@ -905,7 +928,7 @@ func copyFileContents(src, dst string, mode os.FileMode) error {
 		return err
 	}
 	defer sf.Close()
-	df, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
+	df, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode.Perm())
 	if err != nil {
 		return err
 	}
