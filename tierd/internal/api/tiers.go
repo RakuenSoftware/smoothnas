@@ -596,13 +596,12 @@ func poolSpindownSSDTargetFill(pool db.TierInstance, slots []db.TierSlot) poolSp
 		return resp
 	}
 
-	slowestRank := poolSlowestRank(slots)
 	for _, slot := range assigned {
 		if !nonRotationalSlots[slot.Name] || slot.Rank >= slowestRotationalRank {
 			continue
 		}
 		resp.Required = true
-		targetPct := effectiveSlotTargetFill(slot.Rank, slot.TargetFillPct, slot.FullThresholdPct, slowestRank)
+		targetPct := slot.TargetFillPct
 		tierResp := poolSpindownWarmFillTierResponse{
 			Name:          slot.Name,
 			Rank:          slot.Rank,
@@ -805,12 +804,6 @@ func poolDetailFromStore(h *ArraysHandler, poolName string) (*poolDetailResponse
 	if err != nil {
 		return nil, err
 	}
-	slowestRank := 0
-	for _, slot := range slots {
-		if slot.Rank > slowestRank {
-			slowestRank = slot.Rank
-		}
-	}
 	// Per-tier VG lookup first: if any tier has its own VG (new layout),
 	// the legacy monolithic VG — even when it still contains the 4 MB
 	// loopback placeholder from createPoolVG — is not the source of truth
@@ -934,30 +927,13 @@ func poolDetailFromStore(h *ArraysHandler, poolName string) (*poolDetailResponse
 			CapacityBytes:    capacity,
 			UsedBytes:        usedBytes,
 			FreeBytes:        freeBytes,
-			TargetFillPct:    effectiveSlotTargetFill(slot.Rank, slot.TargetFillPct, slot.FullThresholdPct, slowestRank),
+			TargetFillPct:    slot.TargetFillPct,
 			FullThresholdPct: slot.FullThresholdPct,
 			BackingKind:      slot.BackingKind,
 			BackingRef:       slot.BackingRef,
 		})
 	}
 	return resp, nil
-}
-
-func poolSlowestRank(slots []db.TierSlot) int {
-	slowestRank := 0
-	for _, slot := range slots {
-		if slot.Rank > slowestRank {
-			slowestRank = slot.Rank
-		}
-	}
-	return slowestRank
-}
-
-func effectiveSlotTargetFill(rank, targetFillPct, fullThresholdPct, slowestRank int) int {
-	if rank == slowestRank && fullThresholdPct > 0 {
-		return fullThresholdPct
-	}
-	return targetFillPct
 }
 
 func mountedPathUsageBytes(mountPoint string) uint64 {
@@ -1193,17 +1169,7 @@ func (h *ArraysHandler) createTier(w http.ResponseWriter, r *http.Request) {
 		LastReconciledAt: nil,
 		Tiers:            make([]createTierDefinitionResponse, 0, len(tierDefs)),
 	}
-	slowestRank := 0
 	for _, tier := range tierDefs {
-		if tier.Rank > slowestRank {
-			slowestRank = tier.Rank
-		}
-	}
-	for _, tier := range tierDefs {
-		targetFillPct := 50
-		if tier.Rank == slowestRank {
-			targetFillPct = 95
-		}
 		resp.Tiers = append(resp.Tiers, createTierDefinitionResponse{
 			Name:             tier.Name,
 			Rank:             tier.Rank,
@@ -1211,7 +1177,7 @@ func (h *ArraysHandler) createTier(w http.ResponseWriter, r *http.Request) {
 			ArrayID:          nil,
 			PVDevice:         nil,
 			CapacityBytes:    0,
-			TargetFillPct:    targetFillPct,
+			TargetFillPct:    50,
 			FullThresholdPct: 95,
 		})
 	}
@@ -1819,18 +1785,7 @@ func (h *ArraysHandler) addTierLevel(w http.ResponseWriter, r *http.Request, poo
 	if req.FullThresholdPct != nil {
 		fullThreshold = *req.FullThresholdPct
 	}
-	slots, err := h.store.ListTierSlots(poolName)
-	if err != nil {
-		if err == db.ErrNotFound {
-			jsonErrorCoded(w, "pool not found", http.StatusNotFound, "tiers.pool_not_found")
-			return
-		}
-		serverError(w, err)
-		return
-	}
-	if req.Rank > poolSlowestRank(slots) {
-		targetFill = fullThreshold
-	} else if targetFill >= fullThreshold {
+	if targetFill >= fullThreshold {
 		jsonErrorCoded(w, "target_fill_pct must be less than full_threshold_pct", http.StatusBadRequest, "tiers.fill_thresholds_invalid")
 		return
 	}
@@ -1859,7 +1814,7 @@ func (h *ArraysHandler) addTierLevel(w http.ResponseWriter, r *http.Request, poo
 		CapacityBytes:    0,
 		UsedBytes:        0,
 		FreeBytes:        0,
-		TargetFillPct:    effectiveSlotTargetFill(slot.Rank, slot.TargetFillPct, slot.FullThresholdPct, slot.Rank),
+		TargetFillPct:    slot.TargetFillPct,
 		FullThresholdPct: slot.FullThresholdPct,
 	})
 }
@@ -1889,20 +1844,12 @@ func (h *ArraysHandler) updateTierLevel(w http.ResponseWriter, r *http.Request, 
 	if req.FullThresholdPct != nil {
 		fullThreshold = *req.FullThresholdPct
 	}
-	slots, err := h.store.ListTierSlots(poolName)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	slowestRank := poolSlowestRank(slots)
-	if slot.Rank == slowestRank {
-		targetFill = fullThreshold
-	} else if targetFill >= fullThreshold {
+	if targetFill >= fullThreshold {
 		jsonErrorCoded(w, "target_fill_pct must be less than full_threshold_pct", http.StatusBadRequest, "tiers.fill_thresholds_invalid")
 		return
 	}
 
-	if err := h.store.SetTierSlotFill(poolName, levelName, targetFill, fullThreshold); err != nil {
+	if err := h.setTierSlotPolicy(poolName, levelName, targetFill, fullThreshold); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -1929,7 +1876,7 @@ func (h *ArraysHandler) updateTierLevel(w http.ResponseWriter, r *http.Request, 
 		CapacityBytes:    0,
 		UsedBytes:        0,
 		FreeBytes:        0,
-		TargetFillPct:    effectiveSlotTargetFill(slot.Rank, slot.TargetFillPct, slot.FullThresholdPct, slowestRank),
+		TargetFillPct:    slot.TargetFillPct,
 		FullThresholdPct: slot.FullThresholdPct,
 	})
 }
