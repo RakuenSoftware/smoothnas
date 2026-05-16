@@ -2,6 +2,38 @@
 
 // --- SmoothNAS-specific styles ---
 
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid #e0e0e0;
+
+  .tab {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: #666;
+    cursor: pointer;
+    font-size: 13px;
+    padding: 8px 12px;
+
+    &:hover {
+      color: #222;
+    }
+
+    &.active {
+      border-bottom-color: #2a6df4;
+      color: #222;
+      font-weight: 600;
+    }
+
+    &:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+  }
+}
+
 // --- Tier cards ---
 .create-card {
   background: #fff;
