@@ -2,6 +2,7 @@ package mdadm
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
@@ -207,6 +208,31 @@ func TestAdmitPinColdStartsFromSlowest(t *testing.T) {
 	}
 }
 
+func TestAssignCandidateRanksKeepsDuplicateInodesIndependent(t *testing.T) {
+	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	caps := map[int]*tierCapacity{
+		1: {totalBytes: 1000, targetCap: 500, fullCap: 950},
+		2: {totalBytes: 2000, targetCap: 1000, fullCap: 1900},
+	}
+	cands := []candidate{
+		{inode: 42, curRank: 1, size: 400, pin: meta.PinNone},
+		{inode: 42, curRank: 2, size: 700, pin: meta.PinNone},
+	}
+
+	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
+	for i := range cands {
+		if !assigned[i] {
+			t.Fatalf("candidate %d was not assigned", i)
+		}
+	}
+	if assignments[0] != 1 {
+		t.Fatalf("candidate 0 assignment = %d, want 1", assignments[0])
+	}
+	if assignments[1] != 2 {
+		t.Fatalf("candidate 1 assignment = %d, want 2", assignments[1])
+	}
+}
+
 func TestPoolRankedTargetsPreservesTargetFillForSlowest(t *testing.T) {
 	store := openAdapterStore(t)
 	if err := store.CreateTierPool("pool1", "xfs", []db.TierDefinition{
@@ -344,5 +370,100 @@ func TestCopyFileContents(t *testing.T) {
 	}
 	if string(got) != "hello world" {
 		t.Errorf("dst contents = %q, want %q", got, "hello world")
+	}
+}
+
+func TestCopyFileContentsDoesNotOverwriteExistingDestination(t *testing.T) {
+	dir := t.TempDir()
+	src := dir + "/src"
+	dst := dir + "/dst"
+	if err := writeFile(src, []byte("new"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if err := writeFile(dst, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write dst: %v", err)
+	}
+
+	if err := copyFileContents(src, dst, 0o644); err == nil {
+		t.Fatal("copyFileContents succeeded over an existing destination")
+	}
+	got, err := readFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != "old" {
+		t.Fatalf("dst contents = %q, want old", got)
+	}
+}
+
+func TestMoveForPlacementDoesNotOverwriteExistingDestination(t *testing.T) {
+	origMountReady := backingMountActive
+	backingMountActive = func(string) bool { return true }
+	t.Cleanup(func() { backingMountActive = origMountReady })
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	rel := "dir/file.txt"
+	if err := os.MkdirAll(srcDir+"/dir", 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	if err := os.MkdirAll(dstDir+"/dir", 0o755); err != nil {
+		t.Fatalf("mkdir dst: %v", err)
+	}
+	if err := writeFile(srcDir+"/"+rel, []byte("source"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if err := writeFile(dstDir+"/"+rel, []byte("dest"), 0o644); err != nil {
+		t.Fatalf("write dst: %v", err)
+	}
+
+	a := &Adapter{}
+	err := a.moveForPlacement(
+		db.MdadmManagedNamespaceRow{PoolName: "pool1", NamespaceID: "ns1"},
+		rel,
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "src", MountPath: srcDir},
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "dst", MountPath: dstDir},
+		1,
+		2,
+	)
+	if err == nil || !strings.Contains(err.Error(), "destination already exists") {
+		t.Fatalf("moveForPlacement error = %v, want destination exists", err)
+	}
+	gotSrc, err := readFile(srcDir + "/" + rel)
+	if err != nil {
+		t.Fatalf("read src: %v", err)
+	}
+	if string(gotSrc) != "source" {
+		t.Fatalf("src contents = %q, want source", gotSrc)
+	}
+	gotDst, err := readFile(dstDir + "/" + rel)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(gotDst) != "dest" {
+		t.Fatalf("dst contents = %q, want dest", gotDst)
+	}
+}
+
+func TestInstallPlacementCopyDoesNotOverwriteExistingDestination(t *testing.T) {
+	dir := t.TempDir()
+	tmp := dir + "/file.tierd-move"
+	dst := dir + "/file"
+	if err := writeFile(tmp, []byte("new"), 0o644); err != nil {
+		t.Fatalf("write tmp: %v", err)
+	}
+	if err := writeFile(dst, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write dst: %v", err)
+	}
+
+	if err := installPlacementCopy(tmp, dst); err == nil {
+		t.Fatal("installPlacementCopy succeeded over an existing destination")
+	}
+	got, err := readFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != "old" {
+		t.Fatalf("dst contents = %q, want old", got)
 	}
 }
