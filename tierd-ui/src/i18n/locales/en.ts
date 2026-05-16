@@ -575,6 +575,7 @@ const en: LanguageTranslations = {
   'network.validate.gateway4': 'IPv4 gateway must be a plain address, e.g. 192.168.1.1.',
   'network.validate.ipv6Cidr': 'IPv6 must be in CIDR notation, e.g. 2001:db8::10/64.',
   'network.validate.gateway6': 'IPv6 gateway must be an IPv6 address, e.g. fe80::1.',
+  'network.validate.dnsServer': 'DNS servers must be plain IPv4 or IPv6 addresses.',
   'network.validate.vlanParent': 'Pick a parent interface or bond.',
   'network.validate.vlanId': 'VLAN ID must be 1–4094.',
   'network.validate.ipv4Required': 'Provide an IPv4 CIDR or enable DHCP.',

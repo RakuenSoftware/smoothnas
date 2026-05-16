@@ -595,6 +595,7 @@ const nl: LanguageTranslations = {
   'network.validate.gateway4': 'IPv4-gateway moet een eenvoudig adres zijn, bv. 192.168.1.1.',
   'network.validate.ipv6Cidr': 'IPv6 moet in CIDR-notatie, bv. 2001:db8::10/64.',
   'network.validate.gateway6': 'IPv6-gateway moet een IPv6-adres zijn, bv. fe80::1.',
+  'network.validate.dnsServer': 'DNS-servers moeten gewone IPv4- of IPv6-adressen zijn.',
   'network.validate.vlanParent': 'Kies een parent-interface of bond.',
   'network.validate.vlanId': 'VLAN-ID moet 1–4094 zijn.',
   'network.validate.ipv4Required': 'Geef een IPv4-CIDR op of schakel DHCP in.',
