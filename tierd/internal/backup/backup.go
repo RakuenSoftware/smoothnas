@@ -24,8 +24,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var statPath = os.Stat
-var statfsBackupPath = unix.Statfs
+var (
+	statPath         = os.Stat
+	statfsBackupPath = unix.Statfs
+	forceUmountFn    = forceUmount
+)
 
 const (
 	// copyBufSize is the per-goroutine buffer for io.CopyBuffer. 4 MB amortises
@@ -63,10 +66,12 @@ const (
 	// up to a minute, turning repeated stat() calls during rsync's tree walk
 	// into local lookups instead of NFS RPCs.
 	//
-	// timeo=50,retrans=3: base RPC timeout of 5 s with three retries before TCP
-	// reconnect (~35 s worst case). The kernel default of 60 s per RPC meant a
-	// single unresponsive server stalled rsync for up to 3 minutes.
-	nfsMountOpts = nfs.DefaultClientMountOptions
+	// softerr is deliberate for backup mounts. The default Linux NFS behavior is
+	// "hard", which retries indefinitely; if the server wedges, rsync can block
+	// in uninterruptible kernel sleep and never reach its own --timeout. Backup
+	// jobs should fail loudly and leave a partial tree, not hold the API run open
+	// forever. timeo/retrans still bound transient loss before that failure.
+	nfsMountOpts = nfs.DefaultClientMountOptions + ",softerr"
 
 	// nfsReadAheadKB raises the per-mount BDI readahead so the kernel
 	// pre-fetches further into a sequential NFS read stream. 4 MB is a
@@ -575,6 +580,8 @@ func rsyncMount(ctx context.Context, cfg Config, progress func(msg string, done,
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	stopCancelUmount := forceUmountOnCancel(runCtx, mountDir)
+	defer stopCancelUmount()
 	reasonCh := make(chan string, 1)
 	go watchDestFree(runCtx, dst, cancel, reasonCh)
 
@@ -906,6 +913,8 @@ func runCP(ctx context.Context, cfg Config, progress func(msg string, done, tota
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	stopCancelUmount := forceUmountOnCancel(runCtx, mountDir)
+	defer stopCancelUmount()
 	reasonCh := make(chan string, 1)
 	go watchDestFree(runCtx, dst, cancel, reasonCh)
 
@@ -974,6 +983,25 @@ func umount(mountDir string) error {
 		return fmt.Errorf("umount: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func forceUmount(mountDir string) error {
+	// -f is specifically useful for unreachable NFS servers. Pair it with lazy
+	// detach so a cancellation can release tierd's namespace even if a child is
+	// stuck in a filesystem syscall.
+	out, err := exec.Command("umount", "-f", "-l", mountDir).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("force umount: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func forceUmountOnCancel(ctx context.Context, mountDir string) func() bool {
+	return context.AfterFunc(ctx, func() {
+		if err := forceUmountFn(mountDir); err != nil {
+			log.Printf("backup: force umount on cancel %s: %v", mountDir, err)
+		}
+	})
 }
 
 // CleanupOrphanedMounts tears down any /tmp/smoothnas-backup-* mounts and
