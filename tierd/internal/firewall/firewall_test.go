@@ -28,6 +28,9 @@ func TestGenerateRulesetNoProtocols(t *testing.T) {
 	if !strings.Contains(ruleset, "tcp dport 22 accept") {
 		t.Error("missing SSH rule")
 	}
+	if !strings.Contains(ruleset, "tcp dport 80 accept") {
+		t.Error("missing HTTP redirect rule")
+	}
 	if !strings.Contains(ruleset, "tcp dport 443 accept") {
 		t.Error("missing HTTPS rule")
 	}
