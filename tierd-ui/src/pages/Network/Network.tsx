@@ -968,7 +968,7 @@ export default function Network() {
 
       {pending && (
         <div className="safe-apply-banner">
-          <span>{t('network.pending.message', { seconds: pending.revert_in || '?' })}</span>
+          <span>{t('network.pending.message', { seconds: pending.remaining_seconds ?? pending.revert_in ?? '?' })}</span>
           <button className="btn primary" onClick={confirm}>{t('network.pending.confirm')}</button>
           <button className="btn danger" onClick={revert}>{t('network.pending.revert')}</button>
         </div>

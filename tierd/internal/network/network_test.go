@@ -570,3 +570,58 @@ func TestSafeApplyBackupRestore(t *testing.T) {
 		t.Fatalf("expected original after revert, got %s", string(data))
 	}
 }
+
+func TestReloadNetworkdReconfiguresManagedLinks(t *testing.T) {
+	var calls []string
+	run := func(name string, args ...string) ([]byte, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		if len(args) >= 1 && args[0] == "list" {
+			return []byte(`{"Interfaces":[` +
+				`{"Name":"lo","AdministrativeState":"unmanaged"},` +
+				`{"Name":"eth0","AdministrativeState":"unmanaged"},` +
+				`{"Name":"bond0","AdministrativeState":"configured"},` +
+				`{"Name":"bond0.100","AdministrativeState":"configuring"}` +
+				`]}`), nil
+		}
+		return nil, nil
+	}
+
+	if err := reloadNetworkdWithRunner(run); err != nil {
+		t.Fatalf("reloadNetworkdWithRunner: %v", err)
+	}
+
+	want := []string{
+		"networkctl reload",
+		"networkctl list --json=short --no-pager",
+		"networkctl reconfigure bond0 bond0.100",
+	}
+	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestReloadNetworkdSkipsReconfigureWithoutManagedLinks(t *testing.T) {
+	var calls []string
+	run := func(name string, args ...string) ([]byte, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		if len(args) >= 1 && args[0] == "list" {
+			return []byte(`{"Interfaces":[` +
+				`{"Name":"lo","AdministrativeState":"unmanaged"},` +
+				`{"Name":"eth0","AdministrativeState":"unmanaged"}` +
+				`]}`), nil
+		}
+		return nil, nil
+	}
+
+	if err := reloadNetworkdWithRunner(run); err != nil {
+		t.Fatalf("reloadNetworkdWithRunner: %v", err)
+	}
+
+	want := []string{
+		"networkctl reload",
+		"networkctl list --json=short --no-pager",
+	}
+	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
+	}
+}

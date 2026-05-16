@@ -1,6 +1,7 @@
 package network
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -253,10 +254,55 @@ func (s *SafeApply) restore() error {
 	return nil
 }
 
+type commandRunner func(name string, args ...string) ([]byte, error)
+
 func reloadNetworkd() error {
-	cmd := exec.Command("networkctl", "reload")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	return reloadNetworkdWithRunner(func(name string, args ...string) ([]byte, error) {
+		return exec.Command(name, args...).CombinedOutput()
+	})
+}
+
+func reloadNetworkdWithRunner(run commandRunner) error {
+	if out, err := run("networkctl", "reload"); err != nil {
 		return fmt.Errorf("networkctl reload: %s: %w", strings.TrimSpace(string(out)), err)
 	}
+
+	out, err := run("networkctl", "list", "--json=short", "--no-pager")
+	if err != nil {
+		return fmt.Errorf("networkctl list: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	links, err := managedNetworkdLinks(out)
+	if err != nil {
+		return fmt.Errorf("networkctl list: %w", err)
+	}
+	if len(links) == 0 {
+		return nil
+	}
+
+	args := append([]string{"reconfigure"}, links...)
+	if out, err := run("networkctl", args...); err != nil {
+		return fmt.Errorf("networkctl reconfigure: %s: %w", strings.TrimSpace(string(out)), err)
+	}
 	return nil
+}
+
+func managedNetworkdLinks(data []byte) ([]string, error) {
+	var payload struct {
+		Interfaces []struct {
+			Name                string `json:"Name"`
+			AdministrativeState string `json:"AdministrativeState"`
+		} `json:"Interfaces"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, fmt.Errorf("parse json: %w", err)
+	}
+
+	var links []string
+	for _, link := range payload.Interfaces {
+		if link.Name == "" || link.Name == "lo" || link.AdministrativeState == "unmanaged" {
+			continue
+		}
+		links = append(links, link.Name)
+	}
+	return links, nil
 }
