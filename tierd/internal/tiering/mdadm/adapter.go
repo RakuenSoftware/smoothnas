@@ -6,6 +6,7 @@
 package mdadm
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -1178,17 +1179,30 @@ func (a *Adapter) CreateNamespace(spec tiering.NamespaceSpec) (*tiering.Namespac
 			Cause:   err,
 		}
 	}
+	policyTargetIDs := append([]string(nil), spec.PolicyTargetIDs...)
+	if len(policyTargetIDs) == 0 {
+		var idsErr error
+		policyTargetIDs, idsErr = a.policyTargetIDsForPool(poolName)
+		if idsErr != nil {
+			return nil, &tiering.AdapterError{
+				Kind:    tiering.ErrTransient,
+				Message: "list namespace policy targets",
+				Cause:   idsErr,
+			}
+		}
+	}
 
 	ns := &db.ManagedNamespaceRow{
-		Name:            spec.Name,
-		PlacementDomain: poolName,
-		BackendKind:     BackendKind,
-		NamespaceKind:   spec.NamespaceKind,
-		ExposedPath:     mountPath,
-		PinState:        "none",
-		Health:          "healthy",
-		PlacementState:  "placed",
-		BackendRef:      bref,
+		Name:                spec.Name,
+		PlacementDomain:     poolName,
+		BackendKind:         BackendKind,
+		NamespaceKind:       spec.NamespaceKind,
+		ExposedPath:         mountPath,
+		PinState:            "none",
+		Health:              "healthy",
+		PlacementState:      "placed",
+		BackendRef:          bref,
+		PolicyTargetIDsJSON: policyTargetIDsJSON(policyTargetIDs),
 	}
 	if ns.NamespaceKind == "" {
 		ns.NamespaceKind = "filespace"
@@ -1221,6 +1235,47 @@ func (a *Adapter) CreateNamespace(spec tiering.NamespaceSpec) (*tiering.Namespac
 		PlacementState: "placed",
 		BackendRef:     bref,
 	}, nil
+}
+
+func (a *Adapter) policyTargetIDsForPool(poolName string) ([]string, error) {
+	targets, err := a.store.ListTierTargets()
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if target.PlacementDomain == poolName && target.BackendKind == BackendKind {
+			ids = append(ids, target.ID)
+		}
+	}
+	return ids, nil
+}
+
+func policyTargetIDsJSON(ids []string) string {
+	if len(ids) == 0 {
+		return "[]"
+	}
+	data, err := json.Marshal(ids)
+	if err != nil {
+		return "[]"
+	}
+	return string(data)
+}
+
+func policyTargetIDsEqual(raw string, ids []string) bool {
+	var got []string
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		return false
+	}
+	if len(got) != len(ids) {
+		return false
+	}
+	for i := range got {
+		if got[i] != ids[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // DestroyNamespace tears down a managed namespace and all of its backing
@@ -1606,15 +1661,25 @@ func (a *Adapter) Reconcile() error {
 			continue
 		}
 		bref := backingRefManagedNamespace(pool.Name)
-		if _, err := a.store.GetManagedNamespaceByBackingRef(bref, BackendKind); err == nil {
+		if existing, err := a.store.GetManagedNamespaceByBackingRef(bref, BackendKind); err == nil {
+			if ids, idsErr := a.policyTargetIDsForPool(pool.Name); idsErr == nil && !policyTargetIDsEqual(existing.PolicyTargetIDsJSON, ids) {
+				if setErr := a.store.SetManagedNamespacePolicyTargetIDs(existing.ID, ids); setErr != nil {
+					log.Printf("mdadm reconcile: update namespace policy targets for pool %q: %v", pool.Name, setErr)
+				}
+			}
 			continue // namespace already exists
 		}
 		log.Printf("mdadm reconcile: auto-creating namespace for pool %q", pool.Name)
+		policyTargetIDs, idsErr := a.policyTargetIDsForPool(pool.Name)
+		if idsErr != nil {
+			log.Printf("mdadm reconcile: list policy targets for pool %q: %v", pool.Name, idsErr)
+		}
 		if _, nsErr := a.CreateNamespace(tiering.NamespaceSpec{
 			Name:            pool.Name,
 			PlacementDomain: pool.Name,
 			NamespaceKind:   "filespace",
 			ExposedPath:     filepath.Join("/mnt", pool.Name),
+			PolicyTargetIDs: policyTargetIDs,
 		}); nsErr != nil {
 			log.Printf("mdadm reconcile: failed to create namespace for pool %q: %v", pool.Name, nsErr)
 		}

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -439,6 +440,29 @@ func (s *Store) CreateManagedNamespace(ns *ManagedNamespaceRow) error {
 		return fmt.Errorf("create managed namespace: %w", err)
 	}
 	return nil
+}
+
+// SetManagedNamespacePolicyTargetIDs replaces the namespace's policy target
+// list and bumps intent_revision so placement planners see the namespace
+// contract changed.
+func (s *Store) SetManagedNamespacePolicyTargetIDs(id string, targetIDs []string) error {
+	data, err := json.Marshal(targetIDs)
+	if err != nil {
+		return err
+	}
+	ns, err := s.GetManagedNamespace(id)
+	if err != nil {
+		return err
+	}
+	newRevision := ns.IntentRevision + 1
+	_, err = s.db.Exec(`
+		UPDATE managed_namespaces
+		SET policy_target_ids_json = ?, intent_revision = ?, updated_at = ?
+		WHERE id = ?`, string(data), newRevision, nowUTC(), id)
+	if err != nil {
+		return fmt.Errorf("set managed namespace policy targets: %w", err)
+	}
+	return s.invalidateMovementJobsByNamespaceIntent(id, newRevision)
 }
 
 // GetManagedNamespace returns the namespace with the given id.

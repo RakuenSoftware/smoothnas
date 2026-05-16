@@ -163,6 +163,44 @@ func TestGenerateNetworkFileDualStackDHCP(t *testing.T) {
 	if !strings.Contains(content, "DHCP=yes") {
 		t.Error("dual-stack DHCP should output DHCP=yes")
 	}
+	if strings.Count(content, "DHCP=") != 1 {
+		t.Fatalf("dual-stack DHCP should emit exactly one DHCP directive:\n%s", content)
+	}
+}
+
+func TestRemoveLegacyCatchAllDHCPRemovesOnlyBroadFallback(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, LegacyDHCPNetworkFilename)
+	if err := os.WriteFile(legacy, []byte("[Match]\nType=ether\n\n[Network]\nDHCP=yes\nIPv6AcceptRA=yes\n"), 0o644); err != nil {
+		t.Fatalf("write legacy dhcp: %v", err)
+	}
+	if err := RemoveLegacyCatchAllDHCP(dir); err != nil {
+		t.Fatalf("RemoveLegacyCatchAllDHCP: %v", err)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy catch-all still present or stat failed: %v", err)
+	}
+
+	custom := filepath.Join(dir, LegacyDHCPNetworkFilename)
+	if err := os.WriteFile(custom, []byte("[Match]\nName=net3\n\n[Network]\nDHCP=yes\n"), 0o644); err != nil {
+		t.Fatalf("write custom dhcp: %v", err)
+	}
+	if err := RemoveLegacyCatchAllDHCP(dir); err != nil {
+		t.Fatalf("RemoveLegacyCatchAllDHCP custom: %v", err)
+	}
+	if _, err := os.Stat(custom); err != nil {
+		t.Fatalf("custom 10-dhcp.network should be preserved: %v", err)
+	}
+
+	if err := os.WriteFile(custom, []byte("[Match]\nName=net3\nType=ether\n\n[Network]\nDHCP=yes\n"), 0o644); err != nil {
+		t.Fatalf("write specific custom dhcp: %v", err)
+	}
+	if err := RemoveLegacyCatchAllDHCP(dir); err != nil {
+		t.Fatalf("RemoveLegacyCatchAllDHCP specific custom: %v", err)
+	}
+	if _, err := os.Stat(custom); err != nil {
+		t.Fatalf("custom DHCP with a specific match should be preserved: %v", err)
+	}
 }
 
 // --- Bond validation and generation ---

@@ -95,6 +95,101 @@ func TestStoreOpenPutGet(t *testing.T) {
 	}
 }
 
+func TestOpenWithRankAliasesStoresLogicalRanksOnPhysicalRank(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenWithRankAliases(
+		[]TierBacking{{Rank: 1, Name: "fastest", BackingMount: dir}},
+		map[int]int{2: 1, 3: 1},
+	)
+	if err != nil {
+		t.Fatalf("open aliases: %v", err)
+	}
+	rec := Record{Version: RecordVersion, TierIdx: 3, NamespaceID: NamespaceID("media")}
+	store.PutBlocking(99, 3, rec)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	store, err = OpenWithRankAliases(
+		[]TierBacking{{Rank: 1, Name: "fastest", BackingMount: dir}},
+		map[int]int{2: 1, 3: 1},
+	)
+	if err != nil {
+		t.Fatalf("reopen aliases: %v", err)
+	}
+	defer store.Close()
+
+	got, ok, err := store.Get(99, 3)
+	if err != nil || !ok {
+		t.Fatalf("get logical rank: ok=%v err=%v", ok, err)
+	}
+	if got.TierIdx != 3 {
+		t.Fatalf("TierIdx = %d, want 3", got.TierIdx)
+	}
+	if _, ok, err := store.Get(99, 2); err != nil || ok {
+		t.Fatalf("different logical alias rank should be isolated: ok=%v err=%v", ok, err)
+	}
+
+	ranks := map[int]int{}
+	if err := store.IterateAll(func(rank int, _ uint64, _ Record) error {
+		ranks[rank]++
+		return nil
+	}); err != nil {
+		t.Fatalf("iterate aliases: %v", err)
+	}
+	if ranks[3] != 1 {
+		t.Fatalf("IterateAll ranks = %v, want one logical rank 3 record", ranks)
+	}
+
+	store.PutBlocking(99, 2, Record{Version: RecordVersion, TierIdx: 2, HeatCounter: 44, NamespaceID: NamespaceID("media")})
+	time.Sleep(50 * time.Millisecond)
+	got, ok, err = store.Get(99, 2)
+	if err != nil || !ok {
+		t.Fatalf("get logical rank 2 after same-inode write: ok=%v err=%v", ok, err)
+	}
+	if got.TierIdx != 2 || got.HeatCounter != 44 {
+		t.Fatalf("logical rank 2 record = %+v, want TierIdx=2 HeatCounter=44", got)
+	}
+	got, ok, err = store.Get(99, 3)
+	if err != nil || !ok {
+		t.Fatalf("get logical rank 3 after same-inode write: ok=%v err=%v", ok, err)
+	}
+	if got.TierIdx != 3 {
+		t.Fatalf("logical rank 3 was overwritten by rank 2 record: %+v", got)
+	}
+}
+
+func TestMoveBetweenAliasedRanksKeepsRecord(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenWithRankAliases(
+		[]TierBacking{{Rank: 1, Name: "fastest", BackingMount: dir}},
+		map[int]int{3: 1},
+	)
+	if err != nil {
+		t.Fatalf("open aliases: %v", err)
+	}
+	defer store.Close()
+
+	const ino uint64 = 123
+	store.PutBlocking(ino, 1, Record{
+		Version:     RecordVersion,
+		TierIdx:     1,
+		HeatCounter: 77,
+		NamespaceID: NamespaceID("media"),
+	})
+	if err := store.Move(ino, 1, 3); err != nil {
+		t.Fatalf("move alias: %v", err)
+	}
+
+	got, ok, err := store.Get(ino, 3)
+	if err != nil || !ok {
+		t.Fatalf("get alias dest: ok=%v err=%v", ok, err)
+	}
+	if got.TierIdx != 3 || got.HeatCounter != 77 {
+		t.Fatalf("moved alias record = %+v, want TierIdx=3 HeatCounter=77", got)
+	}
+}
+
 // TestStoreConcurrentEnqueueFlushes drives every shard under concurrent
 // producers and asserts all records are readable after the store closes.
 func TestStoreConcurrentEnqueueFlushes(t *testing.T) {
@@ -476,4 +571,3 @@ func TestReconcilePreservesPinState(t *testing.T) {
 		t.Fatalf("TierIdx = %d, want 1 (reconciled to new tier)", got.TierIdx)
 	}
 }
-

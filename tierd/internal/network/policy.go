@@ -48,6 +48,12 @@ const (
 	// (10-<name>.network) so explicit operator configs win and only
 	// otherwise-unconfigured Ethernet NICs join the bond.
 	DefaultBondMembersFilename = "99-default-bond-members.network"
+
+	// LegacyDHCPNetworkFilename is the broad installer/fallback DHCP file
+	// used on older images. It matches every Ethernet NIC at prefix 10, so
+	// it wins before generated 10-<iface>.network files and before the
+	// default-bond catch-all member file.
+	LegacyDHCPNetworkFilename = "10-dhcp.network"
 )
 
 // ConfigStore is the subset of *db.Store the policy code uses. Defined
@@ -66,7 +72,7 @@ type ConfigStore interface {
 // The check looks at four sysfs files:
 //
 //   - <name>/device     present iff backed by real hardware
-//                       (filters out tunnels, bonds, bridges, veths)
+//     (filters out tunnels, bonds, bridges, veths)
 //   - <name>/wireless   present iff Wi-Fi (filtered out)
 //   - <name>/type       must read "1" (ARPHRD_ETHER)
 //   - <name>            non-empty name (skips "" / "lo" / "bond*")
@@ -185,6 +191,9 @@ func GenerateDefaultBondMembersNetwork() string {
 // plugged in later would unexpectedly get auto-bonded). Operators with
 // no NICs at first boot use the GUI to add a bond once cabling is in.
 func ApplyDefaultBondPolicy(store ConfigStore, networkDir, sysRoot string) error {
+	if err := RemoveLegacyCatchAllDHCP(networkDir); err != nil {
+		return fmt.Errorf("remove legacy DHCP catch-all: %w", err)
+	}
 	done, err := store.GetBoolConfig(NetworkBootstrapCompleteKey, false)
 	if err != nil {
 		return fmt.Errorf("read bootstrap marker: %w", err)
@@ -203,6 +212,9 @@ func writeDefaultBondFiles(store ConfigStore, networkDir, sysRoot string) error 
 	members, err := EnumeratePhysicalEthernet(sysRoot)
 	if err != nil {
 		return fmt.Errorf("enumerate physical ethernet: %w", err)
+	}
+	if err := RemoveLegacyCatchAllDHCP(networkDir); err != nil {
+		return fmt.Errorf("remove legacy DHCP catch-all: %w", err)
 	}
 
 	bond := DefaultBondPolicy(members)

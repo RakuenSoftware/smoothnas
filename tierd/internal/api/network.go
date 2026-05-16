@@ -165,6 +165,9 @@ func (h *NetworkHandler) configureInterface(w http.ResponseWriter, r *http.Reque
 	}
 
 	err := h.safeApply.Apply("Configure interface "+name, func() error {
+		if err := network.RemoveLegacyCatchAllDHCP(h.networkDir); err != nil {
+			return err
+		}
 		return network.WriteConfigFile(h.networkDir, "10-"+name+".network", network.GenerateNetworkFile(cfg))
 	})
 	if err != nil {
@@ -255,6 +258,9 @@ func (h *NetworkHandler) createBond(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := h.safeApply.Apply("Create bond "+bond.Name, func() error {
+		if err := network.RemoveLegacyCatchAllDHCP(h.networkDir); err != nil {
+			return err
+		}
 		if err := network.WriteConfigFile(h.networkDir, "05-"+bond.Name+".netdev", network.GenerateBondNetdev(bond)); err != nil {
 			return err
 		}
@@ -434,6 +440,9 @@ func (h *NetworkHandler) updateBond(w http.ResponseWriter, r *http.Request, name
 	}
 
 	err := h.safeApply.Apply("Update bond "+name, func() error {
+		if err := network.RemoveLegacyCatchAllDHCP(h.networkDir); err != nil {
+			return err
+		}
 		if err := network.WriteConfigFile(h.networkDir, "05-"+name+".netdev", network.GenerateBondNetdev(bond)); err != nil {
 			return err
 		}
