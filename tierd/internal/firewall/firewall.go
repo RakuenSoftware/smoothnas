@@ -1,8 +1,8 @@
 // Package firewall manages nftables rules for sharing protocol ports.
 //
 // tierd generates a complete nftables ruleset on every change. The base
-// ruleset allows SSH (22) and HTTPS (443). Sharing protocol ports are
-// added/removed dynamically as protocols are enabled/disabled.
+// ruleset allows SSH (22), HTTP redirect (80), and HTTPS (443). Sharing
+// protocol ports are added/removed dynamically as protocols are enabled/disabled.
 package firewall
 
 import (
@@ -79,6 +79,7 @@ func GenerateRuleset(enabledProtocols map[string]bool) string {
 	b.WriteString("        meta l4proto icmpv6 accept\n\n")
 	b.WriteString("        # Base services (always open).\n")
 	b.WriteString("        tcp dport 22 accept comment \"SSH\"\n")
+	b.WriteString("        tcp dport 80 accept comment \"HTTP redirect\"\n")
 	b.WriteString("        tcp dport 443 accept comment \"HTTPS\"\n")
 	b.WriteString("        tcp dport 8420 accept comment \"tierd API (localhost only via nginx)\"\n\n")
 
