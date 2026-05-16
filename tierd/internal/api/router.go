@@ -103,6 +103,12 @@ func newRouterFull(store *db.Store, version string, startTime time.Time, history
 				}
 				return ensureManagedSmoothfsPool(store, poolName)
 			})
+			arraysHandler.SetTierSlotPolicyUpdater(func(poolName, tierName string, targetFillPct, fullThresholdPct int) error {
+				return adapter.SetPolicy("mdadm:"+poolName+":"+tierName, tiering.TargetPolicy{
+					TargetFillPct:    targetFillPct,
+					FullThresholdPct: fullThresholdPct,
+				})
+			})
 			zfsHandler.SetAfterPoolImport(func(poolName string) error {
 				log.Printf("post-zfs-import reconcile for pool %q", poolName)
 				return adapter.Reconcile()

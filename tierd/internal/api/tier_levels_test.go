@@ -63,8 +63,8 @@ func TestAddTierLevelCreatesNewSlot(t *testing.T) {
 	if got["rank"] != float64(3) {
 		t.Errorf("rank = %v, want 3", got["rank"])
 	}
-	if got["target_fill_pct"] != float64(90) {
-		t.Errorf("target_fill_pct = %v, want 90", got["target_fill_pct"])
+	if got["target_fill_pct"] != float64(40) {
+		t.Errorf("target_fill_pct = %v, want 40", got["target_fill_pct"])
 	}
 	if got["full_threshold_pct"] != float64(90) {
 		t.Errorf("full_threshold_pct = %v, want 90", got["full_threshold_pct"])
@@ -104,15 +104,15 @@ func TestAddTierLevelDefaultsFillValues(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got["target_fill_pct"] != float64(95) {
-		t.Errorf("default target_fill_pct = %v, want 95", got["target_fill_pct"])
+	if got["target_fill_pct"] != float64(50) {
+		t.Errorf("default target_fill_pct = %v, want 50", got["target_fill_pct"])
 	}
 	if got["full_threshold_pct"] != float64(95) {
 		t.Errorf("default full_threshold_pct = %v, want 95", got["full_threshold_pct"])
 	}
 }
 
-func TestAddTierLevelSlowestUsesFullThresholdAsTargetFill(t *testing.T) {
+func TestAddTierLevelPreservesTargetFill(t *testing.T) {
 	h := newTestHandler(t)
 	seedTierForLevels(t, h, "store")
 
@@ -130,11 +130,11 @@ func TestAddTierLevelSlowestUsesFullThresholdAsTargetFill(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got["target_fill_pct"] != float64(90) {
-		t.Errorf("slowest target_fill_pct = %v, want 90", got["target_fill_pct"])
+	if got["target_fill_pct"] != float64(40) {
+		t.Errorf("target_fill_pct = %v, want 40", got["target_fill_pct"])
 	}
 	if got["full_threshold_pct"] != float64(90) {
-		t.Errorf("slowest full_threshold_pct = %v, want 90", got["full_threshold_pct"])
+		t.Errorf("full_threshold_pct = %v, want 90", got["full_threshold_pct"])
 	}
 }
 
@@ -260,7 +260,7 @@ func TestUpdateTierLevelValidatesTargetLessThanFull(t *testing.T) {
 	}
 }
 
-func TestUpdateTierLevelSlowestUsesFullThresholdAsTargetFill(t *testing.T) {
+func TestUpdateTierLevelPreservesTargetFill(t *testing.T) {
 	h := newTestHandler(t)
 	seedTierForLevels(t, h, "store")
 
@@ -276,11 +276,11 @@ func TestUpdateTierLevelSlowestUsesFullThresholdAsTargetFill(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got["target_fill_pct"] != float64(88) {
-		t.Errorf("slowest target_fill_pct = %v, want 88", got["target_fill_pct"])
+	if got["target_fill_pct"] != float64(40) {
+		t.Errorf("target_fill_pct = %v, want 40", got["target_fill_pct"])
 	}
 	if got["full_threshold_pct"] != float64(88) {
-		t.Errorf("slowest full_threshold_pct = %v, want 88", got["full_threshold_pct"])
+		t.Errorf("full_threshold_pct = %v, want 88", got["full_threshold_pct"])
 	}
 }
 

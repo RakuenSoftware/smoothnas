@@ -47,6 +47,9 @@ type ArraysHandler struct {
 	// LVM teardown in destroyTierPool so the mount point is free and the
 	// teardown cannot race with a re-created smoothfs mount during / after destruction.
 	destroyPoolNamespaces func(poolName string) error
+	// setTierSlotPolicy updates the fill/full policy for a tier slot and any
+	// adapter-owned policy cache that depends on it.
+	setTierSlotPolicy func(poolName, tierName string, targetFillPct, fullThresholdPct int) error
 	// pluginTierConsumers returns the names of every plugin holding a
 	// volume on the given tier pool. Called from tierConsumers so a
 	// pool with active plugin volumes can't be destroyed out from
@@ -75,6 +78,7 @@ func NewArraysHandler(store *db.Store) *ArraysHandler {
 		ensureNamespace:         func(string) error { return nil },
 		purgeBackupsForPath:     func(string) (int, error) { return 0, nil },
 		destroyPoolNamespaces:   func(string) error { return nil },
+		setTierSlotPolicy:       store.SetTierSlotFill,
 		pluginTierConsumers:     func(string) ([]string, error) { return nil, nil },
 	}
 }
@@ -105,6 +109,15 @@ func (h *ArraysHandler) SetPurgeBackupsForPath(fn func(string) (int, error)) {
 // destruction.
 func (h *ArraysHandler) SetDestroyPoolNamespaces(fn func(string) error) {
 	h.destroyPoolNamespaces = fn
+}
+
+// SetTierSlotPolicyUpdater wires the tier policy update path to the active
+// tiering adapter so API changes also refresh adapter-owned target state.
+func (h *ArraysHandler) SetTierSlotPolicyUpdater(fn func(poolName, tierName string, targetFillPct, fullThresholdPct int) error) {
+	if fn == nil {
+		fn = h.store.SetTierSlotFill
+	}
+	h.setTierSlotPolicy = fn
 }
 
 // invalidateAll clears the array cache. Volumes are read live on every

@@ -1019,8 +1019,8 @@ func (s *Store) MarkTierReconciled(name string) error {
 }
 
 // SetTierSlotFill updates the target-fill and full-threshold percentages for a
-// named tier slot within a pool. Values must be in the range [1, 100], and
-// target_fill_pct may not exceed full_threshold_pct.
+// named tier slot within a pool. Values must be in the range [1, 100]. The fill
+// target is the migration/drain target; the full threshold is the write hard cap.
 func (s *Store) SetTierSlotFill(poolName, slotName string, targetFillPct, fullThresholdPct int) error {
 	if err := ValidateTierInstanceName(poolName); err != nil {
 		return err
@@ -1035,8 +1035,8 @@ func (s *Store) SetTierSlotFill(poolName, slotName string, targetFillPct, fullTh
 	if fullThresholdPct < 1 || fullThresholdPct > 100 {
 		return fmt.Errorf("full_threshold_pct must be between 1 and 100")
 	}
-	if targetFillPct > fullThresholdPct {
-		return fmt.Errorf("target_fill_pct must be less than or equal to full_threshold_pct")
+	if targetFillPct >= fullThresholdPct {
+		return fmt.Errorf("target_fill_pct must be less than full_threshold_pct")
 	}
 
 	res, err := s.db.Exec(
@@ -1057,8 +1057,8 @@ func (s *Store) SetTierSlotFill(poolName, slotName string, targetFillPct, fullTh
 }
 
 // AddTierSlot inserts a new tier slot (level) into an existing pool. rank must
-// be unique within the pool and positive. targetFillPct must be less than or
-// equal to fullThresholdPct; both must be in [1, 100].
+// be unique within the pool and positive. targetFillPct must be less than
+// fullThresholdPct; both must be in [1, 100].
 func (s *Store) AddTierSlot(poolName, slotName string, rank, targetFillPct, fullThresholdPct int) error {
 	if err := ValidateTierInstanceName(poolName); err != nil {
 		return err
@@ -1076,8 +1076,8 @@ func (s *Store) AddTierSlot(poolName, slotName string, rank, targetFillPct, full
 	if fullThresholdPct < 1 || fullThresholdPct > 100 {
 		return fmt.Errorf("full_threshold_pct must be between 1 and 100")
 	}
-	if targetFillPct > fullThresholdPct {
-		return fmt.Errorf("target_fill_pct must be less than or equal to full_threshold_pct")
+	if targetFillPct >= fullThresholdPct {
+		return fmt.Errorf("target_fill_pct must be less than full_threshold_pct")
 	}
 
 	tx, err := s.db.Begin()

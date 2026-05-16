@@ -145,13 +145,6 @@ type rankedPoolTarget struct {
 	fullThresholdPct int
 }
 
-func effectiveTargetFillPct(rank, targetFillPct, fullThresholdPct, slowestRank int) int {
-	if rank == slowestRank && fullThresholdPct > 0 {
-		return fullThresholdPct
-	}
-	return targetFillPct
-}
-
 // candidate captures the planner's view of one file: where it currently
 // lives, how big it is, and what the user's pin state says.
 type candidate struct {
@@ -168,31 +161,19 @@ type candidate struct {
 // caps in bytes, so the bin-packer can account for admissions without
 // re-stat'ing.
 type tierCapacity struct {
-	totalBytes          int64
-	usedBytes           int64 // updated by planner as it places files
-	initialUsed         int64 // usedBytes at the start of this cycle, before bin-packing
-	targetCap           int64 // target_fill_pct of totalBytes
-	fullCap             int64 // full_threshold_pct of totalBytes
-	balanceToTargetFill bool
-	target              db.MdadmManagedTargetRow
+	totalBytes int64
+	usedBytes  int64 // updated by planner as it places files
+	targetCap  int64 // target_fill_pct of totalBytes
+	fullCap    int64 // full_threshold_pct of totalBytes
+	target     db.MdadmManagedTargetRow
 }
 
 // admissionCap returns the effective cap this tier should enforce during
-// the current planning cycle. Normal tiers admit up to fullCap — the
-// planner only demotes once a tier has actually crossed its hard cap.
-// A tier that starts the cycle already above fullCap enters "drain mode":
-// its effective cap falls back to targetCap so the bin-packer keeps
-// spilling files out until usage drops below the soft cap. During
-// spindown-active maintenance, every tier balances directly to targetCap
-// so HDD standby starts with the SSD tier at target_fill_pct.
+// the current migration planning cycle. fullCap is the write/admission hard
+// cap, but migration drains back toward targetCap, using fullCap only as the
+// fallback when lower tiers cannot absorb a file at their own fill targets.
 func (c *tierCapacity) admissionCap() int64 {
-	if c.balanceToTargetFill {
-		return c.targetCap
-	}
-	if c.initialUsed > c.fullCap {
-		return c.targetCap
-	}
-	return c.fullCap
+	return c.targetCap
 }
 
 // planPoolPlacement gathers every file in a pool, runs a size-aware
@@ -274,24 +255,15 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 		total := int64(st.Blocks) * int64(st.Bsize)
 		used := total - int64(st.Bavail)*int64(st.Bsize)
 		targetPct := int64(50)
-		if rt.fullThresholdPct > 0 {
-			// fullThresholdPct is authoritative for the hard cap; target_fill
-			// is looked up separately by poolRankedTargets.
-		}
-		effectiveTargetPct := effectiveTargetFillPct(
-			rt.rank, rt.targetFillPct, rt.fullThresholdPct, ranked[len(ranked)-1].rank,
-		)
-		if effectiveTargetPct > 0 {
-			targetPct = int64(effectiveTargetPct)
+		if rt.targetFillPct > 0 {
+			targetPct = int64(rt.targetFillPct)
 		}
 		caps[rt.rank] = &tierCapacity{
-			totalBytes:          total,
-			usedBytes:           used,
-			initialUsed:         used,
-			targetCap:           total * targetPct / 100,
-			fullCap:             total * int64(max1(rt.fullThresholdPct, 95)) / 100,
-			balanceToTargetFill: maintenanceMode == placementMaintenanceSpindownActive,
-			target:              rt.target,
+			totalBytes: total,
+			usedBytes:  used,
+			targetCap:  total * targetPct / 100,
+			fullCap:    total * int64(max1(rt.fullThresholdPct, 95)) / 100,
+			target:     rt.target,
 		}
 	}
 
@@ -574,25 +546,20 @@ func backingDevicesStandbyBlocked(devices []string) (bool, string) {
 // than preferredRank whose remaining budget (cap - usedBytes) can absorb
 // size. Two passes:
 //
-//	Pass A — each tier's admissionCap() is honoured. For tiers that did
-//	  not start the cycle over full_threshold_pct that is fullCap, so
-//	  files are allowed to fill the fastest tier all the way up to the
-//	  hard cap before spilling; for tiers already over full_threshold_pct
-//	  it collapses to targetCap so the tier drains back to its soft cap
-//	  before re-accepting new placements.
-//	Pass B — fall back to fullCap everywhere. Only reached when Pass A
-//	  refuses every tier from preferred downward; this keeps oversized
-//	  or mid-drain tiers from stranding a file when another tier still
-//	  has hard-cap room.
+//	Pass A — each tier's target_fill_pct is honoured so migration drains
+//	  excess data down to slower tiers.
+//	Pass B — fall back to full_threshold_pct everywhere. Only reached when
+//	  Pass A refuses every tier from preferred downward; this keeps oversized
+//	  or fully packed pools from stranding a file when another tier still has
+//	  hard-cap room.
 //
 // Returns the rank of the tier that accepted the file, or the preferred
 // rank if no admission succeeded (in which case the caller just leaves
 // the file where it is — assignments[] becomes a no-op compared to its
 // current rank).
 func admitWithFallback(caps map[int]*tierCapacity, ranked []rankedPoolTarget, preferredRank int, size int64) int {
-	// Pass A: honour each tier's admissionCap (fullCap normally, targetCap
-	// when the tier is draining). "Preferred" is usually fastest, so the
-	// scan walks ranks ascending (fastest → slowest) from there.
+	// Pass A: honour each tier's fill target. "Preferred" is usually fastest,
+	// so the scan walks ranks ascending (fastest → slowest) from there.
 	for _, rt := range ranked {
 		if rt.rank < preferredRank {
 			continue
@@ -776,14 +743,6 @@ func (a *Adapter) poolRankedTargets(poolName string) []rankedPoolTarget {
 		})
 	}
 	sort.Slice(ranked, func(i, j int) bool { return ranked[i].rank < ranked[j].rank })
-	if len(ranked) > 0 {
-		slowestRank := ranked[len(ranked)-1].rank
-		for i := range ranked {
-			ranked[i].targetFillPct = effectiveTargetFillPct(
-				ranked[i].rank, ranked[i].targetFillPct, ranked[i].fullThresholdPct, slowestRank,
-			)
-		}
-	}
 	return ranked
 }
 
