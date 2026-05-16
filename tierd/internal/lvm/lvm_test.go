@@ -9,12 +9,12 @@ import (
 )
 
 func TestValidateFilesystem(t *testing.T) {
-	for _, fs := range []string{"xfs", "ext4"} {
+	for _, fs := range []string{"xfs", "ext4", "btrfs", "bcachefs"} {
 		if err := ValidateFilesystem(fs); err != nil {
 			t.Errorf("ValidateFilesystem(%q) unexpected error: %v", fs, err)
 		}
 	}
-	for _, fs := range []string{"", "btrfs", "zfs", "ntfs"} {
+	for _, fs := range []string{"", "zfs", "ntfs"} {
 		if err := ValidateFilesystem(fs); err == nil {
 			t.Errorf("ValidateFilesystem(%q) should fail", fs)
 		}

@@ -17,6 +17,7 @@ require (
 )
 
 require (
+	github.com/RakuenSoftware/nonraid v0.0.0-20260513211115-f1f6d113a548 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/mdlayher/genetlink v1.4.0 // indirect
 	github.com/mdlayher/netlink v1.11.1 // indirect

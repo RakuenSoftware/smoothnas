@@ -1853,6 +1853,10 @@ func (h *ArraysHandler) updateTierLevel(w http.ResponseWriter, r *http.Request, 
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := syncManagedSmoothfsAdmissionThreshold(h.store, poolName); err != nil {
+		serverError(w, fmt.Errorf("sync smoothfs admission threshold: %w", err))
+		return
+	}
 
 	slot, err = h.store.GetTierSlot(poolName, levelName)
 	if err != nil {

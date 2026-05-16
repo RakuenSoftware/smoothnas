@@ -44,6 +44,7 @@ func newRouterFull(store *db.Store, version string, startTime time.Time, history
 	authHandler := sgauth.NewHandler("tierd", sessions, rateLimiter, users)
 	disksHandler := NewDisksHandler(store, historyStore, alarmStore)
 	arraysHandler := NewArraysHandler(store)
+	nonRaidHandler := NewNonRaidHandler(store)
 	arraysHandler.ResumeDestroyingPools()
 	// Plugin tier consumers — phase 03 of the plugin proposal.
 	// Tier-deletion preflight refuses to destroy a pool that has
@@ -179,6 +180,8 @@ func newRouterFull(store *db.Store, version string, startTime time.Time, history
 			disksHandler.Route(w, r)
 		case strings.HasPrefix(path, "/api/arrays"):
 			arraysHandler.Route(w, r)
+		case strings.HasPrefix(path, "/api/nonraid/"):
+			nonRaidHandler.Route(w, r)
 		case strings.HasPrefix(path, "/api/tiers"):
 			arraysHandler.Route(w, r)
 		case strings.HasPrefix(path, "/api/pools"):

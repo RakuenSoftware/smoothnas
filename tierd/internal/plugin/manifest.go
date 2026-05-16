@@ -43,125 +43,125 @@ const (
 // Manifest is the parsed in-memory form of smoothnas-plugin.yaml.
 // Field-level validation lives in ValidateManifest.
 type Manifest struct {
-	APIVersion string        `yaml:"apiVersion" json:"apiVersion"`
-	Kind       string        `yaml:"kind" json:"kind"`
-	Metadata   Metadata      `yaml:"metadata" json:"metadata"`
-	Artifact   Artifact      `yaml:"artifact" json:"artifact"`
-	Container  Container     `yaml:"container" json:"container"`
-	Instances  Instances     `yaml:"instances" json:"instances"`
-	Volumes    []Volume      `yaml:"volumes" json:"volumes"`
-	Ports      []Port        `yaml:"ports" json:"ports"`
-	UI         *UI           `yaml:"ui,omitempty" json:"ui,omitempty"`
-	Profiles   []string      `yaml:"profiles" json:"profiles"`
-	Config     []ConfigField `yaml:"config" json:"config"`
+	APIVersion string        `json:"apiVersion" yaml:"apiVersion"`
+	Kind       string        `json:"kind" yaml:"kind"`
+	Metadata   Metadata      `json:"metadata" yaml:"metadata"`
+	Artifact   Artifact      `json:"artifact" yaml:"artifact"`
+	Container  Container     `json:"container" yaml:"container"`
+	Instances  Instances     `json:"instances" yaml:"instances"`
+	Volumes    []Volume      `json:"volumes,omitempty" yaml:"volumes"`
+	Ports      []Port        `json:"ports,omitempty" yaml:"ports"`
+	UI         *UI           `json:"ui,omitempty" yaml:"ui,omitempty"`
+	Profiles   []string      `json:"profiles,omitempty" yaml:"profiles"`
+	Config     []ConfigField `json:"config,omitempty" yaml:"config"`
 }
 
 // Metadata is the descriptive header.
 type Metadata struct {
-	Name        string `yaml:"name" json:"name"`
-	Version     string `yaml:"version" json:"version"`
-	Description string `yaml:"description" json:"description"`
-	Vendor      string `yaml:"vendor" json:"vendor"`
-	Homepage    string `yaml:"homepage" json:"homepage"`
+	Name        string `json:"name" yaml:"name"`
+	Version     string `json:"version" yaml:"version"`
+	Description string `json:"description,omitempty" yaml:"description"`
+	Vendor      string `json:"vendor,omitempty" yaml:"vendor"`
+	Homepage    string `json:"homepage,omitempty" yaml:"homepage"`
 }
 
 // Artifact is a tagged union over Type. The unselected sub-struct is
 // ignored at validation time, but yaml.v3 happily deserialises both
 // since we use inline embedding with a discriminator.
 type Artifact struct {
-	Type string `yaml:"type" json:"type"`
+	Type string `json:"type" yaml:"type"`
 
 	// oci-image fields
-	Image  string `yaml:"image,omitempty" json:"image,omitempty"`
-	Digest string `yaml:"digest,omitempty" json:"digest,omitempty"`
+	Image  string `json:"image,omitempty" yaml:"image,omitempty"`
+	Digest string `json:"digest,omitempty" yaml:"digest,omitempty"`
 
 	// lxc-distro fields
-	Distro   string   `yaml:"distro,omitempty" json:"distro,omitempty"`
-	Release  string   `yaml:"release,omitempty" json:"release,omitempty"`
-	Arch     string   `yaml:"arch,omitempty" json:"arch,omitempty"`
-	Packages []string `yaml:"packages,omitempty" json:"packages,omitempty"`
-	Setup    []string `yaml:"setup,omitempty" json:"setup,omitempty"`
+	Distro   string   `json:"distro,omitempty" yaml:"distro,omitempty"`
+	Release  string   `json:"release,omitempty" yaml:"release,omitempty"`
+	Arch     string   `json:"arch,omitempty" yaml:"arch,omitempty"`
+	Packages []string `json:"packages,omitempty" yaml:"packages,omitempty"`
+	Setup    []string `json:"setup,omitempty" yaml:"setup,omitempty"`
 }
 
 // Container holds runtime knobs that apply to both artifact types.
 type Container struct {
-	Command       []string  `yaml:"command,omitempty" json:"command,omitempty"`
-	WorkingDir    string    `yaml:"workingDir,omitempty" json:"workingDir,omitempty"`
-	User          string    `yaml:"user,omitempty" json:"user,omitempty"`
-	RestartPolicy string    `yaml:"restartPolicy" json:"restartPolicy"`
-	Resources     Resources `yaml:"resources,omitempty" json:"resources,omitempty"`
+	Command       []string  `json:"command,omitempty" yaml:"command,omitempty"`
+	WorkingDir    string    `json:"workingDir,omitempty" yaml:"workingDir,omitempty"`
+	User          string    `json:"user,omitempty" yaml:"user,omitempty"`
+	RestartPolicy string    `json:"restartPolicy" yaml:"restartPolicy"`
+	Resources     Resources `json:"resources,omitempty" yaml:"resources,omitempty"`
 }
 
 // Resources holds runtime resource limits that can be literal values or
 // interpolated from config keys. Values are rendered into HostConfig by the
 // payload builder rather than passed only as container environment.
 type Resources struct {
-	Memory string `yaml:"memory,omitempty" json:"memory,omitempty"`
+	Memory string `json:"memory,omitempty" yaml:"memory,omitempty"`
 }
 
 // Instances controls replica fan-out. When omitted entirely the
 // manifest is treated as { Count: 1, Configurable: false }.
 type Instances struct {
-	Count        int  `yaml:"count" json:"count"`
-	Configurable bool `yaml:"configurable" json:"configurable"`
+	Count        int  `json:"count" yaml:"count"`
+	Configurable bool `json:"configurable" yaml:"configurable"`
 }
 
 // Volume describes one persistent mount. PerInstance has no effect
 // when Count == 1.
 type Volume struct {
-	Name        string `yaml:"name" json:"name"`
-	Mode        string `yaml:"mode" json:"mode"`
-	Slot        string `yaml:"slot,omitempty" json:"slot,omitempty"`
-	MinSize     string `yaml:"minSize,omitempty" json:"minSize,omitempty"`
-	Bind        string `yaml:"bind" json:"bind"`
-	PerInstance bool   `yaml:"perInstance,omitempty" json:"perInstance,omitempty"`
+	Name        string `json:"name" yaml:"name"`
+	Mode        string `json:"mode" yaml:"mode"`
+	Slot        string `json:"slot,omitempty" yaml:"slot,omitempty"`
+	MinSize     string `json:"minSize,omitempty" yaml:"minSize,omitempty"`
+	Bind        string `json:"bind" yaml:"bind"`
+	PerInstance bool   `json:"perInstance,omitempty" yaml:"perInstance,omitempty"`
 }
 
 // Port describes one port the container listens on. Phase 04 reads
 // Expose to decide whether to render an nginx route. HostExpose is
 // reserved for phase 09 and ignored in phase 1–4.
 type Port struct {
-	Name       string `yaml:"name" json:"name"`
-	Port       int    `yaml:"port" json:"port"`
-	Protocol   string `yaml:"protocol" json:"protocol"`
-	Expose     bool   `yaml:"expose" json:"expose"`
-	HostExpose bool   `yaml:"hostExpose,omitempty" json:"hostExpose,omitempty"`
+	Name       string `json:"name" yaml:"name"`
+	Port       int    `json:"port" yaml:"port"`
+	Protocol   string `json:"protocol" yaml:"protocol"`
+	Expose     bool   `json:"expose" yaml:"expose"`
+	HostExpose bool   `json:"hostExpose,omitempty" yaml:"hostExpose,omitempty"`
 }
 
 // UI describes how the plugin's own HTTP UI should be embedded in
 // the SmoothNAS browser. Phase 07 owns the embed page.
 type UI struct {
-	Embed UIEmbed `yaml:"embed" json:"embed"`
+	Embed UIEmbed `json:"embed" yaml:"embed"`
 }
 
 // UIEmbed is the embed sub-block.
 type UIEmbed struct {
-	Path string `yaml:"path" json:"path"`
-	Auth string `yaml:"auth" json:"auth"`
+	Path string `json:"path" yaml:"path"`
+	Auth string `json:"auth" yaml:"auth"`
 }
 
 // ConfigField declares an operator-tunable parameter. The value
 // chosen at install time is recorded in plugin_config and passed
 // to the container as an environment variable named Key.
 type ConfigField struct {
-	Key         string         `yaml:"key" json:"key"`
-	Type        string         `yaml:"type" json:"type"`
-	Label       string         `yaml:"label,omitempty" json:"label,omitempty"`
-	Default     string         `yaml:"default,omitempty" json:"default,omitempty"`
-	Description string         `yaml:"description,omitempty" json:"description,omitempty"`
-	Secret      bool           `yaml:"secret,omitempty" json:"secret,omitempty"`
-	Options     []ConfigOption `yaml:"options,omitempty" json:"options,omitempty"`
-	Min         string         `yaml:"min,omitempty" json:"min,omitempty"`
-	Max         string         `yaml:"max,omitempty" json:"max,omitempty"`
-	Step        string         `yaml:"step,omitempty" json:"step,omitempty"`
-	Unit        string         `yaml:"unit,omitempty" json:"unit,omitempty"`
+	Key         string         `json:"key" yaml:"key"`
+	Type        string         `json:"type" yaml:"type"`
+	Label       string         `json:"label,omitempty" yaml:"label,omitempty"`
+	Default     string         `json:"default,omitempty" yaml:"default,omitempty"`
+	Description string         `json:"description,omitempty" yaml:"description,omitempty"`
+	Secret      bool           `json:"secret,omitempty" yaml:"secret,omitempty"`
+	Options     []ConfigOption `json:"options,omitempty" yaml:"options,omitempty"`
+	Min         string         `json:"min,omitempty" yaml:"min,omitempty"`
+	Max         string         `json:"max,omitempty" yaml:"max,omitempty"`
+	Step        string         `json:"step,omitempty" yaml:"step,omitempty"`
+	Unit        string         `json:"unit,omitempty" yaml:"unit,omitempty"`
 }
 
 // ConfigOption is one selectable value for a config field with
 // type=select. Values are still persisted as strings in plugin_config.
 type ConfigOption struct {
-	Value string `yaml:"value" json:"value"`
-	Label string `yaml:"label,omitempty" json:"label,omitempty"`
+	Value string `json:"value" yaml:"value"`
+	Label string `json:"label,omitempty" yaml:"label,omitempty"`
 }
 
 // ParseManifest parses a manifest YAML document. Strict decoding is

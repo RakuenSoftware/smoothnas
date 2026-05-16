@@ -155,6 +155,10 @@ func assignmentFromFSType(dev lsblkDevice) string {
 		return "zfs-pool"
 	case "LVM2_member":
 		return "lvm"
+	case "btrfs":
+		return "btrfs-array"
+	case "bcachefs":
+		return "bcachefs-array"
 	}
 	for _, child := range dev.Children {
 		if label := assignmentFromFSType(child); label != "" {

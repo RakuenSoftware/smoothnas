@@ -158,13 +158,13 @@ type TierSlot struct {
 	// BackingKind identifies the storage layer that supplies this slot:
 	// "mdadm" (default; array_id + pv_device are the block device),
 	// "zfs" (backing_ref is the zpool name; tier data goes in a dataset),
-	// "btrfs", "bcachefs" (reserved for follow-up work).
+	// "btrfs"/"bcachefs" (backing_ref is the array mount path).
 	BackingKind string `json:"backing_kind"`
 	// BackingRef is the kind-specific identifier:
 	//   mdadm    → block device path (/dev/md0), duplicated in PVDevice
 	//   zfs      → zpool name
-	//   btrfs    → device path or label
-	//   bcachefs → device path or UUID
+	//   btrfs    → array mount path
+	//   bcachefs → array mount path
 	BackingRef string `json:"backing_ref,omitempty"`
 }
 
@@ -703,8 +703,8 @@ func (s *Store) AssignArrayToTier(poolName, tierName string, arrayID int64, arra
 // ref is interpreted per kind:
 //
 //	zfs      — the zpool name (tierd will create a dataset on it at provision)
-//	btrfs    — path or label of the btrfs filesystem (reserved)
-//	bcachefs — path or UUID (reserved)
+//	btrfs    — mount path of the btrfs filesystem array
+//	bcachefs — mount path of the bcachefs filesystem array
 func (s *Store) AssignBackingToTier(poolName, tierName, kind, ref string) error {
 	if err := ValidateTierInstanceName(poolName); err != nil {
 		return err
@@ -724,6 +724,9 @@ func (s *Store) AssignBackingToTier(poolName, tierName, kind, ref string) error 
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return fmt.Errorf("backing ref required")
+	}
+	if (kind == "btrfs" || kind == "bcachefs") && !strings.HasPrefix(ref, "/mnt/") {
+		return fmt.Errorf("%s backing ref must be a mount path under /mnt", kind)
 	}
 
 	tx, err := s.db.Begin()
