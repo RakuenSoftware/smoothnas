@@ -82,7 +82,7 @@ func (h *NetworkHandler) Route(w http.ResponseWriter, r *http.Request) {
 // --- Interfaces ---
 
 func (h *NetworkHandler) listInterfaces(w http.ResponseWriter, r *http.Request) {
-	ifaces, err := network.ListInterfaces()
+	ifaces, err := network.ListInterfacesWithConfig(h.networkDir)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -159,7 +159,7 @@ func (h *NetworkHandler) configureInterface(w http.ResponseWriter, r *http.Reque
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := validateIPConfig(cfg.IPv4Addrs, cfg.IPv6Addrs, cfg.Gateway4, cfg.Gateway6, cfg.MTU); err != nil {
+	if err := validateIPConfig(cfg.IPv4Addrs, cfg.IPv6Addrs, cfg.Gateway4, cfg.Gateway6, cfg.MTU, cfg.DNS); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -182,7 +182,7 @@ func (h *NetworkHandler) configureInterface(w http.ResponseWriter, r *http.Reque
 // by both per-interface and bond updates. The Phase 3 Edit-IP form
 // drives both endpoints with the same field set; validation belongs
 // in one place so the rejected-on-bad-input behaviour matches.
-func validateIPConfig(ipv4, ipv6 []string, gw4, gw6 string, mtu int) error {
+func validateIPConfig(ipv4, ipv6 []string, gw4, gw6 string, mtu int, dns []string) error {
 	for _, addr := range ipv4 {
 		if err := network.ValidateIPv4CIDR(addr); err != nil {
 			return err
@@ -211,6 +211,11 @@ func validateIPConfig(ipv4, ipv6 []string, gw4, gw6 string, mtu int) error {
 			return err
 		}
 	}
+	for _, server := range dns {
+		if err := network.ValidateDNSServer(server); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -219,7 +224,7 @@ func validateIPConfig(ipv4, ipv6 []string, gw4, gw6 string, mtu int) error {
 func (h *NetworkHandler) routeBondsList(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		bonds, err := network.ListBonds()
+		bonds, err := network.ListBondsWithConfig(h.networkDir)
 		if err != nil {
 			serverError(w, err)
 			return
@@ -255,6 +260,10 @@ func (h *NetworkHandler) createBond(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+	}
+	if err := validateIPConfig(bond.IPv4Addrs, bond.IPv6Addrs, bond.Gateway4, bond.Gateway6, bond.MTU, bond.DNS); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	err := h.safeApply.Apply("Create bond "+bond.Name, func() error {
@@ -322,7 +331,7 @@ func (h *NetworkHandler) breakBond(w http.ResponseWriter, _ *http.Request, name 
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	bonds, err := network.ListBonds()
+	bonds, err := network.ListBondsWithConfig(h.networkDir)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -434,7 +443,7 @@ func (h *NetworkHandler) updateBond(w http.ResponseWriter, r *http.Request, name
 			return
 		}
 	}
-	if err := validateIPConfig(bond.IPv4Addrs, bond.IPv6Addrs, bond.Gateway4, bond.Gateway6, bond.MTU); err != nil {
+	if err := validateIPConfig(bond.IPv4Addrs, bond.IPv6Addrs, bond.Gateway4, bond.Gateway6, bond.MTU, bond.DNS); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -489,7 +498,7 @@ func (h *NetworkHandler) deleteBond(w http.ResponseWriter, r *http.Request, name
 func (h *NetworkHandler) routeVLANsList(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		vlans, err := network.ListVLANs()
+		vlans, err := network.ListVLANsWithConfig(h.networkDir)
 		if err != nil {
 			serverError(w, err)
 			return
@@ -517,6 +526,10 @@ func (h *NetworkHandler) createVLAN(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := network.ValidateInterfaceName(vlan.Parent); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateIPConfig(vlan.IPv4Addrs, vlan.IPv6Addrs, vlan.Gateway4, vlan.Gateway6, vlan.MTU, vlan.DNS); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -563,6 +576,10 @@ func (h *NetworkHandler) updateVLAN(w http.ResponseWriter, r *http.Request, name
 	vlan.Name = name
 
 	if err := network.ValidateVLANID(vlan.ID); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateIPConfig(vlan.IPv4Addrs, vlan.IPv6Addrs, vlan.Gateway4, vlan.Gateway6, vlan.MTU, vlan.DNS); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -626,6 +643,10 @@ func (h *NetworkHandler) routeDNS(w http.ResponseWriter, r *http.Request) {
 				jsonError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+		}
+		if err := network.SetDNS(dns); err != nil {
+			jsonError(w, err.Error(), http.StatusConflict)
+			return
 		}
 		fmt.Fprintf(w, `{"status":"updated"}`)
 	default:
