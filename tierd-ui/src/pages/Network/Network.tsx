@@ -144,6 +144,10 @@ export default function Network() {
   // backend validateIPConfig but keeps the UI error close to the input.
   function editFormError(): string {
     const f = editForm;
+    const dns = f.dns.split(',').map(s => s.trim()).filter(Boolean);
+    for (const server of dns) {
+      if (!isDNSServer(server)) return t('network.validate.dnsServer');
+    }
     if (f.dhcp) {
       // DHCP path: ignore static fields entirely.
       if (f.mtu) {
@@ -170,6 +174,16 @@ export default function Network() {
       if (Number.isNaN(n) || n < 576 || n > 9000) return t('network.validate.mtu');
     }
     return '';
+  }
+
+  function isDNSServer(value: string): boolean {
+    if (value.includes(':')) return true;
+    const parts = value.split('.');
+    return parts.length === 4 && parts.every(part => {
+      if (!/^\d{1,3}$/.test(part)) return false;
+      const n = Number(part);
+      return n >= 0 && n <= 255;
+    });
   }
 
   // ---- VLAN form (Phase 8) ----------------------------------------------

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -30,6 +31,7 @@ type Interface struct {
 	DHCP4      bool     `json:"dhcp4"`
 	DHCP6      bool     `json:"dhcp6"`
 	SLAAC      bool     `json:"slaac"`      // IPv6 SLAAC (accept RA)
+	DNS        []string `json:"dns"`        // upstream DNS servers configured on this link
 	Assignment string   `json:"assignment"` // "standalone", "bond-member", "unused"
 	BondName   string   `json:"bond_name"`  // non-empty if bond member
 }
@@ -82,6 +84,12 @@ func ValidateMTU(mtu int) error {
 
 // ListInterfaces discovers physical network interfaces via ip -j link show.
 func ListInterfaces() ([]Interface, error) {
+	return ListInterfacesWithConfig(defaultNetworkDir)
+}
+
+// ListInterfacesWithConfig discovers interfaces and overlays tierd-managed
+// systemd-networkd settings, including DNS, from networkDir.
+func ListInterfacesWithConfig(networkDir string) ([]Interface, error) {
 	out, err := exec.Command("ip", "-j", "link", "show").Output()
 	if err != nil {
 		return nil, fmt.Errorf("ip link show: %w", err)
@@ -115,6 +123,9 @@ func ListInterfaces() ([]Interface, error) {
 
 		// Get IP addresses.
 		iface.IPv4Addrs, iface.IPv6Addrs = getAddresses(r.Ifname)
+		if settings, ok := readNetworkFileSettings(networkDir, r.Ifname); ok {
+			iface.applySettings(settings)
+		}
 
 		// Get speed.
 		speedOut, _ := exec.Command("cat", "/sys/class/net/"+r.Ifname+"/speed").Output()
@@ -134,6 +145,119 @@ func ListInterfaces() ([]Interface, error) {
 	}
 
 	return ifaces, nil
+}
+
+type networkFileSettings struct {
+	IPv4Addrs []string
+	IPv6Addrs []string
+	Gateway4  string
+	Gateway6  string
+	DHCP4     bool
+	DHCP6     bool
+	SLAAC     bool
+	MTU       int
+	DNS       []string
+}
+
+func (iface *Interface) applySettings(settings networkFileSettings) {
+	if len(settings.IPv4Addrs) > 0 {
+		iface.IPv4Addrs = settings.IPv4Addrs
+	}
+	if len(settings.IPv6Addrs) > 0 {
+		iface.IPv6Addrs = settings.IPv6Addrs
+	}
+	iface.Gateway4 = settings.Gateway4
+	iface.Gateway6 = settings.Gateway6
+	iface.DHCP4 = settings.DHCP4
+	iface.DHCP6 = settings.DHCP6
+	iface.SLAAC = settings.SLAAC
+	if settings.MTU > 0 {
+		iface.MTU = settings.MTU
+	}
+	iface.DNS = settings.DNS
+}
+
+func readNetworkFileSettings(networkDir, name string) (networkFileSettings, bool) {
+	for _, filename := range networkFileCandidates(name) {
+		data, err := os.ReadFile(filepath.Join(networkDir, filename))
+		if err != nil {
+			continue
+		}
+		return parseNetworkFileSettings(data), true
+	}
+	return networkFileSettings{}, false
+}
+
+func networkFileCandidates(name string) []string {
+	candidates := []string{"10-" + name + ".network"}
+	if name == DefaultBondName {
+		candidates = append(candidates, DefaultBondNetworkFilename)
+	}
+	return candidates
+}
+
+func parseNetworkFileSettings(data []byte) networkFileSettings {
+	var settings networkFileSettings
+	section := ""
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.Trim(line, "[]")
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+
+		switch section {
+		case "Network":
+			applyNetworkSetting(&settings, key, value)
+		case "Link":
+			if key == "MTUBytes" {
+				if mtu, err := strconv.Atoi(value); err == nil {
+					settings.MTU = mtu
+				}
+			}
+		}
+	}
+	return settings
+}
+
+func applyNetworkSetting(settings *networkFileSettings, key, value string) {
+	switch key {
+	case "Address":
+		if strings.Contains(value, ":") {
+			settings.IPv6Addrs = append(settings.IPv6Addrs, value)
+		} else {
+			settings.IPv4Addrs = append(settings.IPv4Addrs, value)
+		}
+	case "Gateway":
+		if strings.Contains(value, ":") {
+			settings.Gateway6 = value
+		} else {
+			settings.Gateway4 = value
+		}
+	case "DHCP":
+		switch strings.ToLower(value) {
+		case "yes", "true":
+			settings.DHCP4 = true
+			settings.DHCP6 = true
+		case "ipv4":
+			settings.DHCP4 = true
+		case "ipv6":
+			settings.DHCP6 = true
+		}
+	case "IPv6AcceptRA":
+		settings.SLAAC = value == "true" || value == "yes"
+	case "DNS":
+		settings.DNS = append(settings.DNS, value)
+	}
 }
 
 // getAddresses returns IPv4 and IPv6 addresses for an interface.
@@ -339,6 +463,11 @@ func RemoveConfigFiles(networkDir, prefix string) error {
 
 // ListBonds discovers bond interfaces from the system.
 func ListBonds() ([]BondConfig, error) {
+	return ListBondsWithConfig(defaultNetworkDir)
+}
+
+// ListBondsWithConfig discovers bonds and overlays tierd-managed networkd settings.
+func ListBondsWithConfig(networkDir string) ([]BondConfig, error) {
 	out, err := exec.Command("ip", "-j", "link", "show", "type", "bond").Output()
 	if err != nil {
 		return nil, nil // No bonds or ip command doesn't support type filter.
@@ -375,6 +504,9 @@ func ListBonds() ([]BondConfig, error) {
 		ipv4, ipv6 := getAddresses(r.Ifname)
 		bond.IPv4Addrs = ipv4
 		bond.IPv6Addrs = ipv6
+		if settings, ok := readNetworkFileSettings(networkDir, r.Ifname); ok {
+			bond.applySettings(settings)
+		}
 
 		// Get MTU.
 		mtuOut, _ := exec.Command("cat", "/sys/class/net/"+r.Ifname+"/mtu").Output()
@@ -388,8 +520,31 @@ func ListBonds() ([]BondConfig, error) {
 	return bonds, nil
 }
 
+func (bond *BondConfig) applySettings(settings networkFileSettings) {
+	if len(settings.IPv4Addrs) > 0 {
+		bond.IPv4Addrs = settings.IPv4Addrs
+	}
+	if len(settings.IPv6Addrs) > 0 {
+		bond.IPv6Addrs = settings.IPv6Addrs
+	}
+	bond.Gateway4 = settings.Gateway4
+	bond.Gateway6 = settings.Gateway6
+	bond.DHCP4 = settings.DHCP4
+	bond.DHCP6 = settings.DHCP6
+	bond.SLAAC = settings.SLAAC
+	if settings.MTU > 0 {
+		bond.MTU = settings.MTU
+	}
+	bond.DNS = settings.DNS
+}
+
 // ListVLANs discovers VLAN interfaces from the system.
 func ListVLANs() ([]VLANConfig, error) {
+	return ListVLANsWithConfig(defaultNetworkDir)
+}
+
+// ListVLANsWithConfig discovers VLANs and overlays tierd-managed networkd settings.
+func ListVLANsWithConfig(networkDir string) ([]VLANConfig, error) {
 	out, err := exec.Command("ip", "-j", "link", "show", "type", "vlan").Output()
 	if err != nil {
 		return nil, nil
@@ -421,11 +576,32 @@ func ListVLANs() ([]VLANConfig, error) {
 		ipv4, ipv6 := getAddresses(r.Ifname)
 		vlan.IPv4Addrs = ipv4
 		vlan.IPv6Addrs = ipv6
+		if settings, ok := readNetworkFileSettings(networkDir, r.Ifname); ok {
+			vlan.applySettings(settings)
+		}
 
 		vlans = append(vlans, vlan)
 	}
 
 	return vlans, nil
+}
+
+func (vlan *VLANConfig) applySettings(settings networkFileSettings) {
+	if len(settings.IPv4Addrs) > 0 {
+		vlan.IPv4Addrs = settings.IPv4Addrs
+	}
+	if len(settings.IPv6Addrs) > 0 {
+		vlan.IPv6Addrs = settings.IPv6Addrs
+	}
+	vlan.Gateway4 = settings.Gateway4
+	vlan.Gateway6 = settings.Gateway6
+	vlan.DHCP4 = settings.DHCP4
+	vlan.DHCP6 = settings.DHCP6
+	vlan.SLAAC = settings.SLAAC
+	if settings.MTU > 0 {
+		vlan.MTU = settings.MTU
+	}
+	vlan.DNS = settings.DNS
 }
 
 // ListRoutes returns static routes (non-default, non-link-local) from the system.
