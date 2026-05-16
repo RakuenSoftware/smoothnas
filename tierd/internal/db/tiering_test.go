@@ -43,6 +43,25 @@ func makeNamespace(t *testing.T, store *db.Store, name, domain string) *db.Manag
 	return row
 }
 
+func TestSetManagedNamespacePolicyTargetIDs(t *testing.T) {
+	store := openTierStore(t)
+	ns := makeNamespace(t, store, "media", "media")
+
+	if err := store.SetManagedNamespacePolicyTargetIDs(ns.ID, []string{"fast", "slow"}); err != nil {
+		t.Fatalf("SetManagedNamespacePolicyTargetIDs: %v", err)
+	}
+	got, err := store.GetManagedNamespace(ns.ID)
+	if err != nil {
+		t.Fatalf("GetManagedNamespace: %v", err)
+	}
+	if got.PolicyTargetIDsJSON != `["fast","slow"]` {
+		t.Fatalf("policy targets = %s", got.PolicyTargetIDsJSON)
+	}
+	if got.IntentRevision != ns.IntentRevision+1 {
+		t.Fatalf("intent revision = %d, want %d", got.IntentRevision, ns.IntentRevision+1)
+	}
+}
+
 // placement_domain auto-create / auto-remove ---------------------------------
 
 func TestPlacementDomainAutoCreate(t *testing.T) {

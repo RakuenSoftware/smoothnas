@@ -404,16 +404,19 @@ func openPoolMetaStores(store *db.Store, adapter *mdadmadapter.Adapter) error {
 			continue
 		}
 		// Build the per-tier list for the meta store. Every assigned and
-		// mounted tier participates so cold metadata can spill from
-		// fastest down to slower tiers under capacity pressure — unless
-		// the pool was created with meta_on_fastest, in which case only
-		// the fastest tier's backing holds metadata.
+		// mounted tier participates unless the pool was created with
+		// meta_on_fastest. In that case every logical data-tier rank is
+		// aliased onto the fastest backing so metadata still works for
+		// files that migrate to slower tiers without waking those tiers for
+		// metadata I/O.
 		var tierBackings []meta.TierBacking
+		rankAliases := map[int]int{}
 		for i := range slots {
 			if slots[i].State != "assigned" {
 				continue
 			}
 			if p.MetaOnFastest && slots[i].Rank != fastest.Rank {
+				rankAliases[slots[i].Rank] = fastest.Rank
 				continue
 			}
 			bm := tier.PerTierBackingMount(p.Name, slots[i].Name)
@@ -430,7 +433,7 @@ func openPoolMetaStores(store *db.Store, adapter *mdadmadapter.Adapter) error {
 			log.Printf("meta: pool %s has no mounted tier backings; skipping", p.Name)
 			continue
 		}
-		ms, err := meta.Open(tierBackings)
+		ms, err := meta.OpenWithRankAliases(tierBackings, rankAliases)
 		if err != nil {
 			log.Printf("meta: open pool %s: %v", p.Name, err)
 			continue

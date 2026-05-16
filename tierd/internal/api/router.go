@@ -214,7 +214,7 @@ func newRouterFull(store *db.Store, version string, startTime time.Time, history
 			systemHandler.Route(w, r)
 		case strings.HasPrefix(path, "/api/tiering"):
 			tieringHandler.Route(w, r)
-		case strings.HasPrefix(path, "/api/smoothfs/pools"):
+		case strings.HasPrefix(path, "/api/smoothfs/"):
 			smoothfsHandler.Route(w, r)
 		case strings.HasPrefix(path, "/api/backup/"):
 			backupHandler.Route(w, r)

@@ -61,8 +61,9 @@ type TierBacking struct {
 //   - Iterate(tier, fn) walks one tier; IterateAll(fn) walks every tier
 //     and reports the rank for each record so callers can mutate in place.
 type PoolMetaStore struct {
-	tiers []*tierStore // sorted by rank ascending (fastest first)
-	cache *inodeCache
+	tiers      []*tierStore // sorted by rank ascending (fastest first)
+	rankStores map[int]*tierStore
+	cache      *inodeCache
 
 	closeOnce sync.Once
 }
@@ -80,13 +81,26 @@ type tierStore struct {
 // backing's `.tierd-meta/` subtree. tiers must be non-empty; the first
 // element after sorting becomes the canonical "fastest" target for Puts.
 func Open(tiers []TierBacking) (*PoolMetaStore, error) {
+	return OpenWithRankAliases(tiers, nil)
+}
+
+// OpenWithRankAliases opens the same physical tier stores as Open, then opens
+// per-logical-rank stores under an already-opened physical backing. This is
+// used by meta_on_fastest pools where metadata for all data tiers intentionally
+// lives on the fastest backing while callers still address records by data-tier
+// rank. Each logical rank gets a separate store so identical inode numbers on
+// different backing filesystems cannot collide.
+func OpenWithRankAliases(tiers []TierBacking, aliases map[int]int) (*PoolMetaStore, error) {
 	if len(tiers) == 0 {
 		return nil, fmt.Errorf("meta: Open requires at least one tier backing")
 	}
 	sorted := append([]TierBacking(nil), tiers...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Rank < sorted[j].Rank })
 
-	p := &PoolMetaStore{cache: newInodeCache(defaultMaxCacheEntries)}
+	p := &PoolMetaStore{
+		cache:      newInodeCache(defaultMaxCacheEntries),
+		rankStores: make(map[int]*tierStore, len(sorted)+len(aliases)),
+	}
 	for _, tb := range sorted {
 		ts, err := openTierStore(tb)
 		if err != nil {
@@ -96,12 +110,45 @@ func Open(tiers []TierBacking) (*PoolMetaStore, error) {
 			return nil, err
 		}
 		p.tiers = append(p.tiers, ts)
+		p.rankStores[ts.rank] = ts
 	}
+	for logicalRank, physicalRank := range aliases {
+		physical := p.rankStores[physicalRank]
+		if physical == nil {
+			for _, opened := range p.tiers {
+				_ = opened.close()
+			}
+			return nil, fmt.Errorf("meta: alias rank %d points at unknown rank %d", logicalRank, physicalRank)
+		}
+		if _, exists := p.rankStores[logicalRank]; exists {
+			continue
+		}
+		tb := TierBacking{
+			Rank:         logicalRank,
+			Name:         fmt.Sprintf("%s-rank-%d", physical.name, logicalRank),
+			BackingMount: physical.backingMount,
+		}
+		root := filepath.Join(physical.root, "logical-ranks", strconv.Itoa(logicalRank))
+		ts, err := openTierStoreAtRoot(tb, root)
+		if err != nil {
+			for _, opened := range p.tiers {
+				_ = opened.close()
+			}
+			return nil, err
+		}
+		p.tiers = append(p.tiers, ts)
+		p.rankStores[logicalRank] = ts
+	}
+	sort.Slice(p.tiers, func(i, j int) bool { return p.tiers[i].rank < p.tiers[j].rank })
 	return p, nil
 }
 
 func openTierStore(tb TierBacking) (*tierStore, error) {
 	root := filepath.Join(tb.BackingMount, ".tierd-meta")
+	return openTierStoreAtRoot(tb, root)
+}
+
+func openTierStoreAtRoot(tb TierBacking, root string) (*tierStore, error) {
 	if err := ensureDir(root); err != nil {
 		return nil, err
 	}
@@ -234,10 +281,8 @@ func (p *PoolMetaStore) FastestRoot() string {
 
 // tierByRank returns the tier-store with the given rank, or nil if none.
 func (p *PoolMetaStore) tierByRank(rank int) *tierStore {
-	for _, t := range p.tiers {
-		if t.rank == rank {
-			return t
-		}
+	if p.rankStores != nil {
+		return p.rankStores[rank]
 	}
 	return nil
 }
@@ -351,6 +396,9 @@ func (p *PoolMetaStore) Move(inode uint64, fromRank, toRank int) error {
 		return err
 	}
 	p.cache.put(inode, rec)
+	if src == dst {
+		return nil
+	}
 	if src != nil {
 		return src.shardFor(inode).del(InodeKey(inode))
 	}
@@ -389,7 +437,11 @@ func (p *PoolMetaStore) IterateAll(fn func(tierRank int, inode uint64, rec Recor
 	for _, t := range p.tiers {
 		rank := t.rank
 		err := p.Iterate(rank, func(ino uint64, rec Record) error {
-			return fn(rank, ino, rec)
+			recordRank := int(rec.TierIdx)
+			if recordRank == 0 || p.tierByRank(recordRank) == nil {
+				recordRank = rank
+			}
+			return fn(recordRank, ino, rec)
 		})
 		if err != nil {
 			return err
