@@ -202,6 +202,8 @@ func TestLifecycle_Materialise_OCIImage(t *testing.T) {
 	}
 	if len(rt.pullCalls) != 1 {
 		t.Errorf("pull calls = %v want 1", rt.pullCalls)
+	} else if want := "ghcr.io/ggml-org/llama.cpp@sha256:abababababababababababababababababababababababababababababababab"; rt.pullCalls[0] != want {
+		t.Errorf("pull ref = %q want %q", rt.pullCalls[0], want)
 	}
 	if len(rt.createCalls) != 1 {
 		t.Errorf("create calls = %d want 1", len(rt.createCalls))
@@ -215,6 +217,38 @@ func TestLifecycle_Materialise_OCIImage(t *testing.T) {
 	}
 	if rec.Instances[0].State != StateStopped {
 		t.Errorf("state = %q want stopped (post-create)", rec.Instances[0].State)
+	}
+}
+
+func TestDigestPinnedImageRefStripsTag(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	tests := []struct {
+		name  string
+		image string
+		want  string
+	}{
+		{
+			name:  "tagged ghcr image",
+			image: "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp:0.2.0-vulkan",
+			want:  "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp@" + digest,
+		},
+		{
+			name:  "registry port without tag",
+			image: "registry.local:5000/llama-cpp",
+			want:  "registry.local:5000/llama-cpp@" + digest,
+		},
+		{
+			name:  "registry port with tag",
+			image: "registry.local:5000/llama-cpp:vulkan",
+			want:  "registry.local:5000/llama-cpp@" + digest,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := digestPinnedImageRef(tt.image, digest); got != tt.want {
+				t.Fatalf("digestPinnedImageRef() = %q want %q", got, tt.want)
+			}
+		})
 	}
 }
 

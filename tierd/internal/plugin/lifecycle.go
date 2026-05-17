@@ -310,10 +310,7 @@ func (l *Lifecycle) materialiseImage(ctx context.Context, p *PluginRow, m *Manif
 		// any non-installed state on plugin_instances to render
 		// "pulling…" progress.
 		_ = l.setInstanceState(p.Name, 1, StatePulling, "")
-		ref := m.Artifact.Image
-		if m.Artifact.Digest != "" {
-			ref = m.Artifact.Image + "@" + m.Artifact.Digest
-		}
+		ref := digestPinnedImageRef(m.Artifact.Image, m.Artifact.Digest)
 		resolved, err := l.rt.PullImage(ctx, ref, nil)
 		if err != nil {
 			_ = l.setInstanceState(p.Name, 1, StateFailed, err.Error())
@@ -448,6 +445,15 @@ func splitImageTag(ref string) (string, string) {
 		return ref[:i], ref[i+1:]
 	}
 	return ref, ""
+}
+
+func digestPinnedImageRef(image, digest string) string {
+	if digest == "" {
+		return image
+	}
+	base, _, _ := strings.Cut(image, "@")
+	repo, _ := splitImageTag(base)
+	return repo + "@" + digest
 }
 
 // Start brings every instance of a plugin to the running state,
