@@ -246,6 +246,23 @@ func TestGenerateDefaultBondMembersNetworkSyntax(t *testing.T) {
 	}
 }
 
+func TestGenerateDefaultBondVethUnmanagedNetworkSyntax(t *testing.T) {
+	got := GenerateDefaultBondVethUnmanagedNetwork()
+	for _, want := range []string{
+		"[Match]",
+		"Name=veth*",
+		"[Link]",
+		"Unmanaged=yes",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("veth unmanaged file missing %q\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Bond=") {
+		t.Fatalf("veth unmanaged file must not enslave links\n%s", got)
+	}
+}
+
 func TestApplyDefaultBondPolicyHappyPath(t *testing.T) {
 	store := newStubConfigStore()
 	netDir := t.TempDir()
@@ -263,6 +280,7 @@ func TestApplyDefaultBondPolicyHappyPath(t *testing.T) {
 	for _, fn := range []string{
 		DefaultBondNetdevFilename,
 		DefaultBondNetworkFilename,
+		DefaultBondVethUnmanagedFilename,
 		DefaultBondMembersFilename,
 	} {
 		path := filepath.Join(netDir, fn)
@@ -286,6 +304,10 @@ func TestApplyDefaultBondPolicyHappyPath(t *testing.T) {
 	members, _ := os.ReadFile(filepath.Join(netDir, DefaultBondMembersFilename))
 	if !strings.Contains(string(members), "Bond="+DefaultBondName) {
 		t.Fatalf("members file missing Bond= directive\n%s", members)
+	}
+	vethUnmanaged, _ := os.ReadFile(filepath.Join(netDir, DefaultBondVethUnmanagedFilename))
+	if !strings.Contains(string(vethUnmanaged), "Name=veth*") || !strings.Contains(string(vethUnmanaged), "Unmanaged=yes") {
+		t.Fatalf("veth unmanaged file missing protection\n%s", vethUnmanaged)
 	}
 
 	done, _ := store.GetBoolConfig(NetworkBootstrapCompleteKey, false)
@@ -334,6 +356,13 @@ func TestApplyDefaultBondPolicyRefreshesExistingCatchAllAfterMarker(t *testing.T
 	}
 	if !strings.Contains(string(data), "!veth") || !strings.Contains(string(data), "!gow*") {
 		t.Fatalf("catch-all was not refreshed with runtime exclusions\n%s", data)
+	}
+	vethUnmanaged, err := os.ReadFile(filepath.Join(netDir, DefaultBondVethUnmanagedFilename))
+	if err != nil {
+		t.Fatalf("read veth unmanaged: %v", err)
+	}
+	if !strings.Contains(string(vethUnmanaged), "Name=veth*") || !strings.Contains(string(vethUnmanaged), "Unmanaged=yes") {
+		t.Fatalf("veth unmanaged file was not refreshed\n%s", vethUnmanaged)
 	}
 }
 
@@ -412,7 +441,7 @@ func TestApplyDefaultBondPolicyRevertibleMarkerAfterFileWriteFailure(t *testing.
 }
 
 // applyDefaultBondAndAssertFiles is a helper that applies the default
-// bond policy and asserts the three expected files were written.
+// bond policy and asserts the expected files were written.
 // Returns the netDir for the caller to inspect or extend.
 func applyDefaultBondAndAssertFiles(t *testing.T, store ConfigStore, sysRoot string) string {
 	t.Helper()
@@ -423,6 +452,7 @@ func applyDefaultBondAndAssertFiles(t *testing.T, store ConfigStore, sysRoot str
 	for _, fn := range []string{
 		DefaultBondNetdevFilename,
 		DefaultBondNetworkFilename,
+		DefaultBondVethUnmanagedFilename,
 		DefaultBondMembersFilename,
 	} {
 		if _, err := os.Stat(filepath.Join(netDir, fn)); err != nil {
@@ -447,6 +477,7 @@ func TestBreakBondRemovesBondFilesAndCatchAll(t *testing.T) {
 	for _, fn := range []string{
 		DefaultBondNetdevFilename,
 		DefaultBondNetworkFilename,
+		DefaultBondVethUnmanagedFilename,
 		DefaultBondMembersFilename,
 	} {
 		if _, err := os.Stat(filepath.Join(netDir, fn)); err == nil {
@@ -566,6 +597,7 @@ func TestRecreateDefaultBondClearsPerNICFilesAndRewritesBond(t *testing.T) {
 	for _, fn := range []string{
 		DefaultBondNetdevFilename,
 		DefaultBondNetworkFilename,
+		DefaultBondVethUnmanagedFilename,
 		DefaultBondMembersFilename,
 	} {
 		if _, err := os.Stat(filepath.Join(netDir, fn)); err != nil {
