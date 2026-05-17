@@ -260,10 +260,10 @@ jobs:
           rm -rf "$node_root"
           mkdir -p "$node_root"
           tar -C "$node_root" --strip-components=1 -xJf "$work_dir/$archive"
+          export PATH="$node_root/bin:$PATH"
           echo "$node_root/bin" >> "$GITHUB_PATH"
-          echo "NODE_OPTIONS=--dns-result-order=ipv4first" >> "$GITHUB_ENV"
-          "$node_root/bin/node" --version
-          "$node_root/bin/npm" --version
+          node --version
+          npm --version
 
       - uses: actions/setup-node@v4
         if: ${{ contains(matrix.runner, 'self-hosted') == false }}
