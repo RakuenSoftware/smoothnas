@@ -282,7 +282,7 @@ main() {
         SMOOTHNAS_PAYLOAD_DIR="$payload_dir" \
         INSTALLER_LANGUAGES="en:English nl:Nederlands" \
         INSTALLER_KERNEL_PACKAGES="" \
-        INSTALLER_GPU_FIRMWARE_PKGS="firmware-amd-graphics" \
+        INSTALLER_GPU_FIRMWARE_PKGS="${INSTALLER_GPU_FIRMWARE_PKGS:-}" \
         INSTALLER_GPU_KERNEL_MODULES="${INSTALLER_GPU_KERNEL_MODULES:-amdgpu radeon}" \
         ARCH="$DEB_ARCH" \
         PRODUCT_NAME="SmoothNAS" \
