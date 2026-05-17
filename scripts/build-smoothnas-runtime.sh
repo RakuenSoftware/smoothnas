@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build the SmoothNAS plugin runtime daemon from a pinned LXC2Docker commit.
+# Build the SmoothNAS plugin runtime daemon from LXC2Docker main by default.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 LXC2DOCKER_REPO="${LXC2DOCKER_REPO:-https://github.com/games-on-whales/LXC2Docker.git}"
-LXC2DOCKER_REF="${LXC2DOCKER_REF:-HEAD}"
+LXC2DOCKER_REF="${LXC2DOCKER_REF:-main}"
 BUILD_DIR="${PROJECT_DIR}/runtime/build/LXC2Docker"
 OUT="${PROJECT_DIR}/bin/docker-lxc-daemon"
 
