@@ -232,13 +232,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p deps/smoothkernel-out
-          gh release download "${{ needs.meta.outputs.smoothkernel_tag }}" \
-            --repo RakuenSoftware/smoothkernel \
-            --pattern '*.deb' \
-            --pattern 'SHA256SUMS' \
-            --dir deps/smoothkernel-out
-          (cd deps/smoothkernel-out && sha256sum -c SHA256SUMS)
+          for attempt in 1 2 3; do
+            rm -rf deps/smoothkernel-out
+            mkdir -p deps/smoothkernel-out
+            if gh release download "${{ needs.meta.outputs.smoothkernel_tag }}" \
+              --repo RakuenSoftware/smoothkernel \
+              --pattern '*.deb' \
+              --pattern 'SHA256SUMS' \
+              --dir deps/smoothkernel-out \
+              && (cd deps/smoothkernel-out && sha256sum -c SHA256SUMS); then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$((attempt * 15))"
+          done
           ls -lh deps/smoothkernel-out/
 
       - name: Checkout smoothiso

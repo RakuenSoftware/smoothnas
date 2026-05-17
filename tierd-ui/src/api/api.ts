@@ -345,6 +345,18 @@ export const api = {
   // --- Plugins (phase 06a backend; 6b/c/d add the UI that consumes these) ---
   listPlugins: () => apiFetch<{ plugins: any[] }>('GET', '/plugins'),
   getPlugin: (name: string) => apiFetch<any>('GET', `/plugins/${name}`),
+  getPluginCatalogLatest: (repo: string) =>
+    apiFetch<{
+      repo: string;
+      tagName: string;
+      releaseUrl: string;
+      manifests: Array<{
+        assetName: string;
+        downloadUrl: string;
+        manifestYaml: string;
+        manifest: any;
+      }>;
+    }>('GET', `/plugins/catalog/latest?repo=${encodeURIComponent(repo)}`),
   preflightPlugin: (req: { manifest: string; tierAssignments?: { default?: string; perVolume?: Record<string, string> } }) =>
     apiFetch<any>('POST', '/plugins/preflight', req),
   parsePlugin: (req: { manifest: string }) =>
