@@ -124,6 +124,8 @@ container:
   command:
     - "--model"
     - "\${MODEL_PATH}"
+    - "--temp"
+    - "\${LLAMA_ARG_TEMP}"
     - "--n-gpu-layers"
     - "\${N_GPU_LAYERS}"
     - "--ctx-size"
@@ -156,6 +158,14 @@ config:
     label: Model GGUF path
     default: "/models/default.gguf"
     description: Model file inside the container. The Models tab updates this after download.
+  - key: LLAMA_ARG_TEMP
+    type: number
+    label: Temperature
+    default: "0.8"
+    min: "0"
+    max: "2"
+    step: "0.01"
+    description: Sampling temperature passed to llama.cpp. Lower values are more deterministic.
   - key: N_GPU_LAYERS
     type: number
     label: GPU layers
@@ -247,6 +257,8 @@ container:
   command:
     - "--model"
     - "\${MODEL_PATH}"
+    - "--temp"
+    - "\${LLAMA_ARG_TEMP}"
     - "--n-gpu-layers"
     - "\${N_GPU_LAYERS}"
     - "--ctx-size"
@@ -279,6 +291,14 @@ config:
     label: Model GGUF path
     default: "/models/default.gguf"
     description: Model file inside the container. The Models tab updates this after download.
+  - key: LLAMA_ARG_TEMP
+    type: number
+    label: Temperature
+    default: "0.8"
+    min: "0"
+    max: "2"
+    step: "0.01"
+    description: Sampling temperature passed to llama.cpp. Lower values are more deterministic.
   - key: N_GPU_LAYERS
     type: number
     label: GPU layers
@@ -370,6 +390,8 @@ container:
   command:
     - "--model"
     - "\${MODEL_PATH}"
+    - "--temp"
+    - "\${LLAMA_ARG_TEMP}"
     - "--ctx-size"
     - "\${CTX_SIZE}"
     - "--parallel"
@@ -401,6 +423,14 @@ config:
     label: Model GGUF path
     default: "/models/default.gguf"
     description: Model file inside the container. The Models tab updates this after download.
+  - key: LLAMA_ARG_TEMP
+    type: number
+    label: Temperature
+    default: "0.8"
+    min: "0"
+    max: "2"
+    step: "0.01"
+    description: Sampling temperature passed to llama.cpp. Lower values are more deterministic.
   - key: CTX_SIZE
     type: number
     label: Context window

@@ -346,6 +346,7 @@ function ModelsTab({
   const [url, setUrl] = useState('');
   const [filename, setFilename] = useState('');
   const [sha256, setSha256] = useState('');
+  const [temperature, setTemperature] = useState(currentConfig.LLAMA_ARG_TEMP || '0.8');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [jobId, setJobId] = useState('');
@@ -385,6 +386,14 @@ function ModelsTab({
       setError(t('plugins.detail.models.error.url'));
       return;
     }
+    let parsedTemperature: number | undefined;
+    if (temperature.trim()) {
+      parsedTemperature = Number(temperature);
+      if (!Number.isFinite(parsedTemperature) || parsedTemperature < 0 || parsedTemperature > 2) {
+        setError(t('plugins.detail.models.error.temperature'));
+        return;
+      }
+    }
     setBusy(true);
     setError('');
     setJob(null);
@@ -392,6 +401,7 @@ function ModelsTab({
       url: url.trim(),
       ...(filename.trim() ? { filename: filename.trim() } : {}),
       ...(sha256.trim() ? { sha256: sha256.trim() } : {}),
+      ...(parsedTemperature !== undefined ? { temperature: parsedTemperature } : {}),
       start: true,
     })
       .then(resp => setJobId(resp.jobId))
@@ -401,6 +411,7 @@ function ModelsTab({
 
   const running = job?.status === 'running';
   const currentModel = currentConfig.MODEL_PATH || t('plugins.label.none');
+  const currentTemperature = currentConfig.LLAMA_ARG_TEMP || '0.8';
   const hostPath = volume?.Paths?.[1] ?? Object.values(volume?.Paths ?? {})[0] ?? '';
 
   return (
@@ -411,6 +422,8 @@ function ModelsTab({
       <dl className="plugin-kv-list">
         <dt>{t('plugins.detail.models.current')}</dt>
         <dd className="mono">{currentModel}</dd>
+        <dt>{t('plugins.detail.models.temperature.current')}</dt>
+        <dd className="mono">{currentTemperature}</dd>
         {hostPath && (
           <>
             <dt>{t('plugins.detail.models.volume')}</dt>
@@ -447,6 +460,18 @@ function ModelsTab({
           value={sha256}
           onChange={e => setSha256(e.target.value)}
           placeholder="sha256:..."
+          disabled={busy || running}
+        />
+
+        <label htmlFor="model-temperature">{t('plugins.detail.models.temperature')}</label>
+        <input
+          id="model-temperature"
+          type="number"
+          min="0"
+          max="2"
+          step="0.01"
+          value={temperature}
+          onChange={e => setTemperature(e.target.value)}
           disabled={busy || running}
         />
 
