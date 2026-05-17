@@ -19,6 +19,9 @@ type PluginsHandler struct {
 	lifecycle    *plugin.Lifecycle
 	catalog      *plugin.Catalog
 	tierProvider plugin.TierProvider
+
+	catalogHTTPClient *http.Client
+	catalogAPIBaseURL string
 }
 
 // NewPluginsHandler constructs a handler from the already-wired
@@ -86,6 +89,12 @@ func (h *PluginsHandler) Route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.parse(w, r)
+	case path == "/catalog/latest":
+		if r.Method != http.MethodGet {
+			jsonMethodNotAllowed(w)
+			return
+		}
+		h.catalogLatest(w, r)
 	case path == "/install":
 		if r.Method != http.MethodPost {
 			jsonMethodNotAllowed(w)

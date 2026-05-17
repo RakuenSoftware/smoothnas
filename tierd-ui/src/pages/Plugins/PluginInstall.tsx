@@ -4,7 +4,7 @@ import { useI18n } from '@rakuensoftware/smoothgui';
 import { api } from '../../api/api';
 import { extractError } from '../../utils/errors';
 import Spinner from '../../components/Spinner/Spinner';
-import { pluginCatalog, type CatalogEntry } from '../../data/pluginCatalog';
+import { pluginCatalogRepositories, type CatalogRepository } from '../../data/pluginCatalog';
 
 // ParsedManifest matches the JSON shape POST /api/plugins/parse
 // returns. Loose typing — the backend validates and the wizard
@@ -12,7 +12,7 @@ import { pluginCatalog, type CatalogEntry } from '../../data/pluginCatalog';
 type ParsedManifest = {
   apiVersion: string;
   kind: string;
-  metadata: { name: string; version: string; description?: string };
+  metadata: { name: string; version: string; description?: string; vendor?: string; homepage?: string };
   artifact: {
     type: string;
     image?: string;
@@ -53,6 +53,18 @@ type ManifestConfigField = {
   max?: string;
   step?: string;
   unit?: string;
+};
+
+type CatalogEntry = {
+  id: string;
+  name: string;
+  vendor: string;
+  description: string;
+  homepage?: string;
+  tags: string[];
+  manifestYaml: string;
+  releaseTag: string;
+  assetName: string;
 };
 
 type Tier = {
@@ -322,6 +334,29 @@ function SourceStep({
   // doesn't merge into stale paste content.
   const [mode, setMode] = useState<'catalog' | 'paste'>('catalog');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [catalogEntries, setCatalogEntries] = useState<CatalogEntry[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [catalogError, setCatalogError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    setCatalogLoading(true);
+    setCatalogError('');
+    Promise.all(pluginCatalogRepositories.map(repo =>
+      api.getPluginCatalogLatest(repo.repo)
+        .then(release => ({ entries: buildCatalogEntries(repo, release), error: '' }))
+        .catch(e => ({ entries: [] as CatalogEntry[], error: `${repo.repo}: ${extractError(e, 'Unable to load plugin catalog.')}` }))
+    ))
+      .then(results => {
+        if (cancelled) return;
+        setCatalogEntries(results.flatMap(result => result.entries));
+        setCatalogError(results.map(result => result.error).filter(Boolean).join('\n'));
+      })
+      .finally(() => {
+        if (!cancelled) setCatalogLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   function chooseCatalogEntry(entry: CatalogEntry) {
     setSelectedId(entry.id);
@@ -356,37 +391,41 @@ function SourceStep({
         <>
           <h2>{t('plugins.install.source.catalog.heading')}</h2>
           <p>{t('plugins.install.source.catalog.description')}</p>
-          <ul className="wizard-plugin-catalog">
-            {pluginCatalog.map(entry => (
-              <li
-                key={entry.id}
-                className={
-                  'wizard-plugin-card' +
-                  (selectedId === entry.id ? ' selected' : '')
-                }
-              >
-                <button
-                  type="button"
-                  className="wizard-plugin-card-button"
-                  onClick={() => chooseCatalogEntry(entry)}
-                  disabled={busy}
+          {catalogLoading && <Spinner loading={true} />}
+          {catalogError && <div className="wizard-error"><pre>{catalogError}</pre></div>}
+          {!catalogLoading && catalogEntries.length > 0 && (
+            <ul className="wizard-plugin-catalog">
+              {catalogEntries.map(entry => (
+                <li
+                  key={entry.id}
+                  className={
+                    'wizard-plugin-card' +
+                    (selectedId === entry.id ? ' selected' : '')
+                  }
                 >
-                  <div className="wizard-plugin-card-header">
-                    <span className="wizard-plugin-card-name">{entry.name}</span>
-                    <span className="wizard-plugin-card-vendor">{entry.vendor}</span>
-                  </div>
-                  <p className="wizard-plugin-card-description">{entry.description}</p>
-                  {entry.tags && entry.tags.length > 0 && (
-                    <div className="wizard-plugin-card-tags">
-                      {entry.tags.map(tag => (
-                        <span key={tag} className="wizard-plugin-card-tag">{tag}</span>
-                      ))}
+                  <button
+                    type="button"
+                    className="wizard-plugin-card-button"
+                    onClick={() => chooseCatalogEntry(entry)}
+                    disabled={busy}
+                  >
+                    <div className="wizard-plugin-card-header">
+                      <span className="wizard-plugin-card-name">{entry.name}</span>
+                      <span className="wizard-plugin-card-vendor">{entry.vendor}</span>
                     </div>
-                  )}
-                </button>
-              </li>
-            ))}
-          </ul>
+                    <p className="wizard-plugin-card-description">{entry.description}</p>
+                    {entry.tags.length > 0 && (
+                      <div className="wizard-plugin-card-tags">
+                        {entry.tags.map(tag => (
+                          <span key={tag} className="wizard-plugin-card-tag">{tag}</span>
+                        ))}
+                      </div>
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
           {selectedId && (
             <p className="wizard-plugin-catalog-hint">
               {t('plugins.install.source.catalog.selectedHint')}
@@ -409,6 +448,72 @@ function SourceStep({
       )}
     </>
   );
+}
+
+function buildCatalogEntries(repo: CatalogRepository, release: {
+  repo: string;
+  tagName: string;
+  releaseUrl: string;
+  manifests: Array<{ assetName: string; downloadUrl: string; manifestYaml: string; manifest: ParsedManifest }>;
+}): CatalogEntry[] {
+  const multiManifest = release.manifests.length > 1;
+  return release.manifests.map(item => {
+    const variant = inferManifestVariant(item.assetName, item.manifest);
+    const baseName = displayPluginName(item.manifest.metadata.name);
+    const name = variant && multiManifest ? `${baseName} (${variant})` : baseName;
+    return {
+      id: `${repo.id}:${item.assetName}`,
+      name,
+      vendor: item.manifest.metadata.vendor || ownerFromRepo(release.repo),
+      description: firstSentence(item.manifest.metadata.description) || item.assetName,
+      homepage: item.manifest.metadata.homepage || `https://github.com/${release.repo}`,
+      tags: catalogTags(item.manifest, variant, release.tagName),
+      manifestYaml: item.manifestYaml,
+      releaseTag: release.tagName,
+      assetName: item.assetName,
+    };
+  });
+}
+
+function displayPluginName(name: string): string {
+  switch (name) {
+    case 'gh-runner':
+      return 'GitHub Actions runner';
+    case 'llama-cpp':
+      return 'llama.cpp';
+    default:
+      return name
+        .split('-')
+        .filter(Boolean)
+        .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
+  }
+}
+
+function inferManifestVariant(assetName: string, manifest: ParsedManifest): string {
+  const raw = `${assetName} ${manifest.artifact.image ?? ''} ${(manifest.profiles ?? []).join(' ')}`.toLowerCase();
+  if (raw.includes('vulkan') || raw.includes('gpu-amd')) return 'AMD Vulkan';
+  if (raw.includes('cuda') || raw.includes('gpu-nvidia')) return 'NVIDIA CUDA';
+  if (raw.includes('cpu')) return 'CPU only';
+  return '';
+}
+
+function catalogTags(manifest: ParsedManifest, variant: string, releaseTag: string): string[] {
+  const tags = new Set<string>();
+  if (releaseTag) tags.add(releaseTag);
+  if (variant) tags.add(variant);
+  if ((manifest.profiles ?? []).includes('runtime-control')) tags.add('runtime');
+  if (manifest.ui?.embed) tags.add('UI');
+  if (manifest.instances?.configurable || (manifest.instances?.count ?? 1) > 1) tags.add('multi-instance');
+  return Array.from(tags);
+}
+
+function firstSentence(text?: string): string {
+  return (text ?? '').trim().split(/\n+/)[0]?.trim() ?? '';
+}
+
+function ownerFromRepo(repo: string): string {
+  return repo.split('/')[0] || repo;
 }
 
 function PreviewStep({ manifest }: { manifest: ParsedManifest }) {
