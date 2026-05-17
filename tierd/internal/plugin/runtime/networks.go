@@ -13,7 +13,7 @@ import (
 // Docker network: the create-network endpoint is a Docker API compatibility
 // surface, while the actual LXC veth bridge is runtime-managed.
 const (
-	PluginBridgeName    = "gow"
+	PluginBridgeName    = "veth"
 	PluginBridgeSubnet  = "10.100.0.0/24"
 	PluginBridgeGateway = "10.100.0.1"
 )

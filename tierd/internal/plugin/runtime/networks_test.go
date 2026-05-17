@@ -9,12 +9,9 @@ import (
 	"testing"
 )
 
-func TestPluginBridgeNameAvoidsVethPrefix(t *testing.T) {
-	if strings.HasPrefix(PluginBridgeName, "veth") {
-		t.Fatalf("PluginBridgeName = %q, must not look like an LXC veth", PluginBridgeName)
-	}
-	if PluginBridgeName != "gow" {
-		t.Fatalf("PluginBridgeName = %q, want gow", PluginBridgeName)
+func TestPluginBridgeNameUsesRuntimeBridgeName(t *testing.T) {
+	if PluginBridgeName != "veth" {
+		t.Fatalf("PluginBridgeName = %q, want veth", PluginBridgeName)
 	}
 }
 
