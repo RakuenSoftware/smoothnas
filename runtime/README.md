@@ -19,15 +19,16 @@ The build target writes `bin/docker-lxc-daemon`. Appliance installs
 place it at `/usr/lib/smoothnas/docker-lxc-daemon` and install
 `runtime/smoothnas-runtime.service`.
 
-The upstream source defaults to the LXC2Docker Docker daemon branch:
+The upstream source defaults to the LXC2Docker remote `HEAD`, which is
+the upstream default branch:
 
 ```text
 https://github.com/games-on-whales/LXC2Docker.git
-docker-lxc-daemon
+HEAD
 ```
 
-Set `LXC2DOCKER_REF=<commit-or-tag>` when a reproducible pinned build is
-needed.
+Set `LXC2DOCKER_REF=<branch-or-commit-or-tag>` when a reproducible
+pinned build is needed.
 
 SmoothNAS applies the patches in `runtime/patches/` on top of that
 commit to keep OCI template names LXC-safe, provide a legacy
