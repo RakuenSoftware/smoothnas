@@ -166,6 +166,18 @@ jobs:
             gh libpam0g-dev gcc dpkg-dev xz-utils ripgrep \
             pkg-config lxc-dev
 
+      - name: Stabilize self-hosted DNS
+        if: ${{ contains(matrix.runner, 'self-hosted') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:1\n' > /etc/resolv.conf
+          if ! grep -q '^precedence ::ffff:0:0/96  100' /etc/gai.conf 2>/dev/null; then
+            printf '\nprecedence ::ffff:0:0/96  100\n' >> /etc/gai.conf
+          fi
+          getent ahostsv4 api.github.com >/dev/null
+          getent ahostsv4 nodejs.org >/dev/null
+
       - name: Set up Go on self-hosted Linux
         if: ${{ contains(matrix.runner, 'self-hosted') }}
         shell: bash
@@ -207,6 +219,8 @@ jobs:
           go-version-file: tierd/go.mod
 
       - uses: actions/setup-node@v4
+        env:
+          NODE_OPTIONS: --dns-result-order=ipv4first
         with:
           node-version: 22
           cache: npm
