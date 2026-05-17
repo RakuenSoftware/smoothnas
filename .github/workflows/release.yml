@@ -267,7 +267,7 @@ jobs:
           for attempt in 1 2 3; do
             rm -rf deps/smoothkernel-out
             mkdir -p deps/smoothkernel-out
-            if gh release download "${{ needs.meta.outputs.smoothkernel_tag }}" \
+            if timeout 180s gh release download "${{ needs.meta.outputs.smoothkernel_tag }}" \
               --repo RakuenSoftware/smoothkernel \
               --pattern '*.deb' \
               --pattern 'SHA256SUMS' \
@@ -275,6 +275,7 @@ jobs:
               && (cd deps/smoothkernel-out && sha256sum -c SHA256SUMS); then
               break
             fi
+            echo "::warning::SmoothKernel download attempt ${attempt} failed"
             if [ "$attempt" -eq 3 ]; then
               exit 1
             fi
