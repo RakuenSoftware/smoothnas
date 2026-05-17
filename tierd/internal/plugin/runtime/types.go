@@ -56,6 +56,12 @@ type PortBinding struct {
 	HostPort string `json:"HostPort"` // string per Docker's wire shape
 }
 
+// LXC2DockerBindMountInitLabel asks LXC2Docker to initialize empty bind-mount
+// directories from the image destination before the mount is applied. SmoothNAS
+// owns plugin volume directories, so this is safe for fresh installs while
+// preserving existing non-empty user data.
+const LXC2DockerBindMountInitLabel = "io.lxc2docker.bind-mounts.init"
+
 // CreateContainerResponse is the body returned by POST /containers/create.
 type CreateContainerResponse struct {
 	ID       string   `json:"Id"`
