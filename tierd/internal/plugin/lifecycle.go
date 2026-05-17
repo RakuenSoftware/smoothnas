@@ -448,10 +448,16 @@ func splitImageTag(ref string) (string, string) {
 }
 
 func digestPinnedImageRef(image, digest string) string {
+	if image == "" {
+		return ""
+	}
+	base, embeddedDigest, hasEmbeddedDigest := strings.Cut(image, "@")
+	if digest == "" && hasEmbeddedDigest {
+		digest = embeddedDigest
+	}
 	if digest == "" {
 		return image
 	}
-	base, _, _ := strings.Cut(image, "@")
 	repo, _ := splitImageTag(base)
 	return repo + "@" + digest
 }

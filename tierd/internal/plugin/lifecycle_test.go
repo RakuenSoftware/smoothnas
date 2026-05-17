@@ -223,29 +223,43 @@ func TestLifecycle_Materialise_OCIImage(t *testing.T) {
 func TestDigestPinnedImageRefStripsTag(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	tests := []struct {
-		name  string
-		image string
-		want  string
+		name   string
+		image  string
+		digest string
+		want   string
 	}{
 		{
-			name:  "tagged ghcr image",
-			image: "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp:0.2.0-vulkan",
+			name:   "tagged ghcr image with separate digest",
+			image:  "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp:0.2.0-vulkan",
+			digest: digest,
+			want:   "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp@" + digest,
+		},
+		{
+			name:   "registry port without tag",
+			image:  "registry.local:5000/llama-cpp",
+			digest: digest,
+			want:   "registry.local:5000/llama-cpp@" + digest,
+		},
+		{
+			name:   "registry port with tag",
+			image:  "registry.local:5000/llama-cpp:vulkan",
+			digest: digest,
+			want:   "registry.local:5000/llama-cpp@" + digest,
+		},
+		{
+			name:  "embedded digest with tag",
+			image: "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp:0.2.0-vulkan@" + digest,
 			want:  "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp@" + digest,
 		},
 		{
-			name:  "registry port without tag",
-			image: "registry.local:5000/llama-cpp",
-			want:  "registry.local:5000/llama-cpp@" + digest,
-		},
-		{
-			name:  "registry port with tag",
-			image: "registry.local:5000/llama-cpp:vulkan",
-			want:  "registry.local:5000/llama-cpp@" + digest,
+			name:  "embedded digest without tag",
+			image: "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp@" + digest,
+			want:  "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp@" + digest,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := digestPinnedImageRef(tt.image, digest); got != tt.want {
+			if got := digestPinnedImageRef(tt.image, tt.digest); got != tt.want {
 				t.Fatalf("digestPinnedImageRef() = %q want %q", got, tt.want)
 			}
 		})
