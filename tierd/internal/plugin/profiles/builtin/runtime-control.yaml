@@ -1,0 +1,16 @@
+apiVersion: smoothnas.io/v1
+kind: PluginProfile
+metadata:
+  name: runtime-control
+  description: |
+    Narrow runtime-socket access for plugins that act as control-plane
+    services and create their own short-lived worker containers.
+container:
+  env:
+    DOCKER_HOST: unix:///var/run/docker.sock
+lxc:
+  rawConfig:
+    - "lxc.mount.entry = /run/smoothnas-runtime/docker.sock var/run/docker.sock none bind,optional,create=file 0 0"
+preflight:
+  hostHas:
+    - { path: /run/smoothnas-runtime/docker.sock, requirement: required }

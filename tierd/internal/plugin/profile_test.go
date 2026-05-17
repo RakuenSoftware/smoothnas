@@ -24,7 +24,7 @@ func TestNewCatalog_LoadsBuiltins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("catalog: %v", err)
 	}
-	for _, want := range []string{"default-limits", "gpu-amd", "gpu-intel", "gpu-nvidia", "wolf-runtime"} {
+	for _, want := range []string{"default-limits", "gpu-amd", "gpu-intel", "gpu-nvidia", "runtime-control", "wolf-runtime"} {
 		if _, ok := c.Get(want); !ok {
 			t.Errorf("built-in %q missing from catalog", want)
 		}
@@ -185,6 +185,26 @@ func TestResolve_OptionalPreflightWarnsAndContinues(t *testing.T) {
 		if strings.Contains(raw, "lxc.mount.entry = /dev/dri ") {
 			t.Errorf("missing optional mount should be dropped, got %q", raw)
 		}
+	}
+}
+
+func TestResolve_RuntimeControlProfile(t *testing.T) {
+	c, _ := NewCatalog("")
+	m := &Manifest{Profiles: []string{"!default-limits", "runtime-control"}}
+	r, err := Resolve(c, m, statHostFromMap(map[string]bool{
+		"/run/smoothnas-runtime/docker.sock": true,
+	}))
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if r.Env["DOCKER_HOST"] != "unix:///var/run/docker.sock" {
+		t.Errorf("DOCKER_HOST = %q", r.Env["DOCKER_HOST"])
+	}
+	if len(r.CapAdd) != 0 || len(r.Devices) != 0 {
+		t.Errorf("runtime-control should not grant devices/caps: devices=%+v caps=%+v", r.Devices, r.CapAdd)
+	}
+	if !containsString(r.LXCRaw, "lxc.mount.entry = /run/smoothnas-runtime/docker.sock var/run/docker.sock none bind,optional,create=file 0 0") {
+		t.Errorf("LXCRaw missing docker socket bind: %+v", r.LXCRaw)
 	}
 }
 
