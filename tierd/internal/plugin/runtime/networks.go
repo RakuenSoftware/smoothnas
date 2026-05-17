@@ -14,6 +14,7 @@ import (
 // surface, while the actual LXC veth bridge is runtime-managed.
 const (
 	PluginBridgeName    = "veth"
+	PluginBridgeIface   = "veth0"
 	PluginBridgeSubnet  = "10.100.0.0/24"
 	PluginBridgeGateway = "10.100.0.1"
 )
@@ -170,6 +171,11 @@ func (c *Client) InspectContainerBridgeIP(ctx context.Context, id string) (strin
 		return "", err
 	}
 	net, ok := details.NetworkSettings.Networks[PluginBridgeName]
+	if !ok {
+		// Compatibility with runtimes that accepted NetworkMode=veth
+		// but still reported the network under the bridge interface name.
+		net, ok = details.NetworkSettings.Networks[PluginBridgeIface]
+	}
 	if !ok {
 		return "", fmt.Errorf("container %s not attached to %s", shortID(id), PluginBridgeName)
 	}
