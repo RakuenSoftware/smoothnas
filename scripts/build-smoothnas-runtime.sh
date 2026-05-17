@@ -22,9 +22,6 @@ fi
 
 git -C "$BUILD_DIR" checkout --quiet --detach FETCH_HEAD
 git -C "$BUILD_DIR" reset --quiet --hard FETCH_HEAD
-git -C "$BUILD_DIR" apply --unidiff-zero "${PROJECT_DIR}/runtime/patches/lxc2docker-safe-oci-template-name.patch"
-git -C "$BUILD_DIR" apply --unidiff-zero "${PROJECT_DIR}/runtime/patches/lxc2docker-legacy-dir-copy-fallback.patch"
-git -C "$BUILD_DIR" apply --unidiff-zero "${PROJECT_DIR}/runtime/patches/lxc2docker-reattach-bridge-veth.patch"
 
 CGO_CFLAGS="$(pkg-config --cflags lxc 2>/dev/null || true)"
 CGO_LDFLAGS="$(pkg-config --libs lxc 2>/dev/null || printf '%s' '-llxc')"
