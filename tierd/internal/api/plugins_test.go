@@ -369,7 +369,8 @@ func TestPluginsAPI_ModelInstallDownloadsUpdatesConfigAndStarts(t *testing.T) {
 	defer srv.Close()
 
 	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/llama-cpp/models/install", map[string]any{
-		"url": srv.URL + "/tiny.gguf",
+		"url":         srv.URL + "/tiny.gguf",
+		"temperature": 0.35,
 	})
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
@@ -393,6 +394,9 @@ func TestPluginsAPI_ModelInstallDownloadsUpdatesConfigAndStarts(t *testing.T) {
 	}
 	if cfg["MODEL_PATH"] != "/models/tiny.gguf" {
 		t.Fatalf("MODEL_PATH = %q", cfg["MODEL_PATH"])
+	}
+	if cfg[pluginModelTemperatureConfigKey] != "0.35" {
+		t.Fatalf("%s = %q", pluginModelTemperatureConfigKey, cfg[pluginModelTemperatureConfigKey])
 	}
 	modelDir := rec.Volumes[0].Paths[1]
 	got, err := os.ReadFile(filepath.Join(modelDir, "tiny.gguf"))
@@ -422,6 +426,25 @@ func TestPluginsAPI_ModelInstallRejectsBadURL(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "plugins.models.url_invalid") {
 		t.Fatalf("expected url_invalid code, got %s", rr.Body.String())
+	}
+}
+
+func TestPluginsAPI_ModelInstallRejectsBadTemperature(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{
+		"manifest":        readManifestFixture(t, "llama.yaml"),
+		"tierAssignments": map[string]any{"default": "media"},
+	})
+
+	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/llama-cpp/models/install", map[string]any{
+		"url":         "https://example.com/model.gguf",
+		"temperature": -0.1,
+	})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "plugins.models.temperature_invalid") {
+		t.Fatalf("expected temperature_invalid code, got %s", rr.Body.String())
 	}
 }
 

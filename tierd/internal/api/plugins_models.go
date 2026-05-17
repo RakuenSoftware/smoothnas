@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -22,12 +23,14 @@ import (
 )
 
 const pluginModelInstallTag = "plugin-model-install"
+const pluginModelTemperatureConfigKey = "LLAMA_ARG_TEMP"
 
 type installModelRequest struct {
-	URL      string `json:"url"`
-	Filename string `json:"filename,omitempty"`
-	SHA256   string `json:"sha256,omitempty"`
-	Start    *bool  `json:"start,omitempty"`
+	URL         string   `json:"url"`
+	Filename    string   `json:"filename,omitempty"`
+	SHA256      string   `json:"sha256,omitempty"`
+	Temperature *float64 `json:"temperature,omitempty"`
+	Start       *bool    `json:"start,omitempty"`
 }
 
 type installModelResponse struct {
@@ -82,6 +85,15 @@ func (h *PluginsHandler) installModel(w http.ResponseWriter, r *http.Request, na
 			return
 		}
 	}
+	temperature := ""
+	if req.Temperature != nil {
+		var err error
+		temperature, err = normaliseModelTemperature(*req.Temperature)
+		if err != nil {
+			writePluginModelError(w, err)
+			return
+		}
+	}
 	if h.lifecycle == nil {
 		jsonErrorCoded(w, "runtime not configured", http.StatusServiceUnavailable, "plugins.runtime_unavailable")
 		return
@@ -92,14 +104,10 @@ func (h *PluginsHandler) installModel(w http.ResponseWriter, r *http.Request, na
 		shouldStart = *req.Start
 	}
 	jobID := jobs.StartTagged(pluginModelInstallTag)
-	jobs.UpdateResult(jobID, map[string]string{
-		"plugin":    name,
-		"modelPath": target.ContainerPath,
-		"filename":  target.Filename,
-	})
+	jobs.UpdateResult(jobID, modelInstallResult(name, target, temperature))
 
 	go func() {
-		result, err := h.runModelInstallJob(context.Background(), jobID, name, req.URL, req.SHA256, target, shouldStart)
+		result, err := h.runModelInstallJob(context.Background(), jobID, name, req.URL, req.SHA256, temperature, target, shouldStart)
 		if err != nil {
 			jobs.Fail(jobID, err)
 			return
@@ -129,6 +137,7 @@ func (h *PluginsHandler) runModelInstallJob(
 	pluginName string,
 	rawURL string,
 	rawSHA256 string,
+	temperature string,
 	target modelInstallTarget,
 	shouldStart bool,
 ) (map[string]string, error) {
@@ -146,8 +155,11 @@ func (h *PluginsHandler) runModelInstallJob(
 	}
 	cfg := configRowsToMap(rec.Config)
 	cfg["MODEL_PATH"] = target.ContainerPath
+	if temperature != "" {
+		cfg[pluginModelTemperatureConfigKey] = temperature
+	}
 	if err := h.store.ReplaceConfig(pluginName, cfg); err != nil {
-		return nil, fmt.Errorf("update MODEL_PATH: %w", err)
+		return nil, fmt.Errorf("update model config: %w", err)
 	}
 
 	if shouldStart {
@@ -171,11 +183,19 @@ func (h *PluginsHandler) runModelInstallJob(
 	}
 
 	jobs.UpdateProgress(jobID, "Ready")
-	return map[string]string{
+	return modelInstallResult(pluginName, target, temperature), nil
+}
+
+func modelInstallResult(pluginName string, target modelInstallTarget, temperature string) map[string]string {
+	result := map[string]string{
 		"plugin":    pluginName,
 		"modelPath": target.ContainerPath,
 		"filename":  target.Filename,
-	}, nil
+	}
+	if temperature != "" {
+		result["temperature"] = temperature
+	}
+	return result
 }
 
 func configRowsToMap(rows []plugin.ConfigRow) map[string]string {
@@ -433,4 +453,15 @@ func normaliseSHA256(raw string) (string, error) {
 		return "", newPluginModelClientError(http.StatusBadRequest, "plugins.models.sha256_invalid", "sha256 must be hex")
 	}
 	return s, nil
+}
+
+func normaliseModelTemperature(v float64) (string, error) {
+	if v < 0 || v > 2 {
+		return "", newPluginModelClientError(
+			http.StatusBadRequest,
+			"plugins.models.temperature_invalid",
+			"temperature must be between 0 and 2",
+		)
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64), nil
 }
