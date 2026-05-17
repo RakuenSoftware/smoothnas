@@ -13,6 +13,9 @@ func TestPluginBridgeNameUsesRuntimeBridgeName(t *testing.T) {
 	if PluginBridgeName != "veth" {
 		t.Fatalf("PluginBridgeName = %q, want veth", PluginBridgeName)
 	}
+	if PluginBridgeIface != "veth0" {
+		t.Fatalf("PluginBridgeIface = %q, want veth0", PluginBridgeIface)
+	}
 }
 
 func TestEnsurePluginBridge_CreatesWhenMissing(t *testing.T) {
@@ -171,6 +174,27 @@ func TestInspectContainerBridgeIP_ReturnsAddressWhenReady(t *testing.T) {
 		t.Fatalf("inspect: %v", err)
 	}
 	if ip != "10.100.0.42" {
+		t.Errorf("ip = %q", ip)
+	}
+}
+
+func TestInspectContainerBridgeIP_AcceptsBridgeInterfaceKey(t *testing.T) {
+	sock := newFakeRuntime(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(ContainerInspect{
+			ID: "abc",
+			NetworkSettings: ContainerNetworkSettings{
+				Networks: map[string]ContainerNetwork{
+					PluginBridgeIface: {IPAddress: "10.100.0.43"},
+				},
+			},
+		})
+	}))
+	c := NewClient(sock)
+	ip, err := c.InspectContainerBridgeIP(context.Background(), "abc")
+	if err != nil {
+		t.Fatalf("inspect: %v", err)
+	}
+	if ip != "10.100.0.43" {
 		t.Errorf("ip = %q", ip)
 	}
 }

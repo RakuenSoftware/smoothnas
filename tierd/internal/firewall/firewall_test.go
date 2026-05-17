@@ -136,6 +136,12 @@ func TestGenerateRulesetStructure(t *testing.T) {
 	if !strings.Contains(ruleset, "ct state established,related accept") {
 		t.Error("missing established/related rule")
 	}
+	if !strings.Contains(ruleset, `iifname "veth0" accept`) {
+		t.Error("missing plugin bridge egress rule")
+	}
+	if !strings.Contains(ruleset, `ct state established,related oifname "veth0" accept`) {
+		t.Error("missing plugin bridge return-traffic rule")
+	}
 	if !strings.Contains(ruleset, "iif lo accept") {
 		t.Error("missing loopback rule")
 	}

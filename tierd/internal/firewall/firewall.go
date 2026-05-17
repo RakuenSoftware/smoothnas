@@ -101,6 +101,10 @@ func GenerateRuleset(enabledProtocols map[string]bool) string {
 	// Forward chain (default drop).
 	b.WriteString("    chain forward {\n")
 	b.WriteString("        type filter hook forward priority 0; policy drop;\n")
+	b.WriteString("\n")
+	b.WriteString("        # Allow plugin bridge egress and return traffic.\n")
+	b.WriteString("        iifname \"veth0\" accept\n")
+	b.WriteString("        ct state established,related oifname \"veth0\" accept\n")
 	b.WriteString("    }\n\n")
 
 	// Output chain (allow all).
