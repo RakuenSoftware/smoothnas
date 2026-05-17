@@ -36,7 +36,7 @@ jobs:
       smoothkernel_tag: ${{ steps.smoothkernel.outputs.tag }}
       smoothfs_ref: ${{ steps.smoothfs_ref.outputs.ref }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -147,7 +147,7 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -231,7 +231,7 @@ jobs:
           echo "$go_root/bin" >> "$GITHUB_PATH"
           echo "$go_path/bin" >> "$GITHUB_PATH"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         if: ${{ contains(matrix.runner, 'self-hosted') == false }}
         with:
           go-version-file: tierd/go.mod
@@ -265,7 +265,7 @@ jobs:
           node --version
           npm --version
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         if: ${{ contains(matrix.runner, 'self-hosted') == false }}
         env:
           NODE_OPTIONS: --dns-result-order=ipv4first
@@ -314,7 +314,7 @@ jobs:
           ls -lh deps/smoothkernel-out/
 
       - name: Checkout smoothiso
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: RakuenSoftware/smoothiso
           path: deps/smoothiso
@@ -352,7 +352,7 @@ jobs:
           ls -lh stage/
 
       - name: Upload per-arch artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: smoothnas-${{ matrix.deb_arch }}
           path: stage
@@ -363,7 +363,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Download per-arch artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-input
 
@@ -402,7 +402,7 @@ jobs:
           ls -lh dist/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.meta.outputs.tag }}
           name: ${{ needs.meta.outputs.name }}

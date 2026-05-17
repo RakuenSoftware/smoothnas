@@ -24,7 +24,7 @@ jobs:
     runs-on: [self-hosted, smoothnas-protocol]
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Run SmoothFS protocol conformance gate
         run: sudo -E bash scripts/smoothfs-protocol-gate.sh
@@ -37,7 +37,7 @@ jobs:
     runs-on: [self-hosted, windows, smoothnas-protocol]
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Run Windows SMB soak
         shell: pwsh
