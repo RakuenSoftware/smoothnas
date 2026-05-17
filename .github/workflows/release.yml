@@ -166,7 +166,32 @@ jobs:
             libpam0g-dev gcc dpkg-dev xz-utils ripgrep \
             pkg-config lxc-dev
 
+      - name: Set up Go on self-hosted Linux
+        if: ${{ contains(matrix.runner, 'self-hosted') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          go_version="$(awk '$1 == "go" { print $2; exit }' tierd/go.mod)"
+          if [ -z "$go_version" ]; then
+            echo "Could not determine Go version from tierd/go.mod" >&2
+            exit 1
+          fi
+          case "$(uname -m)" in
+            x86_64) go_arch="amd64" ;;
+            aarch64|arm64) go_arch="arm64" ;;
+            *) echo "Unsupported Go architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          archive="/tmp/go-${go_version}.linux-${go_arch}.tar.gz"
+          go_root="/tmp/smoothnas-go-${go_version}"
+          rm -rf "$go_root"
+          curl -fsSL "https://go.dev/dl/go${go_version}.linux-${go_arch}.tar.gz" -o "$archive"
+          mkdir -p "$go_root"
+          tar -C "$go_root" --strip-components=1 -xzf "$archive"
+          "$go_root/bin/go" version
+          echo "$go_root/bin" >> "$GITHUB_PATH"
+
       - uses: actions/setup-go@v5
+        if: ${{ contains(matrix.runner, 'self-hosted') == false }}
         with:
           go-version-file: tierd/go.mod
 
