@@ -171,12 +171,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:1\n' > /etc/resolv.conf
+          mapfile -t current_nameservers < <(awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf 2>/dev/null || true)
+          tmp_resolv="$(mktemp)"
+          seen=""
+          for ns in "${current_nameservers[@]}" 192.168.1.254 192.168.1.1 1.1.1.1 8.8.8.8; do
+            [ -n "$ns" ] || continue
+            case " $seen " in
+              *" $ns "*) continue ;;
+            esac
+            printf 'nameserver %s\n' "$ns" >> "$tmp_resolv"
+            seen="${seen} ${ns}"
+          done
+          printf 'options timeout:2 attempts:1 rotate\n' >> "$tmp_resolv"
+          cat "$tmp_resolv" > /etc/resolv.conf
+          rm -f "$tmp_resolv"
           if ! grep -q '^precedence ::ffff:0:0/96  100' /etc/gai.conf 2>/dev/null; then
             printf '\nprecedence ::ffff:0:0/96  100\n' >> /etc/gai.conf
           fi
-          getent ahostsv4 api.github.com >/dev/null
-          getent ahostsv4 nodejs.org >/dev/null
+          for host in api.github.com codeload.github.com nodejs.org registry.npmjs.org go.dev; do
+            if timeout 8 getent ahostsv4 "$host" >/dev/null; then
+              echo "Resolved ${host} over IPv4"
+            else
+              echo "::warning::Could not resolve ${host} over IPv4 during DNS preflight"
+            fi
+          done
 
       - name: Set up Go on self-hosted Linux
         if: ${{ contains(matrix.runner, 'self-hosted') }}
