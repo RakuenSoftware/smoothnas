@@ -1,17 +1,20 @@
 [Unit]
 Description=SmoothNAS plugin runtime (LXC2Docker)
 Documentation=https://github.com/games-on-whales/LXC2Docker
-After=network-online.target
-Wants=network-online.target
+After=network-online.target tierd-host-init.service
+Wants=network-online.target tierd-host-init.service
 Before=tierd.service
 
 [Service]
 Type=simple
-ExecStartPre=/bin/mkdir -p /var/lib/smoothnas/runtime/lxc /var/lib/smoothnas/runtime/state
+Environment=SMOOTHNAS_RUNTIME_LXCPATH=/var/lib/smoothnas/runtime/lxc
+Environment=SMOOTHNAS_RUNTIME_STATEPATH=/var/lib/smoothnas/runtime/state
+EnvironmentFile=-/etc/smoothnas/runtime.env
+ExecStartPre=/bin/sh -c 'mkdir -p "$SMOOTHNAS_RUNTIME_LXCPATH" "$SMOOTHNAS_RUNTIME_STATEPATH"'
 ExecStart=/usr/lib/smoothnas/docker-lxc-daemon \
     --socket=/run/smoothnas-runtime/docker.sock \
-    --lxcpath=/var/lib/smoothnas/runtime/lxc \
-    --statepath=/var/lib/smoothnas/runtime/state
+    --lxcpath=${SMOOTHNAS_RUNTIME_LXCPATH} \
+    --statepath=${SMOOTHNAS_RUNTIME_STATEPATH}
 Restart=always
 RestartSec=5
 User=root

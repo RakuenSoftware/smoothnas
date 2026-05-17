@@ -3,7 +3,7 @@ Description=SmoothNAS host initialization
 Documentation=https://github.com/JBailes/SmoothNAS
 After=local-fs.target systemd-sysusers.service network-online.target
 Wants=network-online.target
-Before=tierd.service
+Before=smoothnas-runtime.service tierd.service
 
 [Service]
 Type=oneshot
