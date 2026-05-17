@@ -188,7 +188,7 @@ jobs:
           if ! grep -q '^precedence ::ffff:0:0/96  100' /etc/gai.conf 2>/dev/null; then
             printf '\nprecedence ::ffff:0:0/96  100\n' >> /etc/gai.conf
           fi
-          for host in api.github.com codeload.github.com nodejs.org registry.npmjs.org go.dev; do
+          for host in api.github.com codeload.github.com nodejs.org registry.npmjs.org go.dev results-receiver.actions.githubusercontent.com; do
             if timeout 8 getent ahostsv4 "$host" >/dev/null; then
               echo "Resolved ${host} over IPv4"
             else
@@ -236,7 +236,37 @@ jobs:
         with:
           go-version-file: tierd/go.mod
 
+      - name: Set up Node on self-hosted Linux
+        if: ${{ contains(matrix.runner, 'self-hosted') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) node_arch="x64" ;;
+            aarch64|arm64) node_arch="arm64" ;;
+            *) echo "Unsupported Node architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          base_url="https://nodejs.org/dist/latest-v22.x"
+          work_dir="$(mktemp -d)"
+          node_root="${RUNNER_TEMP:-/tmp}/smoothnas-node-22"
+          trap 'rm -rf "$work_dir"' EXIT
+          curl -fsSL --connect-timeout 10 --retry 5 --retry-delay 3 \
+            "$base_url/SHASUMS256.txt" -o "$work_dir/SHASUMS256.txt"
+          archive="$(awk -v arch="$node_arch" '$2 ~ "linux-" arch "[.]tar[.]xz$" { print $2; exit }' "$work_dir/SHASUMS256.txt")"
+          [ -n "$archive" ] || { echo "Could not find Node linux-${node_arch} archive" >&2; exit 1; }
+          curl -fsSL --connect-timeout 10 --retry 5 --retry-delay 3 \
+            "$base_url/$archive" -o "$work_dir/$archive"
+          (cd "$work_dir" && grep " $archive$" SHASUMS256.txt | sha256sum -c -)
+          rm -rf "$node_root"
+          mkdir -p "$node_root"
+          tar -C "$node_root" --strip-components=1 -xJf "$work_dir/$archive"
+          export PATH="$node_root/bin:$PATH"
+          echo "$node_root/bin" >> "$GITHUB_PATH"
+          node --version
+          npm --version
+
       - uses: actions/setup-node@v4
+        if: ${{ contains(matrix.runner, 'self-hosted') == false }}
         env:
           NODE_OPTIONS: --dns-result-order=ipv4first
         with:
@@ -267,7 +297,7 @@ jobs:
           for attempt in 1 2 3; do
             rm -rf deps/smoothkernel-out
             mkdir -p deps/smoothkernel-out
-            if gh release download "${{ needs.meta.outputs.smoothkernel_tag }}" \
+            if timeout 180s gh release download "${{ needs.meta.outputs.smoothkernel_tag }}" \
               --repo RakuenSoftware/smoothkernel \
               --pattern '*.deb' \
               --pattern 'SHA256SUMS' \
@@ -275,6 +305,7 @@ jobs:
               && (cd deps/smoothkernel-out && sha256sum -c SHA256SUMS); then
               break
             fi
+            echo "::warning::SmoothKernel download attempt ${attempt} failed"
             if [ "$attempt" -eq 3 ]; then
               exit 1
             fi

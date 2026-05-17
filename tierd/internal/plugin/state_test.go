@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
@@ -108,6 +109,30 @@ func TestStore_InsertGet_SingleInstance(t *testing.T) {
 	}
 	if rec.Config[0].Value != "/models/default.gguf" {
 		t.Errorf("config default value = %q", rec.Config[0].Value)
+	}
+}
+
+func TestStore_Insert_NormalizesEmbeddedImageDigest(t *testing.T) {
+	s := openTestStore(t)
+	m := mustParse(t, "llama.yaml")
+	digest := "sha256:" + strings.Repeat("a", 64)
+	m.Artifact.Image = "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp:0.2.0-vulkan@" + digest
+	m.Artifact.Digest = ""
+
+	if err := s.Insert(InsertParams{
+		Manifest: m,
+		Paths:    pathsForSingleInstance(m, "/var/lib/smoothnas/plugins"),
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	rec, err := s.Get(m.Metadata.Name)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	want := "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp@" + digest
+	if rec.Plugin.ImageRef != want {
+		t.Fatalf("image_ref = %q want %q", rec.Plugin.ImageRef, want)
 	}
 }
 

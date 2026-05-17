@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build the SmoothNAS plugin runtime daemon from a pinned LXC2Docker commit.
+# Build the SmoothNAS plugin runtime daemon from LXC2Docker main by default.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 LXC2DOCKER_REPO="${LXC2DOCKER_REPO:-https://github.com/games-on-whales/LXC2Docker.git}"
-LXC2DOCKER_REF="${LXC2DOCKER_REF:-HEAD}"
+LXC2DOCKER_REF="${LXC2DOCKER_REF:-main}"
 BUILD_DIR="${PROJECT_DIR}/runtime/build/LXC2Docker"
 OUT="${PROJECT_DIR}/bin/docker-lxc-daemon"
 
@@ -22,9 +22,6 @@ fi
 
 git -C "$BUILD_DIR" checkout --quiet --detach FETCH_HEAD
 git -C "$BUILD_DIR" reset --quiet --hard FETCH_HEAD
-git -C "$BUILD_DIR" apply --unidiff-zero "${PROJECT_DIR}/runtime/patches/lxc2docker-safe-oci-template-name.patch"
-git -C "$BUILD_DIR" apply --unidiff-zero "${PROJECT_DIR}/runtime/patches/lxc2docker-legacy-dir-copy-fallback.patch"
-git -C "$BUILD_DIR" apply --unidiff-zero "${PROJECT_DIR}/runtime/patches/lxc2docker-reattach-bridge-veth.patch"
 
 CGO_CFLAGS="$(pkg-config --cflags lxc 2>/dev/null || true)"
 CGO_LDFLAGS="$(pkg-config --libs lxc 2>/dev/null || printf '%s' '-llxc')"

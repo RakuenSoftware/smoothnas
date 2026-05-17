@@ -166,10 +166,7 @@ func (s *Store) Insert(p InsertParams) error {
 		// fully-qualified image@sha256:... ref. Phase 1 records the
 		// manifest's pre-resolution form so the operator can see it
 		// in `plugin show`.
-		imageRef = m.Artifact.Image
-		if m.Artifact.Digest != "" {
-			imageRef = m.Artifact.Image + "@" + m.Artifact.Digest
-		}
+		imageRef = digestPinnedImageRef(m.Artifact.Image, m.Artifact.Digest)
 	}
 
 	count := m.EffectiveCount()
