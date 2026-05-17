@@ -163,7 +163,7 @@ jobs:
           fi
           sudo apt-get install -y \
             xorriso $bios_pkgs cpio gzip file curl \
-            libpam0g-dev gcc dpkg-dev xz-utils ripgrep \
+            gh libpam0g-dev gcc dpkg-dev xz-utils ripgrep \
             pkg-config lxc-dev
 
       - name: Set up Go on self-hosted Linux
@@ -188,7 +188,18 @@ jobs:
           mkdir -p "$go_root"
           tar -C "$go_root" --strip-components=1 -xzf "$archive"
           "$go_root/bin/go" version
+          go_path="${RUNNER_TEMP:-/tmp}/smoothnas-go-path"
+          go_mod_cache="$go_path/pkg/mod"
+          go_build_cache="${RUNNER_TEMP:-/tmp}/smoothnas-go-build-cache"
+          mkdir -p "$go_mod_cache" "$go_build_cache" "$go_path/bin"
+          {
+            echo "GOROOT=$go_root"
+            echo "GOPATH=$go_path"
+            echo "GOMODCACHE=$go_mod_cache"
+            echo "GOCACHE=$go_build_cache"
+          } >> "$GITHUB_ENV"
           echo "$go_root/bin" >> "$GITHUB_PATH"
+          echo "$go_path/bin" >> "$GITHUB_PATH"
 
       - uses: actions/setup-go@v5
         if: ${{ contains(matrix.runner, 'self-hosted') == false }}
@@ -203,6 +214,11 @@ jobs:
 
       - name: Build tierd backend
         working-directory: tierd
+        env:
+          # github.com/msteinert/pam/v2 probes RTLD_NEXT via cgo; on
+          # some self-hosted libc header combinations that symbol is
+          # only exposed when GNU extensions are explicitly enabled.
+          CGO_CFLAGS: "-O2 -g -D_GNU_SOURCE"
         run: CGO_ENABLED=1 go build -ldflags "-X main.version=${{ needs.meta.outputs.version }}" -o ../bin/tierd ./cmd/tierd/
 
       - name: Build tierd-ui frontend
