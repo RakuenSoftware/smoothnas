@@ -53,6 +53,7 @@ func TestParseManifest_Fixtures(t *testing.T) {
 		{"llama.yaml", ArtifactOCIImage, 1, ""},
 		{"gh-runner.yaml", ArtifactOCIImage, 2, ""},
 		{"ubuntu-python.yaml", ArtifactLXCDistro, 1, "ubuntu/jammy/amd64"},
+		{"wolf.yaml", ArtifactOCIImage, 1, ""},
 	}
 	for _, tc := range cases {
 		tc := tc

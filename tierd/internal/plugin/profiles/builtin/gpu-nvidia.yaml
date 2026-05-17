@@ -25,6 +25,7 @@ lxc:
     - "lxc.mount.entry = /dev/nvidia0          dev/nvidia0          none bind,optional,create=file 0 0"
 preflight:
   hostHas:
-    - { path: /dev/nvidiactl,  requirement: optional }
-    - { path: /dev/nvidia-uvm, requirement: optional }
-    - { path: /dev/nvidia0,    requirement: optional }
+    - { path: /dev/nvidiactl,        requirement: optional }
+    - { path: /dev/nvidia-uvm,       requirement: optional }
+    - { path: /dev/nvidia-uvm-tools, requirement: optional }
+    - { path: /dev/nvidia0,          requirement: optional }

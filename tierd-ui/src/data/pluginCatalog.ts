@@ -10,4 +10,5 @@ export type CatalogRepository = {
 export const pluginCatalogRepositories: CatalogRepository[] = [
   { id: 'gh-runner', repo: 'RakuenSoftware/smoothnas-plugin-gh-runner' },
   { id: 'llama-cpp', repo: 'RakuenSoftware/smoothnas-plugin-llama-cpp' },
+  { id: 'wolf', repo: 'RakuenSoftware/smoothnas-plugin-wolf' },
 ];

@@ -26,7 +26,7 @@ type ParsedManifest = {
   container: { command?: string[]; restartPolicy?: string };
   instances?: { count?: number; configurable?: boolean };
   volumes?: ManifestVolume[];
-  ports?: { name: string; port: number; protocol: string; expose: boolean }[];
+  ports?: { name: string; port: number; protocol: string; expose: boolean; hostExpose?: boolean }[];
   ui?: { embed?: { path?: string; auth?: string } };
   profiles?: string[];
   config?: ManifestConfigField[];
@@ -349,8 +349,9 @@ function SourceStep({
     ))
       .then(results => {
         if (cancelled) return;
-        setCatalogEntries(results.flatMap(result => result.entries));
-        setCatalogError(results.map(result => result.error).filter(Boolean).join('\n'));
+        const entries = results.flatMap(result => result.entries);
+        setCatalogEntries(entries);
+        setCatalogError(entries.length === 0 ? results.map(result => result.error).filter(Boolean).join('\n') : '');
       })
       .finally(() => {
         if (!cancelled) setCatalogLoading(false);
@@ -481,6 +482,8 @@ function displayPluginName(name: string): string {
       return 'GitHub Actions runner';
     case 'llama-cpp':
       return 'llama.cpp';
+    case 'wolf':
+      return 'Wolf';
     default:
       return name
         .split('-')
@@ -492,6 +495,9 @@ function displayPluginName(name: string): string {
 
 function inferManifestVariant(assetName: string, manifest: ParsedManifest): string {
   const raw = `${assetName} ${manifest.artifact.image ?? ''} ${(manifest.profiles ?? []).join(' ')}`.toLowerCase();
+  if (raw.includes('gpu-nvidia')) return 'NVIDIA';
+  if (raw.includes('gpu-amd')) return 'AMD';
+  if (raw.includes('gpu-intel')) return 'Intel';
   if (raw.includes('vulkan') || raw.includes('gpu-amd')) return 'AMD Vulkan';
   if (raw.includes('cuda') || raw.includes('gpu-nvidia')) return 'NVIDIA CUDA';
   if (raw.includes('cpu')) return 'CPU only';
@@ -503,6 +509,8 @@ function catalogTags(manifest: ParsedManifest, variant: string, releaseTag: stri
   if (releaseTag) tags.add(releaseTag);
   if (variant) tags.add(variant);
   if ((manifest.profiles ?? []).includes('runtime-control')) tags.add('runtime');
+  if ((manifest.profiles ?? []).includes('wolf-runtime')) tags.add('runtime');
+  if ((manifest.ports ?? []).some(p => p.hostExpose)) tags.add('host ports');
   if (manifest.ui?.embed) tags.add('UI');
   if (manifest.instances?.configurable || (manifest.instances?.count ?? 1) > 1) tags.add('multi-instance');
   return Array.from(tags);
@@ -580,7 +588,7 @@ function PreviewStep({ manifest }: { manifest: ParsedManifest }) {
         <dt>{t('plugins.install.preview.ports')}</dt>
         <dd>
           {(manifest.ports ?? []).length > 0
-            ? (manifest.ports ?? []).map(p => `${p.name} (${p.port}/${p.protocol})`).join(', ')
+            ? (manifest.ports ?? []).map(p => `${p.name} (${p.port}/${p.protocol}${p.hostExpose ? ', host' : ''})`).join(', ')
             : empty}
         </dd>
         <dt>{t('plugins.install.preview.config')}</dt>
