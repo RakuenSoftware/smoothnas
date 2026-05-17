@@ -122,8 +122,6 @@ artifact:
 
 container:
   command:
-    - "--model"
-    - "\${MODEL_PATH}"
     - "--temp"
     - "\${LLAMA_ARG_TEMP}"
     - "--n-gpu-layers"
@@ -153,11 +151,11 @@ profiles:
   - gpu-nvidia
 
 config:
-  - key: MODEL_PATH
+  - key: MODEL_URL
     type: string
-    label: Model GGUF path
-    default: "/models/default.gguf"
-    description: Model file inside the container. The Models tab updates this after download.
+    label: Model download URL
+    default: ""
+    description: HTTP(S) URL for the GGUF model. The container downloads it into its private /models/model.gguf path on start.
   - key: LLAMA_ARG_TEMP
     type: number
     label: Temperature
@@ -255,8 +253,6 @@ artifact:
 
 container:
   command:
-    - "--model"
-    - "\${MODEL_PATH}"
     - "--temp"
     - "\${LLAMA_ARG_TEMP}"
     - "--n-gpu-layers"
@@ -286,11 +282,11 @@ profiles:
   - gpu-amd
 
 config:
-  - key: MODEL_PATH
+  - key: MODEL_URL
     type: string
-    label: Model GGUF path
-    default: "/models/default.gguf"
-    description: Model file inside the container. The Models tab updates this after download.
+    label: Model download URL
+    default: ""
+    description: HTTP(S) URL for the GGUF model. The container downloads it into its private /models/model.gguf path on start.
   - key: LLAMA_ARG_TEMP
     type: number
     label: Temperature
@@ -388,8 +384,6 @@ artifact:
 
 container:
   command:
-    - "--model"
-    - "\${MODEL_PATH}"
     - "--temp"
     - "\${LLAMA_ARG_TEMP}"
     - "--ctx-size"
@@ -418,11 +412,11 @@ profiles:
   - default-limits
 
 config:
-  - key: MODEL_PATH
+  - key: MODEL_URL
     type: string
-    label: Model GGUF path
-    default: "/models/default.gguf"
-    description: Model file inside the container. The Models tab updates this after download.
+    label: Model download URL
+    default: ""
+    description: HTTP(S) URL for the GGUF model. The container downloads it into its private /models/model.gguf path on start.
   - key: LLAMA_ARG_TEMP
     type: number
     label: Temperature
