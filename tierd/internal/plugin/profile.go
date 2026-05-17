@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"gopkg.in/yaml.v3"
 )
@@ -340,13 +341,21 @@ func lxcMountEntryUsesHostPath(line, path string) bool {
 	return len(fields) > 0 && fields[0] == path
 }
 
-// osStatHost is the production statHost — just os.Stat plus
-// translating "exists but unreadable" into "exists" so an
-// underprivileged tierd doesn't false-fail GPU preflight on hosts
-// where /dev/dri/* is mode 0660 owned by root:render.
+// osStatHost is the production statHost. It treats stat-visible
+// paths as present even when tierd cannot read them, but rejects
+// non-directory /dev entries that are not character devices so stale
+// placeholder files do not reach Docker/LXC device mappings.
 func osStatHost(path string) error {
-	_, err := os.Stat(path)
-	return err
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(path, "/dev/") && !info.IsDir() {
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Mode&syscall.S_IFMT != syscall.S_IFCHR {
+			return fmt.Errorf("%s exists but is not a character device", path)
+		}
+	}
+	return nil
 }
 
 // loadBuiltin walks the embedded profiles/builtin/ tree.

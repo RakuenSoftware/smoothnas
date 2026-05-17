@@ -185,11 +185,19 @@ func TestPluginsAPI_CatalogLatestFetchesReleaseManifest(t *testing.T) {
 			"html_url": "https://github.com/RakuenSoftware/smoothnas-plugin-gh-runner/releases/tag/v0.3.2",
 			"assets": []map[string]any{
 				{"name": "notes.txt", "browser_download_url": srv.URL + "/assets/notes.txt"},
+				{"name": "smoothnas-plugin-intel.yaml", "browser_download_url": srv.URL + "/assets/smoothnas-plugin-intel.yaml"},
 				{"name": "smoothnas-plugin.yaml", "browser_download_url": srv.URL + "/assets/smoothnas-plugin.yaml"},
+				{"name": "smoothnas-plugin-amd.yaml", "browser_download_url": srv.URL + "/assets/smoothnas-plugin-amd.yaml"},
 			},
 		})
 	})
 	mux.HandleFunc("/assets/smoothnas-plugin.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(fixture))
+	})
+	mux.HandleFunc("/assets/smoothnas-plugin-amd.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(fixture))
+	})
+	mux.HandleFunc("/assets/smoothnas-plugin-intel.yaml", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(fixture))
 	})
 	srv = httptest.NewServer(mux)
@@ -209,11 +217,14 @@ func TestPluginsAPI_CatalogLatestFetchesReleaseManifest(t *testing.T) {
 	if got.TagName != "v0.3.2" {
 		t.Fatalf("tag = %q", got.TagName)
 	}
-	if len(got.Manifests) != 1 {
+	if len(got.Manifests) != 3 {
 		t.Fatalf("manifests = %d", len(got.Manifests))
 	}
 	if got.Manifests[0].AssetName != "smoothnas-plugin.yaml" {
 		t.Fatalf("asset = %q", got.Manifests[0].AssetName)
+	}
+	if got.Manifests[1].AssetName != "smoothnas-plugin-amd.yaml" || got.Manifests[2].AssetName != "smoothnas-plugin-intel.yaml" {
+		t.Fatalf("manifest assets not sorted with base first: %#v", got.Manifests)
 	}
 	if got.Manifests[0].Manifest.Metadata.Name != "gh-runner" {
 		t.Fatalf("manifest name = %q", got.Manifests[0].Manifest.Metadata.Name)

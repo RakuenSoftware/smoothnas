@@ -275,7 +275,24 @@ func TestResolve_DeviceConcatenation(t *testing.T) {
 	c, _ := NewCatalog("")
 	m := &Manifest{Profiles: []string{"!default-limits", "gpu-amd", "gpu-nvidia"}}
 	r, err := Resolve(c, m, statHostFromMap(map[string]bool{
-		"/dev/dri":        true,
+		"/dev/dri":              true,
+		"/dev/nvidiactl":        true,
+		"/dev/nvidia-uvm":       true,
+		"/dev/nvidia-uvm-tools": true,
+		"/dev/nvidia0":          true,
+	}))
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(r.Devices) != 5 {
+		t.Errorf("Devices count = %d want 5", len(r.Devices))
+	}
+}
+
+func TestResolve_NvidiaProfileDropsMissingUVMTools(t *testing.T) {
+	c, _ := NewCatalog("")
+	m := &Manifest{Profiles: []string{"!default-limits", "gpu-nvidia"}}
+	r, err := Resolve(c, m, statHostFromMap(map[string]bool{
 		"/dev/nvidiactl":  true,
 		"/dev/nvidia-uvm": true,
 		"/dev/nvidia0":    true,
@@ -283,8 +300,15 @@ func TestResolve_DeviceConcatenation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if len(r.Devices) != 5 {
-		t.Errorf("Devices count = %d want 5", len(r.Devices))
+	for _, d := range r.Devices {
+		if d.Path == "/dev/nvidia-uvm-tools" {
+			t.Fatalf("missing /dev/nvidia-uvm-tools should be dropped, got devices %+v", r.Devices)
+		}
+	}
+	for _, raw := range r.LXCRaw {
+		if strings.Contains(raw, "/dev/nvidia-uvm-tools") {
+			t.Fatalf("missing /dev/nvidia-uvm-tools mount should be dropped, got %q", raw)
+		}
 	}
 }
 
