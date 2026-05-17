@@ -1,0 +1,138 @@
+# SmoothNAS plugin manifest for Games-on-Whales Wolf (NVIDIA variant).
+#
+# This is the default variant because NVIDIA hosts need the most
+# explicit profile selection. For AMD or Intel hosts, use the sibling
+# manifests:
+#   smoothnas-plugin-amd.yaml
+#   smoothnas-plugin-intel.yaml
+
+apiVersion: smoothnas.io/v1
+kind: Plugin
+
+metadata:
+  name: wolf
+  version: 0.1.0 # x-release-please-version
+  description: |
+    Games-on-Whales Wolf game streaming host for Moonlight clients.
+    Wolf stores its config, TLS material, paired clients, profile
+    data, and app state on a tier-bound SSD volume, and launches
+    per-session application containers through the SmoothNAS runtime.
+  vendor: smoothnas
+  homepage: https://github.com/RakuenSoftware/smoothnas-plugin-wolf
+
+artifact:
+  type: oci-image
+  image: ghcr.io/rakuensoftware/smoothnas-plugin-wolf:0.1.0 # x-release-please-version
+  # digest filled in by .github/workflows/release.yml at publish time.
+
+container:
+  command: []
+  restartPolicy: unless-stopped
+  resources:
+    memory: "${MEMORY_LIMIT}"
+
+volumes:
+  - name: state
+    mode: tier-bound
+    slot: SSD
+    minSize: 100G
+    bind: /etc/wolf
+  - name: runtime
+    mode: flat
+    bind: /run/user/wolf
+
+ports:
+  - name: https
+    port: 47984
+    protocol: tcp
+    expose: false
+    hostExpose: true
+  - name: http
+    port: 47989
+    protocol: tcp
+    expose: false
+    hostExpose: true
+  - name: control
+    port: 47999
+    protocol: udp
+    expose: false
+    hostExpose: true
+  - name: rtsp
+    port: 48010
+    protocol: tcp
+    expose: false
+    hostExpose: true
+  - name: video
+    port: 48100
+    protocol: udp
+    expose: false
+    hostExpose: true
+  - name: audio
+    port: 48200
+    protocol: udp
+    expose: false
+    hostExpose: true
+
+profiles:
+  - wolf-runtime
+  - gpu-nvidia
+  - default-limits
+
+config:
+  - key: MEMORY_LIMIT
+    type: string
+    label: Container memory
+    default: 8GiB
+    description: LXC memory limit for the Wolf control container.
+  - key: WOLF_LOG_LEVEL
+    type: select
+    label: Log level
+    default: INFO
+    options:
+      - value: ERROR
+      - value: WARNING
+      - value: INFO
+      - value: DEBUG
+      - value: TRACE
+    description: Wolf server log verbosity.
+  - key: WOLF_RENDER_NODE
+    type: string
+    label: Render node
+    default: /dev/dri/renderD128
+    description: DRM render node Wolf uses for virtual desktops and vendor detection.
+  - key: WOLF_ENCODER_NODE
+    type: string
+    label: Encoder node
+    default: /dev/dri/renderD128
+    description: DRM render node GStreamer uses for encoding; defaults to the render node.
+  - key: WOLF_PULSE_IMAGE
+    type: string
+    label: PulseAudio image
+    default: ghcr.io/games-on-whales/pulseaudio:master
+    description: PulseAudio helper image started by Wolf when no audio server is already available.
+  - key: WOLF_STOP_CONTAINER_ON_EXIT
+    type: select
+    label: Stop apps on disconnect
+    default: "TRUE"
+    options:
+      - value: "TRUE"
+      - value: "FALSE"
+    description: When TRUE, Wolf stops and removes app containers when a stream ends.
+  - key: WOLF_USE_ZERO_COPY
+    type: select
+    label: Zero-copy video
+    default: "TRUE"
+    options:
+      - value: "TRUE"
+      - value: "FALSE"
+    description: Enables Wolf's zero-copy GStreamer path.
+  - key: NVIDIA_VISIBLE_DEVICES
+    type: string
+    label: NVIDIA devices
+    default: all
+    description: NVIDIA device selector passed through to Wolf-launched app containers.
+  - key: NVIDIA_DRIVER_CAPABILITIES
+    type: string
+    label: NVIDIA capabilities
+    default: all
+    description: NVIDIA driver capability selector passed through to Wolf-launched app containers.
