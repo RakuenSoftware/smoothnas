@@ -1,23 +1,14 @@
 diff --git a/internal/lxc/manager.go b/internal/lxc/manager.go
-index 4694ccd..a77bcae 100644
+index 6f2ebb1..d43f790 100644
 --- a/internal/lxc/manager.go
 +++ b/internal/lxc/manager.go
-@@ -1020,7 +1020,10 @@ func (m *Manager) createLegacyContainer(id string, imgRec *store.ImageRecord, cf
- 		"--newpath", m.lxcPath,
- 	).CombinedOutput()
- 	if err != nil {
--		return fmt.Errorf("manager: clone %s → %s: %s: %w", imgRec.TemplateName, id, out, err)
-+		log.Printf("CreateContainer[legacy]: lxc-copy failed for %s → %s, trying direct copy fallback: %s: %v", imgRec.TemplateName, id, out, err)
-+		if fallbackErr := m.copyLegacyContainerDir(imgRec.TemplateName, id); fallbackErr != nil {
-+			return fmt.Errorf("manager: clone %s → %s: %s: %w (direct copy fallback failed: %v)", imgRec.TemplateName, id, out, err, fallbackErr)
-+		}
- 	}
- 
- 	// Allocate IP for bridge networking.
-@@ -1057,6 +1060,74 @@ func (m *Manager) createLegacyContainer(id string, imgRec *store.ImageRecord, cf
- 	return nil
- }
- 
+@@ -1047 +1047,4 @@ func (m *Manager) createLegacyContainer(id string, imgRec *store.ImageRecord, cf
+-			return fmt.Errorf("manager: clone %s -> %s: %s: %w", imgRec.TemplateName, id, out, err)
++			log.Printf("CreateContainer[legacy]: lxc-copy failed for %s -> %s, trying direct copy fallback: %s: %v", imgRec.TemplateName, id, out, err)
++			if fallbackErr := m.copyLegacyContainerDir(imgRec.TemplateName, id); fallbackErr != nil {
++				return fmt.Errorf("manager: clone %s -> %s: %s: %w (direct copy fallback failed: %v)", imgRec.TemplateName, id, out, err, fallbackErr)
++			}
+@@ -1085,0 +1089,68 @@ func (m *Manager) createLegacyContainer(id string, imgRec *store.ImageRecord, cf
 +func (m *Manager) copyLegacyContainerDir(templateName, id string) error {
 +	srcDir := filepath.Join(m.lxcPath, templateName)
 +	dstDir := filepath.Join(m.lxcPath, id)
@@ -86,6 +77,3 @@ index 4694ccd..a77bcae 100644
 +	return nil
 +}
 +
- // prepareRootfs ensures runtime directories and resolv.conf exist in the rootfs.
- func (m *Manager) prepareRootfs(rootfs string, cfg ContainerConfig) {
- 	// Ensure runtime directories referenced by XDG_RUNTIME_DIR.

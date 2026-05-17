@@ -11,7 +11,7 @@ index d262b16..d388d8d 100644
  	"fmt"
  	"strings"
  )
-@@ -141,8 +143,34 @@ func appTemplateName(app, tag string) string {
+@@ -141,6 +143,32 @@ func appTemplateName(app, tag string) string {
  }
  
  // ociTemplateName returns the LXC container name for an OCI image template.
@@ -44,14 +44,4 @@ index d262b16..d388d8d 100644
 +		safe = "image"
 +	}
 +	return prefix + safe + "_" + digest
- }
- 
- // sanitize replaces characters that are not safe in an LXC container name.
-@@ -150,6 +178,7 @@ func sanitize(s string) string {
- 	return strings.NewReplacer(
- 		":", "_",
- 		"/", "_",
-+		".", "_",
- 		" ", "_",
- 	).Replace(s)
  }
