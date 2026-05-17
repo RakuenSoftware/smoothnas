@@ -153,6 +153,9 @@ func TestBuildCreatePayload_LlamaSingleInstance(t *testing.T) {
 	if got.Labels[runtime.PluginNameLabel] != "llama-cpp" {
 		t.Errorf("name label = %q", got.Labels[runtime.PluginNameLabel])
 	}
+	if got.Labels[runtime.LXC2DockerBindMountInitLabel] != "image" {
+		t.Errorf("bind mount init label = %q", got.Labels[runtime.LXC2DockerBindMountInitLabel])
+	}
 	// Env is sorted; with one MODEL_PATH key we should have exactly one entry.
 	if len(got.Env) != 1 || !strings.HasPrefix(got.Env[0], "MODEL_PATH=") {
 		t.Errorf("env = %v", got.Env)

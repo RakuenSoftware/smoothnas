@@ -125,10 +125,11 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 	}
 
 	labels := map[string]string{
-		runtime.PluginManagedLabel:  "true",
-		runtime.PluginNameLabel:     in.Plugin.Name,
-		runtime.PluginVersionLabel:  in.Plugin.Version,
-		runtime.PluginInstanceLabel: strconv.Itoa(in.Instance),
+		runtime.PluginManagedLabel:           "true",
+		runtime.PluginNameLabel:              in.Plugin.Name,
+		runtime.PluginVersionLabel:           in.Plugin.Version,
+		runtime.PluginInstanceLabel:          strconv.Itoa(in.Instance),
+		runtime.LXC2DockerBindMountInitLabel: "image",
 	}
 
 	host := runtime.HostConfig{
