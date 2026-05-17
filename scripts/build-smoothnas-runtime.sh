@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 LXC2DOCKER_REPO="${LXC2DOCKER_REPO:-https://github.com/games-on-whales/LXC2Docker.git}"
-LXC2DOCKER_REF="${LXC2DOCKER_REF:-187a4ac40a3e2188393a932f15bb3dcf958dd1b0}"
+LXC2DOCKER_REF="${LXC2DOCKER_REF:-HEAD}"
 BUILD_DIR="${PROJECT_DIR}/runtime/build/LXC2Docker"
 OUT="${PROJECT_DIR}/bin/docker-lxc-daemon"
 
