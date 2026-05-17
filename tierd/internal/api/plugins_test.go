@@ -170,6 +170,67 @@ func TestPluginsAPI_ParseReturnsManifestJSONShape(t *testing.T) {
 	}
 }
 
+func TestPluginsAPI_CatalogLatestFetchesReleaseManifest(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	fixture := readManifestFixture(t, "gh-runner.yaml")
+
+	mux := http.NewServeMux()
+	var srv *httptest.Server
+	mux.HandleFunc("/repos/RakuenSoftware/smoothnas-plugin-gh-runner/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != "SmoothNAS" {
+			t.Fatalf("User-Agent = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tag_name": "v0.3.2",
+			"html_url": "https://github.com/RakuenSoftware/smoothnas-plugin-gh-runner/releases/tag/v0.3.2",
+			"assets": []map[string]any{
+				{"name": "notes.txt", "browser_download_url": srv.URL + "/assets/notes.txt"},
+				{"name": "smoothnas-plugin.yaml", "browser_download_url": srv.URL + "/assets/smoothnas-plugin.yaml"},
+			},
+		})
+	})
+	mux.HandleFunc("/assets/smoothnas-plugin.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(fixture))
+	})
+	srv = httptest.NewServer(mux)
+	defer srv.Close()
+
+	h.catalogAPIBaseURL = srv.URL
+	h.catalogHTTPClient = srv.Client()
+
+	rr := doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins/catalog/latest?repo=RakuenSoftware/smoothnas-plugin-gh-runner", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var got pluginCatalogLatestResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.TagName != "v0.3.2" {
+		t.Fatalf("tag = %q", got.TagName)
+	}
+	if len(got.Manifests) != 1 {
+		t.Fatalf("manifests = %d", len(got.Manifests))
+	}
+	if got.Manifests[0].AssetName != "smoothnas-plugin.yaml" {
+		t.Fatalf("asset = %q", got.Manifests[0].AssetName)
+	}
+	if got.Manifests[0].Manifest.Metadata.Name != "gh-runner" {
+		t.Fatalf("manifest name = %q", got.Manifests[0].Manifest.Metadata.Name)
+	}
+	if !strings.Contains(got.Manifests[0].ManifestYAML, "apiVersion: smoothnas.io/v1") {
+		t.Fatalf("manifest yaml missing fixture content")
+	}
+}
+
+func TestPluginsAPI_CatalogLatestRejectsInvalidRepo(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	rr := doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins/catalog/latest?repo=https://github.com/RakuenSoftware/smoothnas-plugin-gh-runner", nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestPluginsAPI_PreflightFailureSurfacesPlacements(t *testing.T) {
 	h, _ := newPluginsHandlerForTest(t)
 	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/preflight", map[string]any{
