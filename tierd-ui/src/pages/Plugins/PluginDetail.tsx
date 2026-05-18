@@ -18,6 +18,13 @@ type Detail = {
   manifest: string;
 };
 
+type GPUInfo = {
+  id: string;
+  vendor: string;
+  label: string;
+  devicePath: string;
+};
+
 type Tab = 'overview' | 'models' | 'logs' | 'config' | 'instances' | 'profiles' | 'danger';
 
 // instancesTabVisible decides whether to render the Instances tab on
@@ -633,6 +640,7 @@ function ConfigTab({
   // re-export the type — keeps validation truth in one place.
   const [fields, setFields] = useState<ConfigFieldMeta[]>([]);
   const [values, setValues] = useState<Record<string, string>>({ ...initial });
+  const [gpus, setGpus] = useState<GPUInfo[]>([]);
   const [busy, setBusy] = useState(false);
   const [restartBusy, setRestartBusy] = useState(false);
   const [error, setError] = useState('');
@@ -646,6 +654,14 @@ function ConfigTab({
         setFields(parsed.config ?? []);
       })
       .catch(() => { /* leave fields empty; the keys still render */ });
+    api.getSystemHardware().then((hw: any) => {
+      setGpus((hw?.gpus ?? []).map((g: any) => ({
+        id: g.id ?? g.devicePath,
+        vendor: g.vendor ?? '',
+        label: g.label ?? g.devicePath,
+        devicePath: g.devicePath ?? '',
+      })).filter((g: GPUInfo) => !!g.devicePath));
+    }).catch(() => { /* GPU fields keep the automatic/current option */ });
   }, [manifest]);
 
   function save() {
@@ -696,6 +712,7 @@ function ConfigTab({
                 id={`cfg-${f.key}`}
                 field={f}
                 value={values[f.key] ?? ''}
+                gpus={gpus}
                 onChange={value => setValues({ ...values, [f.key]: value })}
               />
               {f.description && <span className="help">{f.description}</span>}
@@ -737,6 +754,7 @@ type ConfigFieldMeta = {
   label?: string;
   description?: string;
   secret?: boolean;
+  gpuVendor?: string;
   options?: { value: string; label?: string }[];
   min?: string;
   max?: string;
@@ -748,13 +766,16 @@ function PluginConfigInput({
   id,
   field,
   value,
+  gpus,
   onChange,
 }: {
   id: string;
   field: ConfigFieldMeta;
   value: string;
+  gpus: GPUInfo[];
   onChange: (value: string) => void;
 }) {
+  const { t } = useI18n();
   if (field.type === 'select') {
     return (
       <select
@@ -778,6 +799,23 @@ function PluginConfigInput({
       />
     );
   }
+  if (field.type === 'gpu') {
+    const options = gpuOptions(field, value, gpus);
+    return (
+      <select
+        id={id}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+      >
+        <option value="">{t('plugins.install.config.gpuAutomatic')}</option>
+        {options.map(gpu => (
+          <option key={gpu.devicePath} value={gpu.devicePath}>
+            {gpu.label} ({gpu.devicePath})
+          </option>
+        ))}
+      </select>
+    );
+  }
   return (
     <div className="config-input-with-unit">
       <input
@@ -792,6 +830,26 @@ function PluginConfigInput({
       {field.unit && <span>{field.unit}</span>}
     </div>
   );
+}
+
+function gpuOptions(field: ConfigFieldMeta, value: string, gpus: GPUInfo[]): GPUInfo[] {
+  const vendor = (field.gpuVendor ?? '').toLowerCase();
+  const out = gpus.filter(gpu => gpuMatchesField(field, gpu.vendor));
+  if (value && !out.some(gpu => gpu.devicePath === value)) {
+    out.push({
+      id: value,
+      vendor: field.gpuVendor ?? '',
+      label: value,
+      devicePath: value,
+    });
+  }
+  return out;
+}
+
+function gpuMatchesField(field: { gpuVendor?: string }, gpuVendor: string): boolean {
+  const vendor = (field.gpuVendor ?? '').toLowerCase();
+  const gpu = gpuVendor.toLowerCase();
+  return !vendor || gpu === vendor || (vendor === 'amd' && gpu === 'intel');
 }
 
 function ProfilesTab({ profiles }: { profiles: string[] }) {

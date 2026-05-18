@@ -220,6 +220,22 @@ func TestValidateManifest_FailureModes(t *testing.T) {
 			wantField: "config[0].type",
 		},
 		{
+			name: "bad gpu vendor",
+			mutate: func(m *Manifest) {
+				m.Config[0].Type = ConfigTypeGPU
+				m.Config[0].GPUVendor = "matrox"
+			},
+			wantField: "config[0].gpuVendor",
+		},
+		{
+			name: "gpu vendor on non-gpu field",
+			mutate: func(m *Manifest) {
+				m.Config[0].Type = ConfigTypeString
+				m.Config[0].GPUVendor = GPUVendorNVIDIA
+			},
+			wantField: "config[0].gpuVendor",
+		},
+		{
 			name:      "select config missing options",
 			mutate:    func(m *Manifest) { m.Config[0].Type = "select" },
 			wantField: "config[0].options",
@@ -252,6 +268,20 @@ func TestValidateManifest_FailureModes(t *testing.T) {
 				t.Errorf("expected issue on field %q, got fields %v", tc.wantField, fields)
 			}
 		})
+	}
+}
+
+func TestValidateManifest_AllowsGPUConfigField(t *testing.T) {
+	m := loadFixture(t, "llama.yaml")
+	m.Config = append(m.Config, ConfigField{
+		Key:       "SMOOTHNAS_GPU",
+		Type:      ConfigTypeGPU,
+		Label:     "GPU",
+		GPUVendor: GPUVendorNVIDIA,
+	})
+
+	if err := ValidateManifest(m); err != nil {
+		t.Fatalf("ValidateManifest: %v", err)
 	}
 }
 

@@ -123,6 +123,10 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 	for _, k := range envKeys {
 		env = append(env, k+"="+envMap[k])
 	}
+	gpu, err := selectedGPU(in.Manifest, envMap)
+	if err != nil {
+		return runtime.CreateContainerRequest{}, err
+	}
 
 	labels := map[string]string{
 		runtime.PluginManagedLabel:           "true",
@@ -154,7 +158,14 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 	}
 	if in.Profiles != nil {
 		// Devices: profile-contributed mappings.
+		seenDevices := map[string]bool{}
 		for _, d := range in.Profiles.Devices {
+			d = gpu.rewriteDevice(d)
+			deviceKey := d.Path + "\x00" + cgroupPerms(d.CgroupPermissions)
+			if seenDevices[deviceKey] {
+				continue
+			}
+			seenDevices[deviceKey] = true
 			host.Devices = append(host.Devices, runtime.DeviceMapping{
 				PathOnHost:        d.Path,
 				PathInContainer:   d.Path,
@@ -175,7 +186,8 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 		// LXC raw-config directives ride as labels for LXC2Docker
 		// to apply at container start. Indexed so the ordering is
 		// preserved (the directives are order-sensitive).
-		for i, raw := range in.Profiles.LXCRaw {
+		rawConfig := gpu.rewriteRawConfig(in.Profiles.LXCRaw)
+		for i, raw := range rawConfig {
 			labels[fmt.Sprintf("io.smoothnas.lxc.raw.%d", i)] = raw
 		}
 	}
@@ -275,6 +287,141 @@ func cgroupPerms(p string) string {
 		return "rwm"
 	}
 	return p
+}
+
+type gpuSelection struct {
+	Vendor string
+	Path   string
+}
+
+func selectedGPU(m *Manifest, env map[string]string) (gpuSelection, error) {
+	for _, f := range m.Config {
+		if f.Type != ConfigTypeGPU {
+			continue
+		}
+		path := strings.TrimSpace(env[f.Key])
+		if path == "" {
+			continue
+		}
+		gpu := gpuSelection{Vendor: f.GPUVendor, Path: path}
+		if gpu.Vendor == "" {
+			gpu.Vendor = inferGPUVendor(path)
+		}
+		if !gpu.valid() {
+			return gpuSelection{}, fmt.Errorf("config %s: invalid GPU device %q for vendor %q", f.Key, path, f.GPUVendor)
+		}
+		return gpu, nil
+	}
+	return gpuSelection{}, nil
+}
+
+func inferGPUVendor(path string) string {
+	switch {
+	case isNVIDIAGPUPath(path):
+		return GPUVendorNVIDIA
+	case isDRIRenderPath(path):
+		return GPUVendorAMD
+	default:
+		return ""
+	}
+}
+
+func (g gpuSelection) valid() bool {
+	switch g.Vendor {
+	case "":
+		return g.Path == ""
+	case GPUVendorNVIDIA:
+		return isNVIDIAGPUPath(g.Path)
+	case GPUVendorAMD, GPUVendorIntel:
+		return isDRIRenderPath(g.Path)
+	default:
+		return false
+	}
+}
+
+func (g gpuSelection) rewriteDevice(d ProfileDevice) ProfileDevice {
+	if g.Path == "" {
+		return d
+	}
+	switch g.Vendor {
+	case GPUVendorNVIDIA:
+		if isNVIDIAGPUPath(d.Path) {
+			d.Path = g.Path
+		}
+	case GPUVendorAMD, GPUVendorIntel:
+		if d.Path == "/dev/dri" || isDRIRenderPath(d.Path) {
+			d.Path = g.Path
+		}
+	}
+	return d
+}
+
+func (g gpuSelection) rewriteRawConfig(raw []string) []string {
+	if g.Path == "" {
+		return raw
+	}
+	out := make([]string, 0, len(raw))
+	seen := map[string]bool{}
+	for _, line := range raw {
+		next := g.rewriteRawLine(line)
+		if seen[next] {
+			continue
+		}
+		seen[next] = true
+		out = append(out, next)
+	}
+	return out
+}
+
+func (g gpuSelection) rewriteRawLine(line string) string {
+	if g.Path == "" || !strings.HasPrefix(line, "lxc.mount.entry = ") {
+		return line
+	}
+	switch g.Vendor {
+	case GPUVendorNVIDIA:
+		fields := strings.Fields(line)
+		if len(fields) >= 4 && isNVIDIAGPUPath(fields[2]) {
+			return lxcDeviceMountLine(g.Path)
+		}
+	case GPUVendorAMD, GPUVendorIntel:
+		fields := strings.Fields(line)
+		if len(fields) >= 4 && (fields[2] == "/dev/dri" || isDRIRenderPath(fields[2])) {
+			return lxcDeviceMountLine(g.Path)
+		}
+	}
+	return line
+}
+
+func lxcDeviceMountLine(path string) string {
+	return fmt.Sprintf("lxc.mount.entry = %s %s none bind,optional,create=file 0 0", path, strings.TrimPrefix(path, "/"))
+}
+
+func isNVIDIAGPUPath(path string) bool {
+	const prefix = "/dev/nvidia"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	return allDigits(path[len(prefix):])
+}
+
+func isDRIRenderPath(path string) bool {
+	const prefix = "/dev/dri/renderD"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	return allDigits(path[len(prefix):])
+}
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // volumeHostPath looks up the host path for a (volume, instance)
