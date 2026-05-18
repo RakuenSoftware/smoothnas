@@ -114,6 +114,8 @@ table inet filter {
     }
     chain forward {
         type filter hook forward priority 0; policy drop;
+        iifname "veth0" accept
+        ct state established,related oifname "veth0" accept
     }
     chain output {
         type filter hook output priority 0; policy accept;
