@@ -136,6 +136,84 @@ func TestStore_Insert_NormalizesEmbeddedImageDigest(t *testing.T) {
 	}
 }
 
+func TestStore_UpdateManifestPreservesOperatorConfig(t *testing.T) {
+	s := openTestStore(t)
+	m := mustParse(t, "llama.yaml")
+	if err := s.Insert(InsertParams{
+		Manifest: m,
+		Paths:    pathsForSingleInstance(m, "/var/lib/smoothnas/plugins"),
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if err := s.ReplaceConfig(m.Metadata.Name, map[string]string{"MODEL_PATH": "/models/custom.gguf"}); err != nil {
+		t.Fatalf("replace config: %v", err)
+	}
+
+	updated := *m
+	updated.Metadata.Version = "9.9.9"
+	updated.Artifact.Image = "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp:9.9.9"
+	updated.Ports = []Port{{
+		Name: "api", Port: 9090, Protocol: "tcp", Expose: true,
+	}}
+	updated.Config = append(updated.Config, ConfigField{
+		Key: "EXTRA_FLAG", Type: "text", Default: "on",
+	})
+
+	if err := s.UpdateManifest(m.Metadata.Name, &updated, "updated manifest yaml"); err != nil {
+		t.Fatalf("update manifest: %v", err)
+	}
+
+	rec, err := s.Get(m.Metadata.Name)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if rec.Plugin.Version != "9.9.9" {
+		t.Fatalf("version = %q", rec.Plugin.Version)
+	}
+	if rec.Plugin.ManifestYAML != "updated manifest yaml" {
+		t.Fatalf("manifest yaml = %q", rec.Plugin.ManifestYAML)
+	}
+	wantImage := "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp@sha256:abababababababababababababababababababababababababababababababab"
+	if rec.Plugin.ImageRef != wantImage {
+		t.Fatalf("image ref = %q", rec.Plugin.ImageRef)
+	}
+	if len(rec.Ports) != 1 || rec.Ports[0].ContainerPort != 9090 {
+		t.Fatalf("ports = %+v", rec.Ports)
+	}
+	gotConfig := map[string]string{}
+	for _, row := range rec.Config {
+		gotConfig[row.Key] = row.Value
+	}
+	if gotConfig["MODEL_PATH"] != "/models/custom.gguf" {
+		t.Fatalf("MODEL_PATH = %q", gotConfig["MODEL_PATH"])
+	}
+	if gotConfig["EXTRA_FLAG"] != "on" {
+		t.Fatalf("EXTRA_FLAG = %q", gotConfig["EXTRA_FLAG"])
+	}
+}
+
+func TestStore_UpdateManifestRejectsVolumeShapeChange(t *testing.T) {
+	s := openTestStore(t)
+	m := mustParse(t, "llama.yaml")
+	if err := s.Insert(InsertParams{
+		Manifest: m,
+		Paths:    pathsForSingleInstance(m, "/var/lib/smoothnas/plugins"),
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	updated := *m
+	updated.Metadata.Version = "9.9.9"
+	updated.Volumes = append(updated.Volumes, Volume{
+		Name: "cache", Mode: VolumeModeFlat, Bind: "/cache",
+	})
+
+	err := s.UpdateManifest(m.Metadata.Name, &updated, "updated manifest yaml")
+	if !errors.Is(err, ErrPluginUpdateRequiresReinstall) {
+		t.Fatalf("err = %v, want ErrPluginUpdateRequiresReinstall", err)
+	}
+}
+
 func TestStore_InsertGet_MultiInstance_PerInstanceVolume(t *testing.T) {
 	s := openTestStore(t)
 	m := mustParse(t, "gh-runner.yaml") // count: 2, perInstance workspace

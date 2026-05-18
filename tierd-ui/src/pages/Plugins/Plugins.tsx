@@ -5,6 +5,7 @@ import { api } from '../../api/api';
 import { extractError } from '../../utils/errors';
 import Spinner from '../../components/Spinner/Spinner';
 import ConfirmDialog from '../../components/ConfirmDialog/ConfirmDialog';
+import { pluginCatalogRepositories } from '../../data/pluginCatalog';
 
 // PluginRow mirrors the JSON shape the phase-06a backend returns
 // from GET /api/plugins under the "plugins" key. Kept loose because
@@ -21,6 +22,12 @@ type PluginRow = {
   resolvedProfiles: string[];
   installedAt: string;
   updatedAt: string;
+};
+
+type PluginUpdate = {
+  version: string;
+  manifestYaml: string;
+  releaseTag: string;
 };
 
 // stateClass maps the aggregate plugin.state string to one of the
@@ -56,6 +63,7 @@ export default function Plugins() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [plugins, setPlugins] = useState<PluginRow[]>([]);
+  const [updates, setUpdates] = useState<Record<string, PluginUpdate>>({});
   const [error, setError] = useState('');
   // busyName tracks per-card lifecycle action in flight so the
   // Start/Stop buttons can show a tiny spinner and disable
@@ -73,13 +81,44 @@ export default function Plugins() {
     setError('');
     api.listPlugins()
       .then(resp => {
-        setPlugins(resp?.plugins ?? []);
+        const rows = resp?.plugins ?? [];
+        setPlugins(rows);
         setLoading(false);
+        loadAvailableUpdates(rows);
       })
       .catch((e: any) => {
         setError(extractError(e, t('plugins.error.list')));
         setLoading(false);
       });
+  }
+
+  function loadAvailableUpdates(rows: PluginRow[]) {
+    setUpdates({});
+    if (rows.length === 0) return;
+    const installed = new Map(rows.map(p => [p.name, p]));
+    Promise.all(pluginCatalogRepositories.map(repo =>
+      api.getPluginCatalogLatest(repo.repo).catch(() => null)
+    )).then(releases => {
+      const next: Record<string, PluginUpdate> = {};
+      for (const release of releases) {
+        if (!release) continue;
+        for (const item of release.manifests ?? []) {
+          const name = item.manifest?.metadata?.name;
+          const version = item.manifest?.metadata?.version;
+          const current = name ? installed.get(name) : undefined;
+          if (!current || !version || !isVersionGreater(version, current.version)) continue;
+          const existing = next[name];
+          if (!existing || isVersionGreater(version, existing.version)) {
+            next[name] = {
+              version,
+              manifestYaml: item.manifestYaml,
+              releaseTag: release.tagName,
+            };
+          }
+        }
+      }
+      setUpdates(next);
+    });
   }
 
   function lifecycle(name: string, verb: 'start' | 'stop' | 'restart' | 'materialise') {
@@ -103,6 +142,15 @@ export default function Plugins() {
     api.uninstallPlugin(name)
       .then(() => refresh())
       .catch((e: any) => setError(extractError(e, t('plugins.error.uninstall'))))
+      .finally(() => setBusyName(null));
+  }
+
+  function updatePlugin(name: string, manifest: string) {
+    setBusyName(name);
+    setError('');
+    api.updatePlugin(name, { manifest })
+      .then(() => refresh())
+      .catch((e: any) => setError(extractError(e, t('plugins.error.update'))))
       .finally(() => setBusyName(null));
   }
 
@@ -139,8 +187,10 @@ export default function Plugins() {
             <PluginCard
               key={p.name}
               plugin={p}
+              update={updates[p.name]}
               busy={busyName === p.name}
               onLifecycle={(verb) => lifecycle(p.name, verb)}
+              onUpdate={(manifest) => updatePlugin(p.name, manifest)}
               onUninstall={() => setConfirmUninstall(p.name)}
               onConfigure={() => navigate(`/plugins/manage/${p.name}`)}
               onOpen={() => navigate(`/plugins/${p.name}`)}
@@ -168,15 +218,19 @@ export default function Plugins() {
 // shown so the operator can see the surface that's coming.
 function PluginCard({
   plugin,
+  update,
   busy,
   onLifecycle,
+  onUpdate,
   onUninstall,
   onConfigure,
   onOpen,
 }: {
   plugin: PluginRow;
+  update?: PluginUpdate;
   busy: boolean;
   onLifecycle: (verb: 'start' | 'stop' | 'restart' | 'materialise') => void;
+  onUpdate: (manifest: string) => void;
   onUninstall: () => void;
   onConfigure: () => void;
   onOpen: () => void;
@@ -193,6 +247,12 @@ function PluginCard({
           <h3>{plugin.name}</h3>
           <div className="plugin-card-meta">
             <span>{t('plugins.label.version')}: {plugin.version}</span>
+            {update && (
+              <>
+                <span>·</span>
+                <span>{t('plugins.label.updateAvailable')}: {update.version}</span>
+              </>
+            )}
             <span>·</span>
             <span>{plugin.artifactType}</span>
             {plugin.instanceCount > 1 && (
@@ -238,6 +298,16 @@ function PluginCard({
       </dl>
 
       <div className="plugin-card-actions">
+        {update && (
+          <button
+            className="btn primary"
+            disabled={busy}
+            onClick={() => onUpdate(update.manifestYaml)}
+            title={update.releaseTag}
+          >
+            {t('plugins.action.update')}
+          </button>
+        )}
         {needsMaterialise ? (
           <button
             className="btn primary"
@@ -296,4 +366,29 @@ function PluginCard({
       </div>
     </div>
   );
+}
+
+function isVersionGreater(candidate: string, current: string): boolean {
+  return compareSemver(candidate, current) > 0;
+}
+
+function compareSemver(a: string, b: string): number {
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  for (let i = 0; i < 3; i++) {
+    if (pa.nums[i] !== pb.nums[i]) return pa.nums[i] - pb.nums[i];
+  }
+  if (pa.suffix === pb.suffix) return 0;
+  if (!pa.suffix) return 1;
+  if (!pb.suffix) return -1;
+  return pa.suffix.localeCompare(pb.suffix);
+}
+
+function parseSemver(v: string): { nums: number[]; suffix: string } {
+  const match = v.match(/^(\d+)\.(\d+)\.(\d+)(.*)$/);
+  if (!match) return { nums: [0, 0, 0], suffix: v };
+  return {
+    nums: [Number(match[1]), Number(match[2]), Number(match[3])],
+    suffix: match[4] ?? '',
+  };
 }
