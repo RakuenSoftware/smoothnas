@@ -19,6 +19,10 @@ var ErrPluginNotFound = errors.New("plugin not found")
 // operator uninstalls and reinstalls.
 var ErrPluginExists = errors.New("plugin already exists")
 
+// ErrPluginUpdateRequiresReinstall is returned when a new manifest changes
+// install-time shape, such as volume placement or fixed instance count.
+var ErrPluginUpdateRequiresReinstall = errors.New("plugin update requires reinstall")
+
 // ValidationError is returned by ValidateManifest when one or more
 // fields fail validation. It collects every problem so operators
 // see all errors at once instead of one-at-a-time.

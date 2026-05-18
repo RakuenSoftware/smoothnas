@@ -363,6 +363,8 @@ export const api = {
     apiFetch<{ manifest: any }>('POST', '/plugins/parse', req),
   installPlugin: (req: { manifest: string; tierAssignments?: { default?: string; perVolume?: Record<string, string> } }) =>
     apiFetch<any>('POST', '/plugins/install', req),
+  updatePlugin: (name: string, req: { manifest: string }) =>
+    apiFetch<any>('POST', `/plugins/${name}/update`, req),
   uninstallPlugin: (name: string) => apiFetch<void>('DELETE', `/plugins/${name}`),
   materialisePlugin: (name: string) => apiFetch<any>('POST', `/plugins/${name}/materialise`, {}),
   startPlugin: (name: string) => apiFetch<any>('POST', `/plugins/${name}/start`, {}),

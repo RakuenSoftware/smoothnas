@@ -60,6 +60,7 @@ func NewPluginsHandler(
 //	POST   /api/plugins/<name>/stop           lifecycle
 //	POST   /api/plugins/<name>/restart        lifecycle
 //	POST   /api/plugins/<name>/materialise    pull image + create containers
+//	POST   /api/plugins/<name>/update         replace manifest + materialise
 //	POST   /api/plugins/<name>/models/install download model, set MODEL_PATH, start
 //	PUT    /api/plugins/<name>/config         update plugin_config
 //	GET    /api/plugins/<name>/instances      per-instance state (phase 09)
@@ -133,6 +134,12 @@ func (h *PluginsHandler) routeNamed(w http.ResponseWriter, r *http.Request, rest
 			return
 		}
 		h.lifecycleVerb(w, r, name, verb)
+	case "update":
+		if r.Method != http.MethodPost {
+			jsonMethodNotAllowed(w)
+			return
+		}
+		h.update(w, r, name)
 	case "models/install":
 		if r.Method != http.MethodPost {
 			jsonMethodNotAllowed(w)
@@ -439,6 +446,80 @@ func (h *PluginsHandler) install(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(pluginDetail{
+		Plugin:    toPluginListItem(rec.Plugin),
+		Instances: rec.Instances,
+		Volumes:   rec.Volumes,
+		Ports:     rec.Ports,
+		Config:    rec.Config,
+		Manifest:  rec.Plugin.ManifestYAML,
+	})
+}
+
+func (h *PluginsHandler) update(w http.ResponseWriter, r *http.Request, name string) {
+	var req installRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonInvalidRequestBody(w)
+		return
+	}
+	if req.Manifest == "" {
+		jsonErrorCoded(w, "manifest is required", http.StatusBadRequest, "plugins.manifest_missing")
+		return
+	}
+	m, err := plugin.ParseManifest([]byte(req.Manifest))
+	if err != nil {
+		jsonErrorCoded(w, err.Error(), http.StatusBadRequest, "plugins.manifest_parse")
+		return
+	}
+	if err := plugin.ValidateManifest(m); err != nil {
+		jsonErrorCoded(w, err.Error(), http.StatusBadRequest, "plugins.manifest_invalid")
+		return
+	}
+	if m.Metadata.Name != name {
+		jsonErrorCoded(w, "manifest name does not match installed plugin", http.StatusBadRequest, "plugins.manifest_name_mismatch")
+		return
+	}
+
+	rec, err := h.store.Get(name)
+	if err != nil {
+		if errors.Is(err, plugin.ErrPluginNotFound) {
+			jsonErrorCoded(w, "plugin not found", http.StatusNotFound, "plugins.not_found")
+			return
+		}
+		serverError(w, err)
+		return
+	}
+	wasRunning := rec.Plugin.State == plugin.StateRunning
+
+	if err := h.store.UpdateManifest(name, m, req.Manifest); err != nil {
+		switch {
+		case errors.Is(err, plugin.ErrPluginNotFound):
+			jsonErrorCoded(w, "plugin not found", http.StatusNotFound, "plugins.not_found")
+		case errors.Is(err, plugin.ErrPluginUpdateRequiresReinstall):
+			jsonErrorCoded(w, err.Error(), http.StatusBadRequest, "plugins.update_requires_reinstall")
+		default:
+			serverError(w, err)
+		}
+		return
+	}
+
+	if h.lifecycle != nil {
+		if err := h.lifecycle.Materialise(r.Context(), name); err != nil {
+			jsonErrorCoded(w, fmt.Sprintf("update materialise: %v", err), http.StatusInternalServerError, "plugins.lifecycle_failed")
+			return
+		}
+		if wasRunning {
+			if err := h.lifecycle.Start(r.Context(), name); err != nil {
+				jsonErrorCoded(w, fmt.Sprintf("update start: %v", err), http.StatusInternalServerError, "plugins.lifecycle_failed")
+				return
+			}
+		}
+	}
+	rec, err = h.store.Get(name)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
 	_ = json.NewEncoder(w).Encode(pluginDetail{
 		Plugin:    toPluginListItem(rec.Plugin),
 		Instances: rec.Instances,
