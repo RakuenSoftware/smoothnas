@@ -423,6 +423,21 @@ func (h *PluginsHandler) install(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
+	if h.lifecycle != nil {
+		if err := h.lifecycle.Materialise(r.Context(), rec.Plugin.Name); err != nil {
+			jsonErrorCoded(w, fmt.Sprintf("autostart materialise: %v", err), http.StatusInternalServerError, "plugins.lifecycle_failed")
+			return
+		}
+		if err := h.lifecycle.Start(r.Context(), rec.Plugin.Name); err != nil {
+			jsonErrorCoded(w, fmt.Sprintf("autostart start: %v", err), http.StatusInternalServerError, "plugins.lifecycle_failed")
+			return
+		}
+		rec, err = h.store.Get(rec.Plugin.Name)
+		if err != nil {
+			serverError(w, err)
+			return
+		}
+	}
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(pluginDetail{
 		Plugin:    toPluginListItem(rec.Plugin),
