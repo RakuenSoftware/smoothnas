@@ -361,7 +361,7 @@ export const api = {
     apiFetch<any>('POST', '/plugins/preflight', req),
   parsePlugin: (req: { manifest: string }) =>
     apiFetch<{ manifest: any }>('POST', '/plugins/parse', req),
-  installPlugin: (req: { manifest: string; tierAssignments?: { default?: string; perVolume?: Record<string, string> } }) =>
+  installPlugin: (req: { manifest: string; tierAssignments?: { default?: string; perVolume?: Record<string, string> }; config?: Record<string, string> }) =>
     apiFetch<any>('POST', '/plugins/install', req),
   updatePlugin: (name: string, req: { manifest: string }) =>
     apiFetch<any>('POST', `/plugins/${name}/update`, req),

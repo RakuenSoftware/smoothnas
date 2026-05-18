@@ -54,6 +54,12 @@ type InstallOptions struct {
 	// "<unresolved>" tier_pool sentinel and an empty host_path —
 	// the operator must reinstall with assignments to fix.
 	Tiers TierAssignments
+
+	// Config carries install-time operator overrides for manifest
+	// config fields. Unknown keys are ignored by Store.Insert; known
+	// keys replace the manifest default before any runtime payload is
+	// materialised.
+	Config map[string]string
 }
 
 // NewInstaller constructs an Installer rooted at DefaultPluginsRoot.
@@ -165,7 +171,7 @@ func (i *Installer) InstallWithOptions(yamlBytes []byte, opts InstallOptions) (*
 		}
 	}
 
-	if err := i.store.Insert(InsertParams{Manifest: m, Paths: paths, Tiers: tierPools}); err != nil {
+	if err := i.store.Insert(InsertParams{Manifest: m, Paths: paths, Tiers: tierPools, Config: opts.Config}); err != nil {
 		return nil, err
 	}
 	if err := i.store.SetManifestYAML(m.Metadata.Name, string(yamlBytes)); err != nil {

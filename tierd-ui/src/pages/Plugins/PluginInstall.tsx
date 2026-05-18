@@ -235,25 +235,12 @@ export default function PluginInstall() {
     const tierAssignments = tierBoundVolumes.length > 0
       ? { perVolume: tierChoices }
       : undefined;
-    api.installPlugin({ manifest: manifestText, tierAssignments })
+    api.installPlugin({ manifest: manifestText, tierAssignments, config: { ...configValues } })
       .then(() => {
-        // Optional: write the operator's config overrides if any
-        // differ from the manifest defaults. The install endpoint
-        // already populated defaults; PUT only the changed keys.
-        const overrides: Record<string, string> = {};
-        for (const f of parsed.config ?? []) {
-          const v = configValues[f.key] ?? '';
-          if (v !== (f.default ?? '')) overrides[f.key] = v;
-        }
-        const after = Object.keys(overrides).length > 0
-          ? api.updatePluginConfig(parsed.metadata.name, { ...configValues })
-          : Promise.resolve();
-        return after.then(() => {
-          setSuccess(t('plugins.install.success', { name: parsed.metadata.name }));
-          // Brief delay so the operator sees the success banner,
-          // then bounce back to /plugins.
-          setTimeout(() => navigate('/plugins'), 1200);
-        });
+        setSuccess(t('plugins.install.success', { name: parsed.metadata.name }));
+        // Brief delay so the operator sees the success banner,
+        // then bounce back to /plugins.
+        setTimeout(() => navigate('/plugins'), 1200);
       })
       .catch(e => setError(extractError(e, t('plugins.install.error.generic'))))
       .finally(() => setBusy(false));

@@ -303,6 +303,32 @@ func TestPluginsAPI_InstallHappyPath(t *testing.T) {
 	}
 }
 
+func TestPluginsAPI_InstallAppliesInitialConfig(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{
+		"manifest":        readManifestFixture(t, "llama.yaml"),
+		"tierAssignments": map[string]any{"default": "media"},
+		"config":          map[string]string{"MODEL_PATH": "/models/custom.gguf"},
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var detail pluginDetail
+	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got := ""
+	for _, cfg := range detail.Config {
+		if cfg.Key == "MODEL_PATH" {
+			got = cfg.Value
+			break
+		}
+	}
+	if got != "/models/custom.gguf" {
+		t.Fatalf("MODEL_PATH = %q, want install-time config override; config=%+v", got, detail.Config)
+	}
+}
+
 func TestPluginsAPI_UpdateInstalledPlugin(t *testing.T) {
 	h, _ := newPluginsHandlerForTest(t)
 	install := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{

@@ -379,10 +379,12 @@ func (h *PluginsHandler) preflight(w http.ResponseWriter, r *http.Request) {
 
 // installRequest is the body of POST /api/plugins/install. `manifest`
 // is the raw YAML the wizard collected; `tierAssignments` mirrors
-// the preflight request shape.
+// the preflight request shape. `config` carries install-time config
+// overrides that must be present before materialisation/autostart.
 type installRequest struct {
 	Manifest        string              `json:"manifest"`
 	TierAssignments preflightTierAssign `json:"tierAssignments"`
+	Config          map[string]string   `json:"config"`
 }
 
 func (h *PluginsHandler) install(w http.ResponseWriter, r *http.Request) {
@@ -410,6 +412,7 @@ func (h *PluginsHandler) install(w http.ResponseWriter, r *http.Request) {
 			Default:   req.TierAssignments.Default,
 			PerVolume: req.TierAssignments.PerVolume,
 		},
+		Config: req.Config,
 	})
 	if err != nil {
 		// Preflight failures map to 400 with the per-volume detail.
