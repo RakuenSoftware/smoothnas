@@ -28,8 +28,9 @@ const (
 	privateBuildRoot = "/var/lib/tierd/private-build"
 	stagingDir       = "/var/lib/tierd/update"
 
-	binaryPath = "/usr/local/bin/tierd"
-	uiPath     = "/usr/share/tierd-ui"
+	binaryPath  = "/usr/local/bin/tierd"
+	uiPath      = "/usr/share/tierd-ui"
+	runtimePath = "/usr/lib/smoothnas/docker-lxc-daemon"
 
 	cacheTTL         = 5 * time.Minute
 	minCheckInterval = 1 * time.Minute
@@ -71,14 +72,17 @@ const (
 // produced before the multi-arch split — `TierdSHAForArch` falls
 // back to it when an arch-specific field is empty.
 type Manifest struct {
-	Version        string `json:"version"`
-	Channel        string `json:"channel"`
-	TierdAmd64SHA  string `json:"tierd_amd64_sha256,omitempty"`
-	TierdArm64SHA  string `json:"tierd_arm64_sha256,omitempty"`
-	TierdSHA       string `json:"tierd_sha256,omitempty"` // legacy single-arch fallback
-	UISHA          string `json:"ui_sha256"`
-	SmoothfsRef    string `json:"smoothfs_ref,omitempty"`
-	SmoothfsSrcSHA string `json:"smoothfs_src_sha256,omitempty"`
+	Version         string `json:"version"`
+	Channel         string `json:"channel"`
+	TierdAmd64SHA   string `json:"tierd_amd64_sha256,omitempty"`
+	TierdArm64SHA   string `json:"tierd_arm64_sha256,omitempty"`
+	TierdSHA        string `json:"tierd_sha256,omitempty"` // legacy single-arch fallback
+	RuntimeAmd64SHA string `json:"runtime_amd64_sha256,omitempty"`
+	RuntimeArm64SHA string `json:"runtime_arm64_sha256,omitempty"`
+	RuntimeSHA      string `json:"runtime_sha256,omitempty"` // legacy single-arch fallback
+	UISHA           string `json:"ui_sha256"`
+	SmoothfsRef     string `json:"smoothfs_ref,omitempty"`
+	SmoothfsSrcSHA  string `json:"smoothfs_src_sha256,omitempty"`
 }
 
 // TierdSHAForArch returns the manifest's SHA-256 for the given GOARCH,
@@ -100,6 +104,22 @@ func (m *Manifest) TierdSHAForArch(arch string) string {
 	return m.TierdSHA
 }
 
+// RuntimeSHAForArch returns the manifest's SHA-256 for the bundled
+// smoothnas-runtime daemon, or "" for old releases that did not ship it.
+func (m *Manifest) RuntimeSHAForArch(arch string) string {
+	switch arch {
+	case "amd64":
+		if m.RuntimeAmd64SHA != "" {
+			return m.RuntimeAmd64SHA
+		}
+	case "arm64":
+		if m.RuntimeArm64SHA != "" {
+			return m.RuntimeArm64SHA
+		}
+	}
+	return m.RuntimeSHA
+}
+
 // tierdAssetNameForArch returns the release-asset filename to download
 // for the given GOARCH. Multi-arch releases ship `tierd-amd64` /
 // `tierd-arm64`; older single-arch releases shipped just `tierd`.
@@ -111,6 +131,14 @@ func tierdAssetNameForArch(arch string) string {
 		return "tierd-" + arch
 	}
 	return "tierd"
+}
+
+func runtimeAssetNameForArch(arch string) string {
+	switch arch {
+	case "amd64", "arm64":
+		return "smoothnas-runtime-" + arch
+	}
+	return "smoothnas-runtime"
 }
 
 // ReleaseInfo is the public-facing release metadata.
@@ -485,6 +513,10 @@ func (u *Updater) doApply() error {
 	if binaryAsset == nil {
 		binaryAsset = findAsset(rel.Assets, "tierd")
 	}
+	runtimeAsset := findAsset(rel.Assets, runtimeAssetNameForArch(arch))
+	if runtimeAsset == nil {
+		runtimeAsset = findAsset(rel.Assets, "smoothnas-runtime")
+	}
 	uiAsset := findAsset(rel.Assets, "tierd-ui.tar.gz")
 	smoothfsSrcAsset := findAsset(rel.Assets, "smoothfs-src.tar.gz") // optional, nil on older releases
 	if manifestAsset == nil || binaryAsset == nil || uiAsset == nil {
@@ -499,6 +531,7 @@ func (u *Updater) doApply() error {
 	// Download all artifacts.
 	manifestPath := filepath.Join(stagingDir, "manifest.json")
 	binaryStagePath := filepath.Join(stagingDir, "tierd")
+	runtimeStagePath := filepath.Join(stagingDir, "smoothnas-runtime")
 	uiStagePath := filepath.Join(stagingDir, "tierd-ui.tar.gz")
 
 	// Only use authenticated API downloads for the private JBailes channel;
@@ -513,6 +546,12 @@ func (u *Updater) doApply() error {
 		{manifestAsset, manifestPath},
 		{binaryAsset, binaryStagePath},
 		{uiAsset, uiStagePath},
+	}
+	if runtimeAsset != nil {
+		downloads = append(downloads, struct {
+			asset *ghAsset
+			dest  string
+		}{runtimeAsset, runtimeStagePath})
 	}
 	if smoothfsSrcAsset != nil {
 		downloads = append(downloads, struct {
@@ -549,6 +588,16 @@ func (u *Updater) doApply() error {
 	if err := verifyChecksum(uiStagePath, manifest.UISHA); err != nil {
 		return fmt.Errorf("UI checksum: %w", err)
 	}
+	runtimeSHA := manifest.RuntimeSHAForArch(arch)
+	runtimeUpdated := false
+	if runtimeSHA != "" {
+		if runtimeAsset == nil {
+			return fmt.Errorf("release manifest carries runtime checksum for arch %q but release is missing %s", arch, runtimeAssetNameForArch(arch))
+		}
+		if err := verifyChecksum(runtimeStagePath, runtimeSHA); err != nil {
+			return fmt.Errorf("runtime checksum: %w", err)
+		}
+	}
 
 	// Install.
 	u.setStage("installing")
@@ -561,6 +610,12 @@ func (u *Updater) doApply() error {
 	// Back up and replace UI assets.
 	if err := replaceUI(uiStagePath, uiPath); err != nil {
 		return fmt.Errorf("replace UI: %w", err)
+	}
+	if runtimeSHA != "" {
+		if err := backupAndReplace(runtimeStagePath, runtimePath, 0755); err != nil {
+			return fmt.Errorf("replace runtime: %w", err)
+		}
+		runtimeUpdated = true
 	}
 
 	// Record the version we just applied so subsequent checks reflect
@@ -597,6 +652,11 @@ func (u *Updater) doApply() error {
 	// the frontend reports "Update process stopped unexpectedly".
 	u.setStage("restarting")
 	time.Sleep(4 * time.Second)
+	if runtimeUpdated {
+		if out, err := execCommand("systemctl", "restart", "smoothnas-runtime.service").CombinedOutput(); err != nil {
+			return fmt.Errorf("restart smoothnas-runtime: %s: %w", strings.TrimSpace(string(out)), err)
+		}
+	}
 	exec.Command("systemctl", "restart", "tierd.service").Start()
 
 	return nil
@@ -604,9 +664,9 @@ func (u *Updater) doApply() error {
 
 // StartManualApply begins the update from locally provided artifacts.
 // The caller provides the raw contents of manifest.json, the tierd binary,
-// the tierd-ui.tar.gz archive, and optionally the smoothfs-src.tar.gz
-// (nil skips the kernel module rebuild). Returns an error if already applying.
-func (u *Updater) StartManualApply(manifest, binary, ui, smoothfsSrc []byte) error {
+// the tierd-ui.tar.gz archive, and optionally the smoothnas-runtime binary
+// plus smoothfs-src.tar.gz. Returns an error if already applying.
+func (u *Updater) StartManualApply(manifest, binary, ui, runtimeBinary, smoothfsSrc []byte) error {
 	u.mu.Lock()
 	if u.applying || u.packageApplying {
 		u.mu.Unlock()
@@ -623,7 +683,7 @@ func (u *Updater) StartManualApply(manifest, binary, ui, smoothfsSrc []byte) err
 			u.mu.Unlock()
 		}()
 
-		if err := u.doManualApply(manifest, binary, ui, smoothfsSrc); err != nil {
+		if err := u.doManualApply(manifest, binary, ui, runtimeBinary, smoothfsSrc); err != nil {
 			log.Printf("manual update failed: %v", err)
 			u.mu.Lock()
 			u.progress = &ApplyProgress{Stage: "failed", Error: err.Error()}
@@ -634,7 +694,7 @@ func (u *Updater) StartManualApply(manifest, binary, ui, smoothfsSrc []byte) err
 	return nil
 }
 
-func (u *Updater) doManualApply(manifestData, binaryData, uiData, smoothfsSrcData []byte) error {
+func (u *Updater) doManualApply(manifestData, binaryData, uiData, runtimeBinaryData, smoothfsSrcData []byte) error {
 	var manifest Manifest
 	if err := json.Unmarshal(manifestData, &manifest); err != nil {
 		return fmt.Errorf("parse manifest: %w", err)
@@ -646,6 +706,7 @@ func (u *Updater) doManualApply(manifestData, binaryData, uiData, smoothfsSrcDat
 	}
 
 	binaryStagePath := filepath.Join(stagingDir, "tierd")
+	runtimeStagePath := filepath.Join(stagingDir, "smoothnas-runtime")
 	uiStagePath := filepath.Join(stagingDir, "tierd-ui.tar.gz")
 
 	if err := os.WriteFile(binaryStagePath, binaryData, 0644); err != nil {
@@ -653,6 +714,11 @@ func (u *Updater) doManualApply(manifestData, binaryData, uiData, smoothfsSrcDat
 	}
 	if err := os.WriteFile(uiStagePath, uiData, 0644); err != nil {
 		return fmt.Errorf("write UI archive: %w", err)
+	}
+	if len(runtimeBinaryData) > 0 {
+		if err := os.WriteFile(runtimeStagePath, runtimeBinaryData, 0644); err != nil {
+			return fmt.Errorf("write runtime binary: %w", err)
+		}
 	}
 
 	// Verify checksums against the per-arch manifest entry. The caller
@@ -670,6 +736,16 @@ func (u *Updater) doManualApply(manifestData, binaryData, uiData, smoothfsSrcDat
 	if err := verifyChecksum(uiStagePath, manifest.UISHA); err != nil {
 		return fmt.Errorf("UI checksum: %w", err)
 	}
+	runtimeSHA := manifest.RuntimeSHAForArch(arch)
+	runtimeUpdated := false
+	if runtimeSHA != "" {
+		if len(runtimeBinaryData) == 0 {
+			return fmt.Errorf("manifest carries runtime checksum for arch %q but upload is missing smoothnas-runtime", arch)
+		}
+		if err := verifyChecksum(runtimeStagePath, runtimeSHA); err != nil {
+			return fmt.Errorf("runtime checksum: %w", err)
+		}
+	}
 
 	// Install.
 	u.setStage("installing")
@@ -679,6 +755,12 @@ func (u *Updater) doManualApply(manifestData, binaryData, uiData, smoothfsSrcDat
 	}
 	if err := replaceUI(uiStagePath, uiPath); err != nil {
 		return fmt.Errorf("replace UI: %w", err)
+	}
+	if runtimeSHA != "" {
+		if err := backupAndReplace(runtimeStagePath, runtimePath, 0755); err != nil {
+			return fmt.Errorf("replace runtime: %w", err)
+		}
+		runtimeUpdated = true
 	}
 
 	writeAppliedVersion(manifest.Version)
@@ -705,6 +787,11 @@ func (u *Updater) doManualApply(manifestData, binaryData, uiData, smoothfsSrcDat
 
 	u.setStage("restarting")
 	time.Sleep(4 * time.Second)
+	if runtimeUpdated {
+		if out, err := execCommand("systemctl", "restart", "smoothnas-runtime.service").CombinedOutput(); err != nil {
+			return fmt.Errorf("restart smoothnas-runtime: %s: %w", strings.TrimSpace(string(out)), err)
+		}
+	}
 	exec.Command("systemctl", "restart", "tierd.service").Start()
 
 	return nil
