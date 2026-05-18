@@ -436,17 +436,17 @@ jobs:
             edit_flags+=(--prerelease=false)
           fi
 
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" "${edit_flags[@]}"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "${edit_flags[@]}"
           else
-            gh release create "$RELEASE_TAG" "${create_flags[@]}"
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "${create_flags[@]}"
           fi
 
           upload_asset() {
             local asset="$1"
             local attempt delay
             for attempt in 1 2 3 4 5; do
-              if gh release upload "$RELEASE_TAG" "$asset" --clobber; then
+              if gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber; then
                 return 0
               fi
               delay=$((attempt * 20))
