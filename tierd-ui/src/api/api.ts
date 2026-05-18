@@ -357,6 +357,7 @@ export const api = {
         manifest: any;
       }>;
     }>('GET', `/plugins/catalog/latest?repo=${encodeURIComponent(repo)}`),
+  getPluginGPUs: () => apiFetch<{ gpus: any[] }>('GET', '/plugins/gpus'),
   preflightPlugin: (req: { manifest: string; tierAssignments?: { default?: string; perVolume?: Record<string, string> } }) =>
     apiFetch<any>('POST', '/plugins/preflight', req),
   parsePlugin: (req: { manifest: string }) =>

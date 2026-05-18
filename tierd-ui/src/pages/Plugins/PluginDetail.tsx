@@ -654,13 +654,8 @@ function ConfigTab({
         setFields(parsed.config ?? []);
       })
       .catch(() => { /* leave fields empty; the keys still render */ });
-    api.getSystemHardware().then((hw: any) => {
-      setGpus((hw?.gpus ?? []).map((g: any) => ({
-        id: g.id ?? g.devicePath,
-        vendor: g.vendor ?? '',
-        label: g.label ?? g.devicePath,
-        devicePath: g.devicePath ?? '',
-      })).filter((g: GPUInfo) => !!g.devicePath));
+    api.getPluginGPUs().then((resp: any) => {
+      setGpus(normalizeGPUs(resp?.gpus));
     }).catch(() => { /* GPU fields keep the automatic/current option */ });
   }, [manifest]);
 
@@ -844,6 +839,15 @@ function gpuOptions(field: ConfigFieldMeta, value: string, gpus: GPUInfo[]): GPU
     });
   }
   return out;
+}
+
+function normalizeGPUs(rows: any): GPUInfo[] {
+  return (Array.isArray(rows) ? rows : []).map((g: any) => ({
+    id: g.id ?? g.devicePath,
+    vendor: g.vendor ?? '',
+    label: g.label ?? g.name ?? g.devicePath,
+    devicePath: g.devicePath ?? '',
+  })).filter((g: GPUInfo) => !!g.devicePath);
 }
 
 function gpuMatchesField(field: { gpuVendor?: string }, gpuVendor: string): boolean {

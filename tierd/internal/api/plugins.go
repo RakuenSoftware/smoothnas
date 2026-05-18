@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/JBailes/SmoothNAS/tierd/internal/gpu"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
 )
 
@@ -96,6 +97,12 @@ func (h *PluginsHandler) Route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.catalogLatest(w, r)
+	case path == "/gpus":
+		if r.Method != http.MethodGet {
+			jsonMethodNotAllowed(w)
+			return
+		}
+		h.listGPUs(w, r)
 	case path == "/install":
 		if r.Method != http.MethodPost {
 			jsonMethodNotAllowed(w)
@@ -182,6 +189,18 @@ func (h *PluginsHandler) routeNamed(w http.ResponseWriter, r *http.Request, rest
 	default:
 		jsonNotFound(w)
 	}
+}
+
+func (h *PluginsHandler) listGPUs(w http.ResponseWriter, _ *http.Request) {
+	devices, err := gpu.List()
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if devices == nil {
+		devices = []gpu.Device{}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"gpus": devices})
 }
 
 // manifestNameForDuplicateCheck does a tolerant parse of just the
