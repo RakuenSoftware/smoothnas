@@ -142,7 +142,7 @@ jobs:
       matrix:
         include:
           - deb_arch: amd64
-            runner: ubuntu-24.04
+            runner: [self-hosted, smoothnas]
           - deb_arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
