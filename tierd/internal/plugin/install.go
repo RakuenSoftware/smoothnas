@@ -294,16 +294,17 @@ func stripVolumeSuffix(hostPath, volumeName string) string {
 // would otherwise wipe out, so the order is:
 //
 //  1. Demolisher.Demolish — runtime teardown (skipped if nil)
-//  2. store.Delete         — DB rows (cascades all child tables)
-//  3. removeAll flat dirs  — filesystem teardown
-//  4. best-effort parent dir cleanup
+//  2. removeAll volume dirs — filesystem teardown
+//  3. best-effort parent dir cleanup
+//  4. store.Delete          — DB rows (cascades all child tables)
 //
 // Tier-bound volume teardown still lives in phase 03; nginx + bridge
 // teardown lives in phase 04. Returns ErrPluginNotFound when no
 // plugin matches.
 func (i *Installer) Uninstall(name string) error {
-	// Snapshot which flat directories we own so we know what to remove
-	// after the DB rows are gone.
+	// Snapshot which directories we own before teardown. Keeping the
+	// DB row until filesystem deletion succeeds makes uninstall
+	// retryable if a volume cannot be removed.
 	rec, err := i.store.Get(name)
 	if err != nil {
 		return err
@@ -317,10 +318,6 @@ func (i *Installer) Uninstall(name string) error {
 		if err := i.demolisher.Demolish(context.Background(), name); err != nil {
 			return fmt.Errorf("runtime teardown: %w", err)
 		}
-	}
-
-	if err := i.store.Delete(name); err != nil {
-		return err
 	}
 
 	// Remove every volume's per-instance host path — flat under
@@ -354,6 +351,10 @@ func (i *Installer) Uninstall(name string) error {
 	_ = os.Remove(flatParent) //nolint:errcheck // best-effort cleanup
 	for tierParent := range tierParents {
 		_ = os.RemoveAll(tierParent) //nolint:errcheck // best-effort cleanup
+	}
+
+	if err := i.store.Delete(name); err != nil {
+		return err
 	}
 
 	return nil

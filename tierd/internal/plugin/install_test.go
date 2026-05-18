@@ -365,6 +365,48 @@ func TestInstaller_Uninstall_RemovesTierBoundDirsAndParent(t *testing.T) {
 	}
 }
 
+func TestInstaller_Uninstall_RemoveErrorPreservesPluginRecord(t *testing.T) {
+	inst, _ := newTestInstaller(t)
+	tierMount := filepath.Join(t.TempDir(), "media")
+	if err := os.MkdirAll(tierMount, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	tp := newFakeTP()
+	tp.put("media", tierMount, "healthy", "NVME")
+	inst.SetTierProvider(tp, fakeStatfs{}.avail)
+
+	if _, err := inst.InstallWithOptions(readFixture(t, "llama.yaml"), InstallOptions{
+		Tiers: TierAssignments{Default: "media"},
+	}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	volumeDir := filepath.Join(tierMount, ".plugins", "llama-cpp", "models")
+	inst.removeAll = func(path string) error {
+		if path == volumeDir {
+			return errors.New("device busy")
+		}
+		return os.RemoveAll(path)
+	}
+
+	if err := inst.Uninstall("llama-cpp"); err == nil {
+		t.Fatal("expected volume removal error")
+	}
+	if _, err := inst.store.Get("llama-cpp"); err != nil {
+		t.Fatalf("plugin row should survive volume removal failure for retry: %v", err)
+	}
+	if _, err := os.Stat(volumeDir); err != nil {
+		t.Fatalf("volume dir should remain after failed removal: %v", err)
+	}
+
+	inst.removeAll = os.RemoveAll
+	if err := inst.Uninstall("llama-cpp"); err != nil {
+		t.Fatalf("retry uninstall: %v", err)
+	}
+	if _, err := inst.store.Get("llama-cpp"); !errors.Is(err, ErrPluginNotFound) {
+		t.Fatalf("plugin row should be deleted after retry: %v", err)
+	}
+}
+
 func TestInstaller_BearerInjectedIssuesToken(t *testing.T) {
 	// llama.yaml's manifest declares ui.embed.auth=bearer-injected,
 	// so install should generate a token in plugin_secrets.
