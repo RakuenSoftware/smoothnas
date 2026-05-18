@@ -303,6 +303,38 @@ func TestPluginsAPI_InstallHappyPath(t *testing.T) {
 	}
 }
 
+func TestPluginsAPI_UpdateInstalledPlugin(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	install := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{
+		"manifest":        readManifestFixture(t, "llama.yaml"),
+		"tierAssignments": map[string]any{"default": "media"},
+	})
+	if install.Code != http.StatusCreated {
+		t.Fatalf("install status = %d body=%s", install.Code, install.Body.String())
+	}
+
+	manifest := strings.Replace(readManifestFixture(t, "llama.yaml"), "version: 0.1.0", "version: 9.9.9", 1)
+	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/llama-cpp/update", map[string]any{
+		"manifest": manifest,
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("update status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var detail pluginDetail
+	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if detail.Plugin.Version != "9.9.9" {
+		t.Fatalf("version = %q", detail.Plugin.Version)
+	}
+	if detail.Plugin.State != plugin.StateInstalled {
+		t.Fatalf("state = %q", detail.Plugin.State)
+	}
+	if !strings.Contains(detail.Manifest, "version: 9.9.9") {
+		t.Fatalf("manifest was not replaced: %s", detail.Manifest)
+	}
+}
+
 func TestPluginsAPI_InstallAutostartsWhenRuntimeIsWired(t *testing.T) {
 	h, _ := newPluginsHandlerForTest(t)
 	rt := &fakeModelRuntime{}

@@ -616,6 +616,135 @@ func (s *Store) SetInstanceContainerID(name string, instance int, id string) err
 	return nil
 }
 
+// UpdateManifest replaces an installed plugin's manifest while preserving
+// operator-owned state: volume placements, instance count, and existing config
+// values for keys that still exist. Volume shape changes are rejected because
+// they require fresh tier assignment choices and filesystem placement.
+func (s *Store) UpdateManifest(name string, m *Manifest, yamlText string) error {
+	if m == nil {
+		return fmt.Errorf("plugin.UpdateManifest: nil manifest")
+	}
+	if yamlText == "" {
+		return fmt.Errorf("plugin.UpdateManifest: empty yaml")
+	}
+	if m.Metadata.Name != name {
+		return fmt.Errorf("plugin.UpdateManifest: manifest name %q does not match installed plugin %q", m.Metadata.Name, name)
+	}
+
+	rec, err := s.Get(name)
+	if err != nil {
+		return err
+	}
+	if err := compatibleVolumeSchema(rec.Volumes, m.Volumes); err != nil {
+		return err
+	}
+	if !m.Instances.Configurable && m.EffectiveCount() != rec.Plugin.InstanceCount {
+		return fmt.Errorf("%w: instance count change (installed %d, manifest %d)", ErrPluginUpdateRequiresReinstall, rec.Plugin.InstanceCount, m.EffectiveCount())
+	}
+
+	existingConfig := make(map[string]string, len(rec.Config))
+	for _, row := range rec.Config {
+		existingConfig[row.Key] = row.Value
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // best-effort on error path
+
+	imageRef := ""
+	if m.Artifact.Type == ArtifactOCIImage {
+		imageRef = digestPinnedImageRef(m.Artifact.Image, m.Artifact.Digest)
+	}
+	configurable := 0
+	if m.Instances.Configurable {
+		configurable = 1
+	}
+
+	res, err := tx.Exec(
+		`UPDATE plugins
+		 SET version = ?, manifest = ?, artifact_type = ?,
+		     image_ref = ?, distro_summary = ?,
+		     instance_configurable = ?, updated_at = datetime('now')
+		 WHERE name = ?`,
+		m.Metadata.Version, yamlText, m.Artifact.Type,
+		sqlNullable(imageRef), sqlNullable(m.DistroSummary()),
+		configurable, name,
+	)
+	if err != nil {
+		return fmt.Errorf("update plugins: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrPluginNotFound
+	}
+
+	if _, err := tx.Exec(`DELETE FROM plugin_ports WHERE plugin_name = ?`, name); err != nil {
+		return fmt.Errorf("delete plugin_ports: %w", err)
+	}
+	for _, port := range m.Ports {
+		expose := 0
+		if port.Expose {
+			expose = 1
+		}
+		hostExpose := 0
+		if port.HostExpose {
+			hostExpose = 1
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO plugin_ports
+			 (plugin_name, port_name, container_port, protocol,
+			  expose, host_expose)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			name, port.Name, port.Port, port.Protocol, expose, hostExpose,
+		); err != nil {
+			return fmt.Errorf("insert plugin_ports[%s]: %w", port.Name, err)
+		}
+	}
+
+	if _, err := tx.Exec(`DELETE FROM plugin_config WHERE plugin_name = ?`, name); err != nil {
+		return fmt.Errorf("delete plugin_config: %w", err)
+	}
+	for _, field := range m.Config {
+		value, ok := existingConfig[field.Key]
+		if !ok {
+			value = field.Default
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO plugin_config (plugin_name, key, value)
+			 VALUES (?, ?, ?)`,
+			name, field.Key, value,
+		); err != nil {
+			return fmt.Errorf("insert plugin_config[%s]: %w", field.Key, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+func compatibleVolumeSchema(installed []VolumeRow, desired []Volume) error {
+	if len(installed) != len(desired) {
+		return fmt.Errorf("%w: volume changes", ErrPluginUpdateRequiresReinstall)
+	}
+	byName := make(map[string]VolumeRow, len(installed))
+	for _, vol := range installed {
+		byName[vol.Name] = vol
+	}
+	for _, vol := range desired {
+		got, ok := byName[vol.Name]
+		if !ok {
+			return fmt.Errorf("%w: volume %q is new", ErrPluginUpdateRequiresReinstall, vol.Name)
+		}
+		if got.Mode != vol.Mode || got.Slot != vol.Slot || got.PerInstance != vol.PerInstance || got.BindPath != vol.Bind {
+			return fmt.Errorf("%w: volume %q changed shape", ErrPluginUpdateRequiresReinstall, vol.Name)
+		}
+	}
+	return nil
+}
+
 // SetImageRef updates the resolved image ref on the plugins row.
 // Lifecycle calls this after a successful pull so subsequent
 // operations don't have to re-resolve.
