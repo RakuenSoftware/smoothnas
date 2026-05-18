@@ -259,6 +259,38 @@ func TestInstaller_InstallWithOptions_TierBoundResolves(t *testing.T) {
 	}
 }
 
+func TestInstaller_InstallWithOptions_ReusesExistingTierBoundDir(t *testing.T) {
+	inst, _ := newTestInstaller(t)
+	tierMount := filepath.Join(t.TempDir(), "media")
+	if err := os.MkdirAll(tierMount, 0o755); err != nil {
+		t.Fatalf("mkdir tier mount: %v", err)
+	}
+	volumeDir := filepath.Join(tierMount, ".plugins", "llama-cpp", "models")
+	if err := os.MkdirAll(volumeDir, 0o755); err != nil {
+		t.Fatalf("mkdir existing volume: %v", err)
+	}
+	modelFile := filepath.Join(volumeDir, "model.gguf")
+	if err := os.WriteFile(modelFile, []byte("keep me"), 0o644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	tp := newFakeTP()
+	tp.put("media", tierMount, "healthy", "NVME")
+	inst.SetTierProvider(tp, fakeStatfs{}.avail)
+
+	rec, err := inst.InstallWithOptions(readFixture(t, "llama.yaml"), InstallOptions{
+		Tiers: TierAssignments{Default: "media"},
+	})
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if rec.Volumes[0].Paths[1] != volumeDir {
+		t.Errorf("path[1] = %q want %q", rec.Volumes[0].Paths[1], volumeDir)
+	}
+	if got, err := os.ReadFile(modelFile); err != nil || string(got) != "keep me" {
+		t.Fatalf("existing model file should be preserved, got %q err %v", string(got), err)
+	}
+}
+
 func TestInstaller_InstallWithOptions_PreflightFailureBlocksInstall(t *testing.T) {
 	inst, _ := newTestInstaller(t)
 	tp := newFakeTP() // no tiers registered
