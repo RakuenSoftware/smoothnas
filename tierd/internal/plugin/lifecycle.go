@@ -199,6 +199,38 @@ func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 	return nil
 }
 
+// AutostartAll materialises and starts every installed plugin that is not
+// already running. It continues across per-plugin failures so one bad plugin
+// does not prevent the rest of the system from coming up after boot.
+func (l *Lifecycle) AutostartAll(ctx context.Context) error {
+	plugins, err := l.store.List()
+	if err != nil {
+		return fmt.Errorf("list plugins: %w", err)
+	}
+	var errs []error
+	for _, p := range plugins {
+		if p.State == StateRunning {
+			continue
+		}
+		if err := l.Materialise(ctx, p.Name); err != nil {
+			errs = append(errs, fmt.Errorf("%s: materialise: %w", p.Name, err))
+			continue
+		}
+		rec, err := l.store.Get(p.Name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: refresh: %w", p.Name, err))
+			continue
+		}
+		if rec.Plugin.State == StateRunning {
+			continue
+		}
+		if err := l.Start(ctx, p.Name); err != nil {
+			errs = append(errs, fmt.Errorf("%s: start: %w", p.Name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func containerMatchesDesired(existing runtime.ContainerInspect, desired runtime.CreateContainerRequest) bool {
 	if desired.Image != "" && existing.Config.Image != "" && existing.Config.Image != desired.Image {
 		return false

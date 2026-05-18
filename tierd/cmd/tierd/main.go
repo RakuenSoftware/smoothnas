@@ -338,6 +338,11 @@ func setupPluginRuntime(pluginStore *plugin.Store, catalog *plugin.Catalog) (*pl
 
 	watchCtx, stopWatch := context.WithCancel(context.Background())
 	go reconciler.WatchEvents(watchCtx)
+	go func() {
+		if err := lifecycle.AutostartAll(context.Background()); err != nil {
+			log.Printf("plugin runtime autostart: %v", err)
+		}
+	}()
 	return lifecycle, stopWatch
 }
 
