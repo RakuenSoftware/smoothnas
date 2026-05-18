@@ -2,8 +2,6 @@ package plugin
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -172,84 +170,6 @@ func TestPreflight_FreeSpaceWarnsButDoesNotBlock(t *testing.T) {
 	}
 	if len(res.Placements[0].Warnings) == 0 {
 		t.Errorf("expected free-space warning")
-	}
-}
-
-func TestPreflight_ExistingTierBoundDirectoryWarnsAndReuses(t *testing.T) {
-	tp := newFakeTP()
-	tierMount := t.TempDir()
-	tp.put("media", tierMount, db.TierPoolStateHealthy, "NVME")
-	m := mustParse(t, "llama.yaml")
-	existing := filepath.Join(tierMount, ".plugins", "llama-cpp", "models")
-	if err := os.MkdirAll(existing, 0o755); err != nil {
-		t.Fatalf("mkdir existing volume: %v", err)
-	}
-
-	res, err := PreflightTierAssignments(tp, fakeStatfs{}.avail, m,
-		TierAssignments{Default: "media"}, "/x")
-	if err != nil {
-		t.Fatalf("preflight: %v", err)
-	}
-	if !res.OK {
-		t.Fatalf("existing plugin volume directory should be reusable: %+v", res.Placements[0].Errors)
-	}
-	if len(res.Placements[0].Warnings) == 0 ||
-		!strings.Contains(res.Placements[0].Warnings[0], "will be reused") {
-		t.Fatalf("expected reuse warning, got: %+v", res.Placements[0].Warnings)
-	}
-}
-
-func TestPreflight_ExistingTierBoundFileBlocks(t *testing.T) {
-	tp := newFakeTP()
-	tierMount := t.TempDir()
-	tp.put("media", tierMount, db.TierPoolStateHealthy, "NVME")
-	m := mustParse(t, "llama.yaml")
-	existing := filepath.Join(tierMount, ".plugins", "llama-cpp", "models")
-	if err := os.MkdirAll(filepath.Dir(existing), 0o755); err != nil {
-		t.Fatalf("mkdir parent: %v", err)
-	}
-	if err := os.WriteFile(existing, []byte("not a directory"), 0o644); err != nil {
-		t.Fatalf("write existing file: %v", err)
-	}
-
-	res, err := PreflightTierAssignments(tp, fakeStatfs{}.avail, m,
-		TierAssignments{Default: "media"}, "/x")
-	if err != nil {
-		t.Fatalf("preflight: %v", err)
-	}
-	if res.OK {
-		t.Fatal("expected existing non-directory path to block install")
-	}
-	if len(res.Placements[0].Errors) == 0 ||
-		!strings.Contains(res.Placements[0].Errors[0], "not a directory") {
-		t.Fatalf("expected non-directory error, got: %+v", res.Placements[0].Errors)
-	}
-}
-
-func TestPreflight_ExistingTierBoundSymlinkBlocks(t *testing.T) {
-	tp := newFakeTP()
-	tierMount := t.TempDir()
-	tp.put("media", tierMount, db.TierPoolStateHealthy, "NVME")
-	m := mustParse(t, "llama.yaml")
-	existing := filepath.Join(tierMount, ".plugins", "llama-cpp", "models")
-	if err := os.MkdirAll(filepath.Dir(existing), 0o755); err != nil {
-		t.Fatalf("mkdir parent: %v", err)
-	}
-	if err := os.Symlink(t.TempDir(), existing); err != nil {
-		t.Fatalf("symlink existing path: %v", err)
-	}
-
-	res, err := PreflightTierAssignments(tp, fakeStatfs{}.avail, m,
-		TierAssignments{Default: "media"}, "/x")
-	if err != nil {
-		t.Fatalf("preflight: %v", err)
-	}
-	if res.OK {
-		t.Fatal("expected existing symlink path to block install")
-	}
-	if len(res.Placements[0].Errors) == 0 ||
-		!strings.Contains(res.Placements[0].Errors[0], "symlink") {
-		t.Fatalf("expected symlink error, got: %+v", res.Placements[0].Errors)
 	}
 }
 

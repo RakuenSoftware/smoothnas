@@ -48,7 +48,7 @@ func (a TierAssignments) Resolve(volumeName string) string {
 // the UI can render them next to the picker that produced them.
 type VolumePlacement struct {
 	Volume   string
-	Pool     string // empty when Errors is non-empty and pool couldn't be resolved
+	Pool     string   // empty when Errors is non-empty and pool couldn't be resolved
 	Slot     string
 	HostPath string   // empty when Errors is non-empty
 	Errors   []string // any error blocks install
@@ -79,15 +79,14 @@ func ResolveTierBoundHostPath(mountPoint, pluginName, volumeName string) string 
 //
 //  1. Tier exists                — GetTierInstance returns a row
 //  2. Slot exists                — slot is one of the seeded defaults
-//     (NVME/SSD/HDD) or appears in ListTierSlots
+//                                  (NVME/SSD/HDD) or appears in ListTierSlots
 //  3. Tier mounted               — pool.State is healthy or degraded
-//     (a degraded pool is still writable)
+//                                  (a degraded pool is still writable)
 //  4. Free space                 — statfs(mountpoint).avail ≥ minSize
-//     (warn-only; some plugins legitimately
-//     ignore minSize)
-//  5. Path reusable              — the would-be host path is either absent
-//     or an existing real directory at the
-//     plugin-owned volume path
+//                                  (warn-only; some plugins legitimately
+//                                  ignore minSize)
+//  5. No path conflict           — the would-be host path does not yet
+//                                  exist (a leftover from a prior install)
 //
 // Flat-mode volumes are reported as a single Placement with the
 // flat host path filled in and zero errors — they bypass the gates
@@ -154,21 +153,9 @@ func PreflightTierAssignments(tp TierProvider, statfs Statfser, m *Manifest, ass
 			hostPath := ResolveTierBoundHostPath(pool.MountPoint, m.Metadata.Name, vol.Name)
 			p.HostPath = hostPath
 
-			if info, err := os.Lstat(hostPath); err == nil {
-				if info.Mode()&os.ModeSymlink != 0 {
-					p.Errors = append(p.Errors,
-						fmt.Sprintf("path %s already exists as a symlink; remove it or pick a different plugin name", hostPath))
-					out.OK = false
-				} else if !info.IsDir() {
-					p.Errors = append(p.Errors,
-						fmt.Sprintf("path %s already exists and is not a directory; remove it or pick a different plugin name", hostPath))
-					out.OK = false
-				} else {
-					p.Warnings = append(p.Warnings,
-						fmt.Sprintf("path %s already exists; existing plugin volume data will be reused", hostPath))
-				}
-			} else if !errors.Is(err, os.ErrNotExist) {
-				p.Errors = append(p.Errors, fmt.Sprintf("stat %s: %v", hostPath, err))
+			if _, err := os.Stat(hostPath); err == nil {
+				p.Errors = append(p.Errors,
+					fmt.Sprintf("path %s already exists; remove it or pick a different plugin name", hostPath))
 				out.OK = false
 			}
 
