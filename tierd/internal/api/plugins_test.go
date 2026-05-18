@@ -303,6 +303,30 @@ func TestPluginsAPI_InstallHappyPath(t *testing.T) {
 	}
 }
 
+func TestPluginsAPI_InstallAutostartsWhenRuntimeIsWired(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	rt := &fakeModelRuntime{}
+	h.lifecycle = plugin.NewLifecycle(h.store, rt)
+
+	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{
+		"manifest":        readManifestFixture(t, "llama.yaml"),
+		"tierAssignments": map[string]any{"default": "media"},
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var detail pluginDetail
+	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if detail.Plugin.State != plugin.StateRunning {
+		t.Fatalf("state = %q want running", detail.Plugin.State)
+	}
+	if len(rt.created) != 1 || len(rt.started) != 1 {
+		t.Fatalf("runtime created=%d started=%d", len(rt.created), len(rt.started))
+	}
+}
+
 func TestPluginsAPI_InstallPreflightFailure400(t *testing.T) {
 	h, _ := newPluginsHandlerForTest(t)
 	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{
@@ -478,7 +502,7 @@ func TestPluginsAPI_ModelInstallDownloadsUpdatesConfigAndStarts(t *testing.T) {
 	if string(got) != string(modelBytes) {
 		t.Fatalf("model bytes = %q", string(got))
 	}
-	if len(rt.created) != 1 || len(rt.started) != 1 {
+	if len(rt.created) != 2 || len(rt.started) != 2 {
 		t.Fatalf("runtime created=%d started=%d", len(rt.created), len(rt.started))
 	}
 }
