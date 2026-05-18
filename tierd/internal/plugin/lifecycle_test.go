@@ -472,6 +472,30 @@ func TestLifecycle_Start_StopAndRestart(t *testing.T) {
 	}
 }
 
+func TestLifecycle_AutostartAll_MaterialisesAndStartsInstalledPlugins(t *testing.T) {
+	lc, rt, store := installFixture(t, "gh-runner.yaml")
+	if _, err := store.db.Exec(
+		`UPDATE plugin_volume_paths SET host_path = '/mnt/x/' || instance WHERE plugin_name = 'gh-runner'`,
+	); err != nil {
+		t.Fatalf("fake tier resolution: %v", err)
+	}
+	rt.bridgeIP = "10.66.0.11"
+
+	if err := lc.AutostartAll(context.Background()); err != nil {
+		t.Fatalf("autostart: %v", err)
+	}
+	if len(rt.createCalls) != 2 {
+		t.Fatalf("create calls = %d want 2", len(rt.createCalls))
+	}
+	if len(rt.startCalls) != 2 {
+		t.Fatalf("start calls = %d want 2", len(rt.startCalls))
+	}
+	rec, _ := store.Get("gh-runner")
+	if rec.Plugin.State != StateRunning {
+		t.Fatalf("aggregate state = %q want running", rec.Plugin.State)
+	}
+}
+
 func TestLifecycle_Start_RequiresMaterialise(t *testing.T) {
 	lc, _, _ := installFixture(t, "llama.yaml")
 	err := lc.Start(context.Background(), "llama-cpp")
