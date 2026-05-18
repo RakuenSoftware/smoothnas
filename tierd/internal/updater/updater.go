@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/JBailes/SmoothNAS/tierd/internal/firewall"
 )
 
 const (
@@ -45,6 +47,8 @@ var smoothKernelHeadersProviderBuildRoot = "/var/lib/tierd/smoothkernel-headers-
 var osReleasePath = "/etc/os-release"
 var execCommand = exec.Command
 var isPackageInstalled = packageInstalled
+var applyFirewallRules = firewall.Apply
+var enabledFirewallProtocols = firewall.GetEnabledProtocols
 
 // smoothfsInstalledRefPath records the git ref of the currently installed
 // smoothfs DKMS module so rebuild is skipped when the ref hasn't changed.
@@ -626,6 +630,7 @@ func (u *Updater) doApply() error {
 	// Ensure required OS packages are present. apt-get install is a no-op
 	// for packages that are already installed, so this is safe to run every time.
 	EnsureSystemPackages()
+	firewallUpdated := refreshHostFirewall()
 
 	// Rebuild the smoothfs DKMS kernel module if the release carries updated source.
 	// Non-fatal: tierd is still restarted even if the module build fails.
@@ -652,7 +657,7 @@ func (u *Updater) doApply() error {
 	// the frontend reports "Update process stopped unexpectedly".
 	u.setStage("restarting")
 	time.Sleep(4 * time.Second)
-	if runtimeUpdated {
+	if runtimeUpdated || firewallUpdated {
 		if out, err := execCommand("systemctl", "restart", "smoothnas-runtime.service").CombinedOutput(); err != nil {
 			return fmt.Errorf("restart smoothnas-runtime: %s: %w", strings.TrimSpace(string(out)), err)
 		}
@@ -766,6 +771,7 @@ func (u *Updater) doManualApply(manifestData, binaryData, uiData, runtimeBinaryD
 	writeAppliedVersion(manifest.Version)
 
 	EnsureSystemPackages()
+	firewallUpdated := refreshHostFirewall()
 
 	if manifest.SmoothfsRef != "" && len(smoothfsSrcData) > 0 {
 		u.setStage("rebuilding kernel module")
@@ -787,7 +793,7 @@ func (u *Updater) doManualApply(manifestData, binaryData, uiData, runtimeBinaryD
 
 	u.setStage("restarting")
 	time.Sleep(4 * time.Second)
-	if runtimeUpdated {
+	if runtimeUpdated || firewallUpdated {
 		if out, err := execCommand("systemctl", "restart", "smoothnas-runtime.service").CombinedOutput(); err != nil {
 			return fmt.Errorf("restart smoothnas-runtime: %s: %w", strings.TrimSpace(string(out)), err)
 		}
@@ -795,6 +801,14 @@ func (u *Updater) doManualApply(manifestData, binaryData, uiData, runtimeBinaryD
 	exec.Command("systemctl", "restart", "tierd.service").Start()
 
 	return nil
+}
+
+func refreshHostFirewall() bool {
+	if err := applyFirewallRules(enabledFirewallProtocols()); err != nil {
+		log.Printf("updater: refresh firewall ruleset failed: %v", err)
+		return false
+	}
+	return true
 }
 
 // Progress returns the current update progress.
