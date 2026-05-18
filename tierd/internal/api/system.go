@@ -400,8 +400,8 @@ func (h *SystemHandler) updateProgress(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SystemHandler) uploadUpdate(w http.ResponseWriter, r *http.Request) {
-	// 384 MB max — binary + UI + manifest + optional smoothfs-src tarball.
-	if err := r.ParseMultipartForm(384 << 20); err != nil {
+	// 512 MB max — binary + UI + manifest + optional runtime and smoothfs-src tarballs.
+	if err := r.ParseMultipartForm(512 << 20); err != nil {
 		jsonError(w, "invalid upload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -431,6 +431,17 @@ func (h *SystemHandler) uploadUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// smoothnas-runtime is optional for older manifests.
+	var runtimeBinary []byte
+	if f, _, err := r.FormFile("smoothnas-runtime"); err == nil {
+		runtimeBinary, err = io.ReadAll(f)
+		f.Close()
+		if err != nil {
+			jsonError(w, "read smoothnas-runtime: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
 	// smoothfs-src is optional — absent on manual uploads that predate this field.
 	var smoothfsSrc []byte
 	if f, _, err := r.FormFile("smoothfs-src"); err == nil {
@@ -442,7 +453,7 @@ func (h *SystemHandler) uploadUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := h.upd.StartManualApply(manifest, binary, ui, smoothfsSrc); err != nil {
+	if err := h.upd.StartManualApply(manifest, binary, ui, runtimeBinary, smoothfsSrc); err != nil {
 		jsonError(w, err.Error(), http.StatusConflict)
 		return
 	}
