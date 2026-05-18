@@ -21,6 +21,7 @@ User=root
 Group=root
 RuntimeDirectory=smoothnas-runtime
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 StateDirectory=smoothnas/runtime
 StateDirectoryMode=0755
 NoNewPrivileges=false
