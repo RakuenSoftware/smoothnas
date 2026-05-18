@@ -133,6 +133,10 @@ type InsertParams struct {
 	// that the caller has already resolved (phase 03+). Volumes not
 	// present in this map fall back to the "<unresolved>" sentinel.
 	Tiers map[string]string
+	// Config maps manifest config keys to operator-supplied
+	// install-time values. Keys not declared by Manifest.Config are
+	// ignored; declared keys not present here use their manifest default.
+	Config map[string]string
 }
 
 // Insert persists a plugin atomically across all six tables. Returns
@@ -287,14 +291,18 @@ func (s *Store) Insert(p InsertParams) error {
 		}
 	}
 
-	// Config defaults. Operators override these post-install via
-	// PUT /api/plugins/<name>/config (phase 06); phase 1 just lays
-	// down the defaults.
+	// Config defaults plus any install-time operator overrides.
 	for _, f := range m.Config {
+		value := f.Default
+		if p.Config != nil {
+			if override, ok := p.Config[f.Key]; ok {
+				value = override
+			}
+		}
 		if _, err := tx.Exec(
 			`INSERT INTO plugin_config (plugin_name, key, value)
 			 VALUES (?, ?, ?)`,
-			m.Metadata.Name, f.Key, f.Default,
+			m.Metadata.Name, f.Key, value,
 		); err != nil {
 			return fmt.Errorf("insert plugin_config[%s]: %w", f.Key, err)
 		}

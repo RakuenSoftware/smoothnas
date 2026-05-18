@@ -259,6 +259,38 @@ func TestInstaller_InstallWithOptions_TierBoundResolves(t *testing.T) {
 	}
 }
 
+func TestInstaller_InstallWithOptions_AppliesInitialConfig(t *testing.T) {
+	inst, _ := newTestInstaller(t)
+	tierMount := filepath.Join(t.TempDir(), "media")
+	if err := os.MkdirAll(tierMount, 0o755); err != nil {
+		t.Fatalf("mkdir tier mount: %v", err)
+	}
+	tp := newFakeTP()
+	tp.put("media", tierMount, "healthy", "NVME", "SSD", "HDD")
+	inst.SetTierProvider(tp, fakeStatfs{}.avail)
+
+	rec, err := inst.InstallWithOptions(readFixture(t, "llama.yaml"), InstallOptions{
+		Tiers:  TierAssignments{Default: "media"},
+		Config: map[string]string{"MODEL_PATH": "/models/custom.gguf", "UNKNOWN": "ignored"},
+	})
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	got := ""
+	for _, c := range rec.Config {
+		if c.Key == "MODEL_PATH" {
+			got = c.Value
+		}
+		if c.Key == "UNKNOWN" {
+			t.Fatalf("unknown config key was persisted: %+v", rec.Config)
+		}
+	}
+	if got != "/models/custom.gguf" {
+		t.Fatalf("MODEL_PATH = %q, want install-time override", got)
+	}
+}
+
 func TestInstaller_InstallWithOptions_PreflightFailureBlocksInstall(t *testing.T) {
 	inst, _ := newTestInstaller(t)
 	tp := newFakeTP() // no tiers registered
