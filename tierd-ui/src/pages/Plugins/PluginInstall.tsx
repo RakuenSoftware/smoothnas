@@ -48,6 +48,7 @@ type ManifestConfigField = {
   default?: string;
   description?: string;
   secret?: boolean;
+  gpuVendor?: string;
   options?: { value: string; label?: string }[];
   min?: string;
   max?: string;
@@ -62,15 +63,41 @@ type CatalogEntry = {
   description: string;
   homepage?: string;
   tags: string[];
+  variants: CatalogManifestVariant[];
+};
+
+type CatalogManifestVariant = {
+  id: string;
+  label: string;
+  accelerator: string;
   manifestYaml: string;
-  releaseTag: string;
+  manifest: ParsedManifest;
   assetName: string;
+};
+
+type CatalogAcceleratorChoice = {
+  value: string;
+  label: string;
+  variant: CatalogManifestVariant;
+  gpu?: GPUInfo;
 };
 
 type Tier = {
   name: string;
   state?: string;
 };
+
+type GPUInfo = {
+  id: string;
+  vendor: string;
+  label: string;
+  devicePath: string;
+};
+
+type CatalogGPUSelection = {
+  vendor: string;
+  devicePath: string;
+} | null;
 
 type WizardStep = 'source' | 'preview' | 'tiers' | 'config' | 'confirm';
 
@@ -95,6 +122,8 @@ export default function PluginInstall() {
   const [manifestText, setManifestText] = useState('');
   const [parsed, setParsed] = useState<ParsedManifest | null>(null);
   const [tiers, setTiers] = useState<Tier[]>([]);
+  const [gpus, setGpus] = useState<GPUInfo[]>([]);
+  const [catalogGPUSelection, setCatalogGPUSelection] = useState<CatalogGPUSelection>(null);
   // Per-volume tier selection. Keyed by volume name.
   const [tierChoices, setTierChoices] = useState<Record<string, string>>({});
   // Per-config-key value. Keyed by env var name.
@@ -117,6 +146,14 @@ export default function PluginInstall() {
       }));
       setTiers(list);
     }).catch(() => { /* ignored — wizard renders without; user gets a placeholder */ });
+    api.getSystemHardware().then((hw: any) => {
+      setGpus((hw?.gpus ?? []).map((g: any) => ({
+        id: g.id ?? g.devicePath,
+        vendor: g.vendor ?? '',
+        label: g.label ?? g.devicePath,
+        devicePath: g.devicePath ?? '',
+      })).filter((g: GPUInfo) => !!g.devicePath));
+    }).catch(() => { /* ignored — GPU fields keep the automatic option */ });
   }, []);
 
   const tierBoundVolumes = useMemo(
@@ -141,7 +178,12 @@ export default function PluginInstall() {
           // Pre-fill config defaults so the configure step starts
           // with a useful baseline.
           const defaults: Record<string, string> = {};
-          for (const f of m.config ?? []) defaults[f.key] = f.default ?? '';
+          for (const f of m.config ?? []) {
+            defaults[f.key] = f.default ?? '';
+            if (f.type === 'gpu' && catalogGPUSelection && gpuMatchesField(f, catalogGPUSelection.vendor)) {
+              defaults[f.key] = catalogGPUSelection.devicePath;
+            }
+          }
           setConfigValues(defaults);
           // Skip the tiers step if there's nothing to assign.
           setStep('preview');
@@ -253,6 +295,8 @@ export default function PluginInstall() {
             <SourceStep
               text={manifestText}
               onChange={setManifestText}
+              gpus={gpus}
+              onGPUSelection={setCatalogGPUSelection}
               busy={busy}
             />
           )}
@@ -269,6 +313,7 @@ export default function PluginInstall() {
             <ConfigStep
               fields={parsed.config ?? []}
               values={configValues}
+              gpus={gpus}
               onChange={(key, val) => setConfigValues({ ...configValues, [key]: val })}
             />
           )}
@@ -323,8 +368,14 @@ export default function PluginInstall() {
 }
 
 function SourceStep({
-  text, onChange, busy,
-}: { text: string; onChange: (v: string) => void; busy: boolean }) {
+  text, onChange, gpus, onGPUSelection, busy,
+}: {
+  text: string;
+  onChange: (v: string) => void;
+  gpus: GPUInfo[];
+  onGPUSelection: (gpu: CatalogGPUSelection) => void;
+  busy: boolean;
+}) {
   const { t } = useI18n();
   // 'catalog' is the default — point and click on a known plugin.
   // 'paste' is the fallback for manifests we don't ship a tile for
@@ -334,6 +385,7 @@ function SourceStep({
   // doesn't merge into stale paste content.
   const [mode, setMode] = useState<'catalog' | 'paste'>('catalog');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedAccelerators, setSelectedAccelerators] = useState<Record<string, string>>({});
   const [catalogEntries, setCatalogEntries] = useState<CatalogEntry[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [catalogError, setCatalogError] = useState('');
@@ -361,7 +413,21 @@ function SourceStep({
 
   function chooseCatalogEntry(entry: CatalogEntry) {
     setSelectedId(entry.id);
-    onChange(entry.manifestYaml);
+    const choice = defaultAcceleratorChoice(entry, gpus);
+    setSelectedAccelerators({ ...selectedAccelerators, [entry.id]: choice.value });
+    applyCatalogChoice(choice);
+  }
+
+  function applyCatalogChoice(choice: CatalogAcceleratorChoice) {
+    onChange(choice.variant.manifestYaml);
+    onGPUSelection(choice.gpu ? { vendor: choice.gpu.vendor, devicePath: choice.gpu.devicePath } : null);
+  }
+
+  function changeAccelerator(entry: CatalogEntry, value: string) {
+    const choices = acceleratorChoices(entry, gpus);
+    const choice = choices.find(c => c.value === value) ?? defaultAcceleratorChoice(entry, gpus);
+    setSelectedAccelerators({ ...selectedAccelerators, [entry.id]: choice.value });
+    applyCatalogChoice(choice);
   }
 
   return (
@@ -381,6 +447,7 @@ function SourceStep({
           onClick={() => {
             setMode('paste');
             setSelectedId(null);
+            onGPUSelection(null);
           }}
           disabled={busy}
         >
@@ -423,6 +490,22 @@ function SourceStep({
                       </div>
                     )}
                   </button>
+                  {selectedId === entry.id && acceleratorChoices(entry, gpus).length > 1 && (
+                    <label className="wizard-plugin-card-accelerator">
+                      <span>{t('plugins.install.source.catalog.accelerator')}</span>
+                      <select
+                        value={selectedAccelerators[entry.id] ?? defaultAcceleratorChoice(entry, gpus).value}
+                        onChange={e => changeAccelerator(entry, e.target.value)}
+                        disabled={busy}
+                      >
+                        {acceleratorChoices(entry, gpus).map(choice => (
+                          <option key={choice.value} value={choice.value}>
+                            {choice.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
                 </li>
               ))}
             </ul>
@@ -440,7 +523,10 @@ function SourceStep({
           <textarea
             className="wizard-textarea"
             value={text}
-            onChange={e => onChange(e.target.value)}
+            onChange={e => {
+              onGPUSelection(null);
+              onChange(e.target.value);
+            }}
             placeholder={t('plugins.install.source.placeholder')}
             spellCheck={false}
             disabled={busy}
@@ -457,21 +543,39 @@ function buildCatalogEntries(repo: CatalogRepository, release: {
   releaseUrl: string;
   manifests: Array<{ assetName: string; downloadUrl: string; manifestYaml: string; manifest: ParsedManifest }>;
 }): CatalogEntry[] {
-  const multiManifest = release.manifests.length > 1;
-  return release.manifests.map(item => {
-    const variant = inferManifestVariant(item.assetName, item.manifest);
-    const baseName = displayPluginName(item.manifest.metadata.name);
-    const name = variant && multiManifest ? `${baseName} (${variant})` : baseName;
+  const grouped = new Map<string, typeof release.manifests>();
+  for (const item of release.manifests) {
+    const key = item.manifest.metadata.name || item.assetName;
+    grouped.set(key, [...(grouped.get(key) ?? []), item]);
+  }
+
+  return Array.from(grouped.entries()).map(([pluginName, items]) => {
+    const variants = items.map(item => {
+      const label = inferManifestVariant(item.assetName, item.manifest) || item.assetName;
+      return {
+        id: `${repo.id}:${item.assetName}`,
+        label,
+        accelerator: manifestAccelerator(item.assetName, item.manifest),
+        manifestYaml: item.manifestYaml,
+        manifest: item.manifest,
+        assetName: item.assetName,
+      };
+    }).sort((a, b) => acceleratorRank(a.accelerator) - acceleratorRank(b.accelerator) || a.assetName.localeCompare(b.assetName));
+    const primary = variants.find(v => v.accelerator !== 'cpu') ?? variants[0];
+    const tags = new Set<string>();
+    for (const variant of variants) {
+      for (const tag of catalogTags(variant.manifest, variant.label, release.tagName)) {
+        tags.add(tag);
+      }
+    }
     return {
-      id: `${repo.id}:${item.assetName}`,
-      name,
-      vendor: item.manifest.metadata.vendor || ownerFromRepo(release.repo),
-      description: firstSentence(item.manifest.metadata.description) || item.assetName,
-      homepage: item.manifest.metadata.homepage || `https://github.com/${release.repo}`,
-      tags: catalogTags(item.manifest, variant, release.tagName),
-      manifestYaml: item.manifestYaml,
-      releaseTag: release.tagName,
-      assetName: item.assetName,
+      id: `${repo.id}:${pluginName}`,
+      name: displayPluginName(pluginName),
+      vendor: primary.manifest.metadata.vendor || ownerFromRepo(release.repo),
+      description: firstSentence(primary.manifest.metadata.description) || primary.assetName,
+      homepage: primary.manifest.metadata.homepage || `https://github.com/${release.repo}`,
+      tags: Array.from(tags),
+      variants,
     };
   });
 }
@@ -495,13 +599,94 @@ function displayPluginName(name: string): string {
 
 function inferManifestVariant(assetName: string, manifest: ParsedManifest): string {
   const raw = `${assetName} ${manifest.artifact.image ?? ''} ${(manifest.profiles ?? []).join(' ')}`.toLowerCase();
+  if (raw.includes('cpu')) return 'CPU only';
+  if (raw.includes('cuda')) return 'NVIDIA CUDA';
+  if (raw.includes('vulkan')) return 'Vulkan';
   if (raw.includes('gpu-nvidia')) return 'NVIDIA';
   if (raw.includes('gpu-amd')) return 'AMD';
   if (raw.includes('gpu-intel')) return 'Intel';
-  if (raw.includes('vulkan') || raw.includes('gpu-amd')) return 'AMD Vulkan';
-  if (raw.includes('cuda') || raw.includes('gpu-nvidia')) return 'NVIDIA CUDA';
-  if (raw.includes('cpu')) return 'CPU only';
   return '';
+}
+
+function manifestAccelerator(assetName: string, manifest: ParsedManifest): string {
+  const raw = `${assetName} ${manifest.artifact.image ?? ''} ${(manifest.profiles ?? []).join(' ')}`.toLowerCase();
+  if (raw.includes('cpu')) return 'cpu';
+  if (raw.includes('cuda') || raw.includes('gpu-nvidia')) return 'nvidia';
+  if (raw.includes('gpu-intel')) return 'intel';
+  if (raw.includes('vulkan') || raw.includes('gpu-amd')) return 'amd';
+  return 'unknown';
+}
+
+function acceleratorRank(accelerator: string): number {
+  switch (accelerator) {
+    case 'nvidia': return 10;
+    case 'amd': return 20;
+    case 'intel': return 30;
+    case 'cpu': return 90;
+    default: return 100;
+  }
+}
+
+function acceleratorChoices(entry: CatalogEntry, gpus: GPUInfo[]): CatalogAcceleratorChoice[] {
+  if (entry.variants.length === 1) {
+    return [{
+      value: entry.variants[0].id,
+      label: entry.variants[0].label,
+      variant: entry.variants[0],
+    }];
+  }
+
+  const choices: CatalogAcceleratorChoice[] = [];
+  const seen = new Set<string>();
+
+  for (const gpu of gpus) {
+    const variant = variantForGPU(entry, gpu);
+    if (!variant) continue;
+    const value = `gpu:${gpu.devicePath}`;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    choices.push({
+      value,
+      label: `${gpu.label} (${gpu.devicePath})`,
+      variant,
+      gpu,
+    });
+  }
+  const cpu = entry.variants.find(v => v.accelerator === 'cpu');
+  if (cpu) {
+    choices.push({
+      value: 'cpu',
+      label: 'CPU only',
+      variant: cpu,
+    });
+    seen.add('cpu');
+  }
+
+  if (choices.length === 0) {
+    for (const variant of entry.variants) {
+      choices.push({
+        value: variant.id,
+        label: variant.label,
+        variant,
+      });
+    }
+  }
+  return choices;
+}
+
+function defaultAcceleratorChoice(entry: CatalogEntry, gpus: GPUInfo[]): CatalogAcceleratorChoice {
+  const choices = acceleratorChoices(entry, gpus);
+  return choices.find(c => c.gpu) ?? choices.find(c => c.value === 'cpu') ?? choices[0];
+}
+
+function variantForGPU(entry: CatalogEntry, gpu: GPUInfo): CatalogManifestVariant | undefined {
+  const vendor = gpu.vendor.toLowerCase();
+  const exact = entry.variants.find(v => v.accelerator === vendor);
+  if (exact) return exact;
+  if (vendor === 'intel') {
+    return entry.variants.find(v => v.accelerator === 'amd');
+  }
+  return undefined;
 }
 
 function catalogTags(manifest: ParsedManifest, variant: string, releaseTag: string): string[] {
@@ -643,10 +828,11 @@ function TierStep({
 }
 
 function ConfigStep({
-  fields, values, onChange,
+  fields, values, gpus, onChange,
 }: {
   fields: ManifestConfigField[];
   values: Record<string, string>;
+  gpus: GPUInfo[];
   onChange: (key: string, val: string) => void;
 }) {
   const { t } = useI18n();
@@ -665,7 +851,7 @@ function ConfigStep({
       {fields.map(f => (
         <div key={f.key} className="wizard-config-row">
           <span className="config-key">{f.label || f.key}</span>
-          <ConfigInput field={f} value={values[f.key] ?? ''} onChange={v => onChange(f.key, v)} />
+          <ConfigInput field={f} value={values[f.key] ?? ''} gpus={gpus} onChange={v => onChange(f.key, v)} />
           {f.description && <span className="config-description">{f.description}</span>}
         </div>
       ))}
@@ -676,12 +862,15 @@ function ConfigStep({
 function ConfigInput({
   field,
   value,
+  gpus,
   onChange,
 }: {
   field: ManifestConfigField;
   value: string;
+  gpus: GPUInfo[];
   onChange: (value: string) => void;
 }) {
+  const { t } = useI18n();
   if (field.type === 'select') {
     return (
       <select
@@ -705,6 +894,23 @@ function ConfigInput({
       />
     );
   }
+  if (field.type === 'gpu') {
+    const options = gpuOptions(field, value, gpus);
+    return (
+      <select
+        className="config-input"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+      >
+        <option value="">{t('plugins.install.config.gpuAutomatic')}</option>
+        {options.map(gpu => (
+          <option key={gpu.devicePath} value={gpu.devicePath}>
+            {gpu.label} ({gpu.devicePath})
+          </option>
+        ))}
+      </select>
+    );
+  }
   return (
     <div className="config-input-with-unit">
       <input
@@ -720,6 +926,26 @@ function ConfigInput({
       {field.unit && <span>{field.unit}</span>}
     </div>
   );
+}
+
+function gpuOptions(field: ManifestConfigField, value: string, gpus: GPUInfo[]): GPUInfo[] {
+  const vendor = (field.gpuVendor ?? '').toLowerCase();
+  const out = gpus.filter(gpu => gpuMatchesField(field, gpu.vendor));
+  if (value && !out.some(gpu => gpu.devicePath === value)) {
+    out.push({
+      id: value,
+      vendor: field.gpuVendor ?? '',
+      label: value,
+      devicePath: value,
+    });
+  }
+  return out;
+}
+
+function gpuMatchesField(field: { gpuVendor?: string }, gpuVendor: string): boolean {
+  const vendor = (field.gpuVendor ?? '').toLowerCase();
+  const gpu = gpuVendor.toLowerCase();
+  return !vendor || gpu === vendor || (vendor === 'amd' && gpu === 'intel');
 }
 
 function ConfirmStep({

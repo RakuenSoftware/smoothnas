@@ -422,6 +422,25 @@
     font-weight: 500;
   }
 
+  .wizard-plugin-card-accelerator {
+    border-top: 1px solid #d8d8d8;
+    display: grid;
+    gap: 6px;
+    padding: 12px 16px 14px;
+    font-size: 12px;
+    color: #333;
+
+    select {
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid #c8ced8;
+      border-radius: 4px;
+      background: #fff;
+      color: #222;
+      padding: 6px 8px;
+    }
+  }
+
   .wizard-plugin-catalog-hint {
     margin-top: 14px;
     color: #2a6df4;

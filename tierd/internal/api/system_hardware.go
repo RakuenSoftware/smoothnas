@@ -17,6 +17,7 @@ type Hardware struct {
 	CPU  CPUInfo   `json:"cpu"`
 	Mem  MemInfo   `json:"mem"`
 	NICs []NICInfo `json:"nics"`
+	GPUs []GPUInfo `json:"gpus"`
 }
 
 type CPUInfo struct {
@@ -41,11 +42,19 @@ type NICInfo struct {
 	TxBytes   uint64 `json:"tx_bytes"`
 }
 
+type GPUInfo struct {
+	ID         string `json:"id"`
+	Vendor     string `json:"vendor"`
+	Label      string `json:"label"`
+	DevicePath string `json:"devicePath"`
+}
+
 func (h *SystemHandler) getHardware(w http.ResponseWriter, r *http.Request) {
 	hw := Hardware{
 		CPU:  readCPUInfo(),
 		Mem:  readMemInfo(),
 		NICs: readNICs(),
+		GPUs: readGPUs(),
 	}
 	json.NewEncoder(w).Encode(hw)
 }
@@ -232,6 +241,96 @@ func readNIC(name string) NICInfo {
 	nic.RxBytes = readSysfsUint(filepath.Join(base, "statistics", "rx_bytes"))
 	nic.TxBytes = readSysfsUint(filepath.Join(base, "statistics", "tx_bytes"))
 	return nic
+}
+
+// --- GPUs ---
+
+func readGPUs() []GPUInfo {
+	var gpus []GPUInfo
+	gpus = append(gpus, readNVIDIAGPUs()...)
+	gpus = append(gpus, readDRIGPUs()...)
+	sort.Slice(gpus, func(i, j int) bool {
+		if gpus[i].Vendor != gpus[j].Vendor {
+			return gpus[i].Vendor < gpus[j].Vendor
+		}
+		return gpus[i].DevicePath < gpus[j].DevicePath
+	})
+	return gpus
+}
+
+func readNVIDIAGPUs() []GPUInfo {
+	entries, err := os.ReadDir("/dev")
+	if err != nil {
+		return nil
+	}
+	var out []GPUInfo
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "nvidia") || !allDigits(strings.TrimPrefix(name, "nvidia")) {
+			continue
+		}
+		path := "/dev/" + name
+		out = append(out, GPUInfo{
+			ID:         "nvidia:" + path,
+			Vendor:     "nvidia",
+			Label:      "NVIDIA " + name,
+			DevicePath: path,
+		})
+	}
+	return out
+}
+
+func readDRIGPUs() []GPUInfo {
+	entries, err := os.ReadDir("/dev/dri")
+	if err != nil {
+		return nil
+	}
+	var out []GPUInfo
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "renderD") || !allDigits(strings.TrimPrefix(name, "renderD")) {
+			continue
+		}
+		path := "/dev/dri/" + name
+		vendor := drmVendor(name)
+		if vendor == "nvidia" {
+			// CUDA manifests use /dev/nvidiaN selectors; DRI render
+			// nodes are still useful for AMD/Intel Vulkan/OpenCL.
+			continue
+		}
+		out = append(out, GPUInfo{
+			ID:         vendor + ":" + path,
+			Vendor:     vendor,
+			Label:      strings.ToUpper(vendor[:1]) + vendor[1:] + " " + name,
+			DevicePath: path,
+		})
+	}
+	return out
+}
+
+func drmVendor(name string) string {
+	switch strings.ToLower(readSysfsString(filepath.Join("/sys/class/drm", name, "device", "vendor"))) {
+	case "0x1002":
+		return "amd"
+	case "0x8086":
+		return "intel"
+	case "0x10de":
+		return "nvidia"
+	default:
+		return "unknown"
+	}
+}
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func readSysfsString(path string) string {
