@@ -170,6 +170,23 @@ func TestPluginsAPI_ParseReturnsManifestJSONShape(t *testing.T) {
 	}
 }
 
+func TestPluginsAPI_ListGPUsRoute(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	rr := doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins/gpus", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		GPUs []map[string]any `json:"gpus"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.GPUs == nil {
+		t.Fatalf("gpus key missing from body=%s", rr.Body.String())
+	}
+}
+
 func TestPluginsAPI_CatalogLatestFetchesReleaseManifest(t *testing.T) {
 	h, _ := newPluginsHandlerForTest(t)
 	fixture := readManifestFixture(t, "gh-runner.yaml")
