@@ -410,20 +410,65 @@ jobs:
           ls -lh dist/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.meta.outputs.tag }}
-          name: ${{ needs.meta.outputs.name }}
-          draft: false
-          prerelease: ${{ needs.meta.outputs.prerelease == 'true' }}
-          files: |
-            dist/smoothnas-${{ needs.meta.outputs.version }}-amd64.iso
-            dist/smoothnas-${{ needs.meta.outputs.version }}-arm64.iso
-            dist/tierd-amd64
-            dist/tierd-arm64
-            dist/smoothnas-runtime-amd64
-            dist/smoothnas-runtime-arm64
-            dist/tierd-ui.tar.gz
-            dist/smoothfs-src.tar.gz
-            dist/manifest.json
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NAME: ${{ needs.meta.outputs.name }}
+          RELEASE_PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+          RELEASE_TAG: ${{ needs.meta.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          create_flags=(
+            --title "$RELEASE_NAME"
+            --target "$GITHUB_SHA"
+            --generate-notes
+          )
+          edit_flags=(
+            --title "$RELEASE_NAME"
+            --target "$GITHUB_SHA"
+            --draft=false
+          )
+          if [ "$RELEASE_PRERELEASE" = "true" ]; then
+            create_flags+=(--prerelease)
+            edit_flags+=(--prerelease)
+          else
+            edit_flags+=(--prerelease=false)
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" "${edit_flags[@]}"
+          else
+            gh release create "$RELEASE_TAG" "${create_flags[@]}"
+          fi
+
+          upload_asset() {
+            local asset="$1"
+            local attempt delay
+            for attempt in 1 2 3 4 5; do
+              if gh release upload "$RELEASE_TAG" "$asset" --clobber; then
+                return 0
+              fi
+              delay=$((attempt * 20))
+              echo "Upload failed for ${asset}; retrying in ${delay}s (${attempt}/5)" >&2
+              sleep "$delay"
+            done
+            echo "Failed to upload ${asset} after 5 attempts" >&2
+            return 1
+          }
+
+          assets=(
+            "dist/smoothnas-${RELEASE_VERSION}-amd64.iso"
+            "dist/smoothnas-${RELEASE_VERSION}-arm64.iso"
+            "dist/tierd-amd64"
+            "dist/tierd-arm64"
+            "dist/smoothnas-runtime-amd64"
+            "dist/smoothnas-runtime-arm64"
+            "dist/tierd-ui.tar.gz"
+            "dist/smoothfs-src.tar.gz"
+            "dist/manifest.json"
+          )
+          for asset in "${assets[@]}"; do
+            test -f "$asset" || { echo "Missing release asset: $asset" >&2; exit 1; }
+            upload_asset "$asset"
+          done
