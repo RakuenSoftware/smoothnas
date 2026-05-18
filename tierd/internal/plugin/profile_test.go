@@ -197,14 +197,14 @@ func TestResolve_RuntimeControlProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if r.Env["DOCKER_HOST"] != "unix:///var/run/docker.sock" {
+	if r.Env["DOCKER_HOST"] != "unix:///run/smoothnas-runtime/docker.sock" {
 		t.Errorf("DOCKER_HOST = %q", r.Env["DOCKER_HOST"])
 	}
 	if len(r.CapAdd) != 0 || len(r.Devices) != 0 {
 		t.Errorf("runtime-control should not grant devices/caps: devices=%+v caps=%+v", r.Devices, r.CapAdd)
 	}
-	if !containsString(r.LXCRaw, "lxc.mount.entry = /run/smoothnas-runtime/docker.sock var/run/docker.sock none bind,optional,create=file 0 0") {
-		t.Errorf("LXCRaw missing docker socket bind: %+v", r.LXCRaw)
+	if !containsString(r.LXCRaw, "lxc.mount.entry = /run/smoothnas-runtime run/smoothnas-runtime none bind,create=dir 0 0") {
+		t.Errorf("LXCRaw missing runtime directory bind: %+v", r.LXCRaw)
 	}
 }
 
@@ -219,7 +219,7 @@ func TestResolve_WolfRuntimeProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if r.Env["WOLF_DOCKER_SOCKET"] != "/var/run/docker.sock" {
+	if r.Env["WOLF_DOCKER_SOCKET"] != "/run/smoothnas-runtime/docker.sock" {
 		t.Errorf("WOLF_DOCKER_SOCKET = %q", r.Env["WOLF_DOCKER_SOCKET"])
 	}
 	if r.Env["HOST_APPS_STATE_FOLDER"] != "/etc/wolf" || r.Env["XDG_RUNTIME_DIR"] != "/run/user/wolf" {
@@ -247,8 +247,8 @@ func TestResolve_WolfRuntimeProfile(t *testing.T) {
 	if len(r.PreflightWarnings) == 0 || !strings.Contains(r.PreflightWarnings[0], "/dev/uhid") {
 		t.Errorf("PreflightWarnings = %+v, want optional /dev/uhid warning", r.PreflightWarnings)
 	}
-	if !containsString(r.LXCRaw, "lxc.mount.entry = /run/smoothnas-runtime/docker.sock var/run/docker.sock none bind,optional,create=file 0 0") {
-		t.Errorf("LXCRaw missing docker socket bind: %+v", r.LXCRaw)
+	if !containsString(r.LXCRaw, "lxc.mount.entry = /run/smoothnas-runtime run/smoothnas-runtime none bind,create=dir 0 0") {
+		t.Errorf("LXCRaw missing runtime directory bind: %+v", r.LXCRaw)
 	}
 	for _, raw := range r.LXCRaw {
 		if strings.Contains(raw, "lxc.mount.entry = /dev/uhid ") {
