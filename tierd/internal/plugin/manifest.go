@@ -40,6 +40,22 @@ const (
 	AuthBearerInjected = "bearer-injected"
 )
 
+// Config field types.
+const (
+	ConfigTypeString  = "string"
+	ConfigTypeNumber  = "number"
+	ConfigTypeSelect  = "select"
+	ConfigTypeBoolean = "boolean"
+	ConfigTypeGPU     = "gpu"
+)
+
+// GPU vendor selectors accepted by config fields with type=gpu.
+const (
+	GPUVendorNVIDIA = "nvidia"
+	GPUVendorAMD    = "amd"
+	GPUVendorIntel  = "intel"
+)
+
 // Manifest is the parsed in-memory form of smoothnas-plugin.yaml.
 // Field-level validation lives in ValidateManifest.
 type Manifest struct {
@@ -150,6 +166,7 @@ type ConfigField struct {
 	Default     string         `json:"default,omitempty" yaml:"default,omitempty"`
 	Description string         `json:"description,omitempty" yaml:"description,omitempty"`
 	Secret      bool           `json:"secret,omitempty" yaml:"secret,omitempty"`
+	GPUVendor   string         `json:"gpuVendor,omitempty" yaml:"gpuVendor,omitempty"`
 	Options     []ConfigOption `json:"options,omitempty" yaml:"options,omitempty"`
 	Min         string         `json:"min,omitempty" yaml:"min,omitempty"`
 	Max         string         `json:"max,omitempty" yaml:"max,omitempty"`
@@ -472,13 +489,22 @@ func validateConfig(v *ValidationError, fields []ConfigField) {
 		}
 		seen[f.Key] = true
 		switch f.Type {
-		case "", "string", "number", "select", "boolean":
+		case "", ConfigTypeString, ConfigTypeNumber, ConfigTypeSelect, ConfigTypeBoolean, ConfigTypeGPU:
 			// "" is accepted for old manifests and rendered as string.
 		default:
-			v.add(field+".type", "must be string, number, select, or boolean (got %q)", f.Type)
+			v.add(field+".type", "must be string, number, select, boolean, or gpu (got %q)", f.Type)
 		}
-		if f.Type == "select" && len(f.Options) == 0 {
+		if f.Type == ConfigTypeSelect && len(f.Options) == 0 {
 			v.add(field+".options", "is required when type is select")
+		}
+		if f.Type == ConfigTypeGPU {
+			switch f.GPUVendor {
+			case "", GPUVendorNVIDIA, GPUVendorAMD, GPUVendorIntel:
+			default:
+				v.add(field+".gpuVendor", "must be nvidia, amd, or intel when type is gpu (got %q)", f.GPUVendor)
+			}
+		} else if f.GPUVendor != "" {
+			v.add(field+".gpuVendor", "is only valid when type is gpu")
 		}
 		for j, opt := range f.Options {
 			if opt.Value == "" {

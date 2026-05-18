@@ -191,6 +191,84 @@ func TestBuildCreatePayload_HostExposePorts(t *testing.T) {
 	}
 }
 
+func TestBuildCreatePayload_SelectedNVIDIAGPURewritesProfileDevice(t *testing.T) {
+	in := fakePayloadInputs(t, "llama.yaml")
+	in.Manifest.Config = append(in.Manifest.Config, ConfigField{
+		Key:       "SMOOTHNAS_GPU",
+		Type:      ConfigTypeGPU,
+		GPUVendor: GPUVendorNVIDIA,
+	})
+	in.Config = append(in.Config, ConfigRow{Key: "SMOOTHNAS_GPU", Value: "/dev/nvidia1"})
+	in.Profiles = &Resolved{
+		Devices: []ProfileDevice{
+			{Path: "/dev/nvidiactl", CgroupPermissions: "rwm"},
+			{Path: "/dev/nvidia0", CgroupPermissions: "rwm"},
+		},
+		LXCRaw: []string{
+			"lxc.cgroup2.devices.allow = c 195:* rwm",
+			"lxc.mount.entry = /dev/nvidia0 dev/nvidia0 none bind,optional,create=file 0 0",
+		},
+	}
+
+	got, err := BuildCreatePayload(in)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(got.HostConfig.Devices) != 2 {
+		t.Fatalf("Devices = %+v", got.HostConfig.Devices)
+	}
+	if got.HostConfig.Devices[1].PathOnHost != "/dev/nvidia1" {
+		t.Fatalf("selected GPU was not applied: %+v", got.HostConfig.Devices)
+	}
+	if got.Labels["io.smoothnas.lxc.raw.1"] != "lxc.mount.entry = /dev/nvidia1 dev/nvidia1 none bind,optional,create=file 0 0" {
+		t.Fatalf("raw GPU mount = %q", got.Labels["io.smoothnas.lxc.raw.1"])
+	}
+}
+
+func TestBuildCreatePayload_SelectedDRIGPURewritesProfileDevice(t *testing.T) {
+	in := fakePayloadInputs(t, "llama.yaml")
+	in.Manifest.Config = append(in.Manifest.Config, ConfigField{
+		Key:       "SMOOTHNAS_GPU",
+		Type:      ConfigTypeGPU,
+		GPUVendor: GPUVendorAMD,
+	})
+	in.Config = append(in.Config, ConfigRow{Key: "SMOOTHNAS_GPU", Value: "/dev/dri/renderD129"})
+	in.Profiles = &Resolved{
+		Devices: []ProfileDevice{
+			{Path: "/dev/dri", CgroupPermissions: "rwm"},
+		},
+		LXCRaw: []string{
+			"lxc.cgroup2.devices.allow = c 226:* rwm",
+			"lxc.mount.entry = /dev/dri dev/dri none bind,optional,create=dir 0 0",
+		},
+	}
+
+	got, err := BuildCreatePayload(in)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(got.HostConfig.Devices) != 1 || got.HostConfig.Devices[0].PathOnHost != "/dev/dri/renderD129" {
+		t.Fatalf("selected DRI GPU was not applied: %+v", got.HostConfig.Devices)
+	}
+	if got.Labels["io.smoothnas.lxc.raw.1"] != "lxc.mount.entry = /dev/dri/renderD129 dev/dri/renderD129 none bind,optional,create=file 0 0" {
+		t.Fatalf("raw DRI mount = %q", got.Labels["io.smoothnas.lxc.raw.1"])
+	}
+}
+
+func TestBuildCreatePayload_RejectsInvalidSelectedGPU(t *testing.T) {
+	in := fakePayloadInputs(t, "llama.yaml")
+	in.Manifest.Config = append(in.Manifest.Config, ConfigField{
+		Key:       "SMOOTHNAS_GPU",
+		Type:      ConfigTypeGPU,
+		GPUVendor: GPUVendorNVIDIA,
+	})
+	in.Config = append(in.Config, ConfigRow{Key: "SMOOTHNAS_GPU", Value: "/dev/dri/renderD128"})
+
+	if _, err := BuildCreatePayload(in); err == nil {
+		t.Fatal("expected invalid GPU selection error")
+	}
+}
+
 func TestBuildCreatePayload_ExpandsCommandConfigValues(t *testing.T) {
 	in := fakePayloadInputs(t, "llama.yaml")
 	in.Manifest.Container.Command = []string{"--model", "${MODEL_PATH}", "--ctx-size", "$CTX_SIZE", "--keep", "${UNKNOWN}"}
