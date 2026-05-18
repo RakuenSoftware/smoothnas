@@ -124,12 +124,12 @@ func TestManifestTierdSHAForArch(t *testing.T) {
 	}
 
 	// Real-shape manifest decoded from JSON to lock the wire format.
-	raw := `{"version":"v1","tierd_amd64_sha256":"AAA","tierd_arm64_sha256":"BBB","ui_sha256":"UUU"}`
+	raw := `{"version":"v1","tierd_amd64_sha256":"AAA","tierd_arm64_sha256":"BBB","runtime_amd64_sha256":"RRA","runtime_arm64_sha256":"RRB","ui_sha256":"UUU"}`
 	var m Manifest
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if m.TierdAmd64SHA != "AAA" || m.TierdArm64SHA != "BBB" || m.UISHA != "UUU" {
+	if m.TierdAmd64SHA != "AAA" || m.TierdArm64SHA != "BBB" || m.RuntimeAmd64SHA != "RRA" || m.RuntimeArm64SHA != "RRB" || m.UISHA != "UUU" {
 		t.Fatalf("decoded manifest fields wrong: %+v", m)
 	}
 }
@@ -1421,6 +1421,7 @@ func TestManifestSmoothfsFields(t *testing.T) {
 	raw := `{
 		"version":"v1",
 		"tierd_amd64_sha256":"AAA",
+		"runtime_amd64_sha256":"RRR",
 		"ui_sha256":"UUU",
 		"smoothfs_ref":"82aa4365c56b0f79a525c2f0cf458d9a3c3311a0",
 		"smoothfs_src_sha256":"CCC"
@@ -1435,6 +1436,9 @@ func TestManifestSmoothfsFields(t *testing.T) {
 	if m.SmoothfsSrcSHA != "CCC" {
 		t.Errorf("SmoothfsSrcSHA = %q", m.SmoothfsSrcSHA)
 	}
+	if got := m.RuntimeSHAForArch("amd64"); got != "RRR" {
+		t.Errorf("RuntimeSHAForArch(amd64) = %q", got)
+	}
 
 	// Old manifests without smoothfs fields decode cleanly with zero values.
 	old := `{"version":"v0","tierd_sha256":"OLD","ui_sha256":"UUU"}`
@@ -1444,5 +1448,8 @@ func TestManifestSmoothfsFields(t *testing.T) {
 	}
 	if m2.SmoothfsRef != "" || m2.SmoothfsSrcSHA != "" {
 		t.Errorf("old manifest should have empty smoothfs fields, got ref=%q sha=%q", m2.SmoothfsRef, m2.SmoothfsSrcSHA)
+	}
+	if got := m2.RuntimeSHAForArch("amd64"); got != "" {
+		t.Errorf("old manifest should have empty runtime checksum, got %q", got)
 	}
 }

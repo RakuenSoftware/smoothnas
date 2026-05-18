@@ -107,16 +107,20 @@ export default function Updates() {
 
   function uploadManualUpdate(event: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files || []);
-    if (files.length !== 3) { setUpdateError(t('updates.validate.selectAll')); return; }
+    if (files.length < 3 || files.length > 5) { setUpdateError(t('updates.validate.selectAll')); return; }
     const manifest = files.find(f => f.name === 'manifest.json');
     const binary = files.find(f => f.name === 'tierd');
     const ui = files.find(f => f.name === 'tierd-ui.tar.gz');
+    const runtime = files.find(f => f.name === 'smoothnas-runtime' || f.name.startsWith('smoothnas-runtime-') || f.name === 'docker-lxc-daemon');
+    const smoothfsSrc = files.find(f => f.name === 'smoothfs-src.tar.gz');
     if (!manifest || !binary || !ui) { setUpdateError(t('updates.validate.expectedFiles')); return; }
     if (!confirm(t('updates.confirm.manual'))) { event.target.value = ''; return; }
     const form = new FormData();
     form.append('manifest', manifest);
     form.append('tierd', binary);
     form.append('ui', ui);
+    if (runtime) form.append('smoothnas-runtime', runtime);
+    if (smoothfsSrc) form.append('smoothfs-src', smoothfsSrc);
     setUpdateApplying(true);
     setUpdateError('');
     setUpdateStage(t('updates.stage.uploading'));

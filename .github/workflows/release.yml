@@ -289,6 +289,9 @@ jobs:
           echo '//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}' >> .npmrc
           npm ci && npm run build
 
+      - name: Build SmoothNAS runtime
+        run: ./scripts/build-smoothnas-runtime.sh
+
       - name: Download SmoothKernel + ZFS .debs
         env:
           GH_TOKEN: ${{ github.token }}
@@ -339,6 +342,7 @@ jobs:
           cp "iso/output/smoothnas-${{ needs.meta.outputs.version }}-${{ matrix.deb_arch }}.iso" \
              "stage/smoothnas-${{ needs.meta.outputs.version }}-${{ matrix.deb_arch }}.iso"
           cp bin/tierd "stage/tierd-${{ matrix.deb_arch }}"
+          cp bin/docker-lxc-daemon "stage/smoothnas-runtime-${{ matrix.deb_arch }}"
           # Arch-independent assets are staged from amd64 only so the release
           # job has exactly one copy of each to upload.
           if [ "${{ matrix.deb_arch }}" = "amd64" ]; then
@@ -386,6 +390,8 @@ jobs:
 
           TIERD_AMD64_SHA=$(sha256sum dist/tierd-amd64 | awk '{print $1}')
           TIERD_ARM64_SHA=$(sha256sum dist/tierd-arm64 | awk '{print $1}')
+          RUNTIME_AMD64_SHA=$(sha256sum dist/smoothnas-runtime-amd64 | awk '{print $1}')
+          RUNTIME_ARM64_SHA=$(sha256sum dist/smoothnas-runtime-arm64 | awk '{print $1}')
           UI_SHA=$(sha256sum dist/tierd-ui.tar.gz | awk '{print $1}')
           SMOOTHFS_SRC_SHA=$(sha256sum dist/smoothfs-src.tar.gz | awk '{print $1}')
           cat > dist/manifest.json <<EOFM
@@ -394,6 +400,8 @@ jobs:
             "channel": "${{ needs.meta.outputs.channel }}",
             "tierd_amd64_sha256": "${TIERD_AMD64_SHA}",
             "tierd_arm64_sha256": "${TIERD_ARM64_SHA}",
+            "runtime_amd64_sha256": "${RUNTIME_AMD64_SHA}",
+            "runtime_arm64_sha256": "${RUNTIME_ARM64_SHA}",
             "ui_sha256": "${UI_SHA}",
             "smoothfs_ref": "${{ needs.meta.outputs.smoothfs_ref }}",
             "smoothfs_src_sha256": "${SMOOTHFS_SRC_SHA}"
@@ -413,6 +421,8 @@ jobs:
             dist/smoothnas-${{ needs.meta.outputs.version }}-arm64.iso
             dist/tierd-amd64
             dist/tierd-arm64
+            dist/smoothnas-runtime-amd64
+            dist/smoothnas-runtime-arm64
             dist/tierd-ui.tar.gz
             dist/smoothfs-src.tar.gz
             dist/manifest.json
