@@ -146,13 +146,8 @@ export default function PluginInstall() {
       }));
       setTiers(list);
     }).catch(() => { /* ignored — wizard renders without; user gets a placeholder */ });
-    api.getSystemHardware().then((hw: any) => {
-      setGpus((hw?.gpus ?? []).map((g: any) => ({
-        id: g.id ?? g.devicePath,
-        vendor: g.vendor ?? '',
-        label: g.label ?? g.devicePath,
-        devicePath: g.devicePath ?? '',
-      })).filter((g: GPUInfo) => !!g.devicePath));
+    api.getPluginGPUs().then((resp: any) => {
+      setGpus(normalizeGPUs(resp?.gpus));
     }).catch(() => { /* ignored — GPU fields keep the automatic option */ });
   }, []);
 
@@ -659,6 +654,15 @@ function acceleratorChoices(entry: CatalogEntry, gpus: GPUInfo[]): CatalogAccele
     }
   }
   return choices;
+}
+
+function normalizeGPUs(rows: any): GPUInfo[] {
+  return (Array.isArray(rows) ? rows : []).map((g: any) => ({
+    id: g.id ?? g.devicePath,
+    vendor: g.vendor ?? '',
+    label: g.label ?? g.name ?? g.devicePath,
+    devicePath: g.devicePath ?? '',
+  })).filter((g: GPUInfo) => !!g.devicePath);
 }
 
 function defaultAcceleratorChoice(entry: CatalogEntry, gpus: GPUInfo[]): CatalogAcceleratorChoice {

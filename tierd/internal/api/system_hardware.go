@@ -50,11 +50,15 @@ type GPUInfo struct {
 }
 
 func (h *SystemHandler) getHardware(w http.ResponseWriter, r *http.Request) {
+	gpus := readGPUs()
+	if gpus == nil {
+		gpus = []GPUInfo{}
+	}
 	hw := Hardware{
 		CPU:  readCPUInfo(),
 		Mem:  readMemInfo(),
 		NICs: readNICs(),
-		GPUs: readGPUs(),
+		GPUs: gpus,
 	}
 	json.NewEncoder(w).Encode(hw)
 }
