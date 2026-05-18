@@ -10,7 +10,7 @@ metadata:
 container:
   env:
     HOST_APPS_STATE_FOLDER: /etc/wolf
-    WOLF_DOCKER_SOCKET: /var/run/docker.sock
+    WOLF_DOCKER_SOCKET: /run/smoothnas-runtime/docker.sock
     XDG_RUNTIME_DIR: /run/user/wolf
   hostConfig:
     devices:
@@ -29,7 +29,7 @@ lxc:
     - "lxc.cgroup2.devices.allow = c 10:239 rwm"
     - "lxc.cgroup2.devices.allow = c 13:* rwm"
     - "lxc.cgroup2.devices.allow = c 244:* rwm"
-    - "lxc.mount.entry = /run/smoothnas-runtime/docker.sock var/run/docker.sock none bind,optional,create=file 0 0"
+    - "lxc.mount.entry = /run/smoothnas-runtime run/smoothnas-runtime none bind,create=dir 0 0"
     - "lxc.mount.entry = /run/udev run/udev none bind,optional,create=dir 0 0"
     - "lxc.mount.entry = /dev/uinput dev/uinput none bind,optional,create=file 0 0"
     - "lxc.mount.entry = /dev/uhid dev/uhid none bind,optional,create=file 0 0"

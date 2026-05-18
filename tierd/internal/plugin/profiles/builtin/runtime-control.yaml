@@ -7,10 +7,10 @@ metadata:
     services and create their own short-lived worker containers.
 container:
   env:
-    DOCKER_HOST: unix:///var/run/docker.sock
+    DOCKER_HOST: unix:///run/smoothnas-runtime/docker.sock
 lxc:
   rawConfig:
-    - "lxc.mount.entry = /run/smoothnas-runtime/docker.sock var/run/docker.sock none bind,optional,create=file 0 0"
+    - "lxc.mount.entry = /run/smoothnas-runtime run/smoothnas-runtime none bind,create=dir 0 0"
 preflight:
   hostHas:
     - { path: /run/smoothnas-runtime/docker.sock, requirement: required }
