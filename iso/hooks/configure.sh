@@ -72,8 +72,56 @@ UDEV
 cat >> "$TARGET/etc/default/grub" << 'GRUBCFG'
 
 # SmoothNAS: NAS-tuning kernel cmdline. Login VT stays clean.
-GRUB_CMDLINE_LINUX="quiet loglevel=3 systemd.show_status=false transparent_hugepage=madvise numa_balancing=disable"
+#
+# amdgpu.runpm=0 keeps discrete AMD accelerators out of runtime D3cold.
+# On several headless NAS boards the GPU is visible on PCI but probe fails
+# with "Unable to change power state from D3cold to D0" before /dev/dri is
+# created; plugin GPU detection and Vulkan containers need that render node.
+GRUB_CMDLINE_LINUX="quiet loglevel=3 systemd.show_status=false transparent_hugepage=madvise numa_balancing=disable amdgpu.runpm=0"
 GRUBCFG
+
+mkdir -p "$TARGET/usr/lib/smoothnas" "$TARGET/etc/systemd/system"
+cat > "$TARGET/usr/lib/smoothnas/gpu-init.sh" << 'GPUINIT'
+#!/bin/sh
+set -eu
+
+# SmoothNAS GPU bring-up for plugin runtimes.
+#
+# AMD dGPUs used for headless inference can come up in D3cold on server boards.
+# If amdgpu probes while the device is inaccessible, /dev/dri never appears and
+# plugin manifests correctly select gpu-amd but have no render node to pass
+# through. Disable D3cold before udev triggers driver probing; leave
+# NVIDIA/Intel to their normal driver paths.
+for dev in /sys/bus/pci/devices/*; do
+    [ -r "$dev/vendor" ] || continue
+    [ "$(cat "$dev/vendor" 2>/dev/null)" = "0x1002" ] || continue
+    class="$(cat "$dev/class" 2>/dev/null || true)"
+    case "$class" in
+        0x03*) ;;
+        *) continue ;;
+    esac
+    [ -w "$dev/d3cold_allowed" ] && echo 0 > "$dev/d3cold_allowed" 2>/dev/null || true
+    [ -w "$dev/power/control" ] && echo on > "$dev/power/control" 2>/dev/null || true
+done
+GPUINIT
+chmod 755 "$TARGET/usr/lib/smoothnas/gpu-init.sh"
+
+cat > "$TARGET/etc/systemd/system/smoothnas-gpu-init.service" << 'GPUUNIT'
+[Unit]
+Description=Prepare host GPUs for SmoothNAS plugin runtimes
+DefaultDependencies=no
+Before=systemd-udev-trigger.service
+Before=smoothnas-runtime.service tierd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/smoothnas/gpu-init.sh
+
+[Install]
+WantedBy=sysinit.target
+GPUUNIT
+
+chroot "$TARGET" systemctl enable smoothnas-gpu-init.service >/dev/null 2>&1 || true
 
 # journald: don't forward messages to /dev/console so the login VT is
 # not polluted by service log output once the system is up.
