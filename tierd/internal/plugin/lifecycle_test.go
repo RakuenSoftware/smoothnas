@@ -30,6 +30,7 @@ type fakeRuntime struct {
 
 	// Behaviour knobs.
 	pullErr        error
+	pullErrs       []error
 	createErr      error
 	startErr       error
 	waitExit       int
@@ -77,6 +78,14 @@ func (f *fakeRuntime) PullImage(ctx context.Context, ref string, _ func(runtime.
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pullCalls = append(f.pullCalls, ref)
+	if len(f.pullErrs) > 0 {
+		err := f.pullErrs[0]
+		f.pullErrs = f.pullErrs[1:]
+		if err != nil {
+			return "", err
+		}
+		return ref, nil
+	}
 	if f.pullErr != nil {
 		return "", f.pullErr
 	}
@@ -183,6 +192,15 @@ func installFixture(t *testing.T, fixture string) (*Lifecycle, *fakeRuntime, *St
 	}
 	rt := &fakeRuntime{}
 	return NewLifecycle(store, rt), rt, store
+}
+
+func withFastImagePullRetry(t *testing.T) {
+	t.Helper()
+	oldDelay := imagePullRetryDelay
+	imagePullRetryDelay = 0
+	t.Cleanup(func() {
+		imagePullRetryDelay = oldDelay
+	})
 }
 
 func TestLifecycle_Materialise_OCIImage(t *testing.T) {
@@ -348,6 +366,7 @@ container:
 }
 
 func TestLifecycle_Materialise_PullErrorMarksInstanceFailed(t *testing.T) {
+	withFastImagePullRetry(t)
 	lc, rt, store := installFixture(t, "llama.yaml")
 	rt.pullErr = errors.New("manifest unknown")
 
@@ -361,6 +380,24 @@ func TestLifecycle_Materialise_PullErrorMarksInstanceFailed(t *testing.T) {
 	}
 	if !strings.Contains(rec.Instances[0].LastError, "manifest unknown") {
 		t.Errorf("last_error = %q", rec.Instances[0].LastError)
+	}
+}
+
+func TestLifecycle_Materialise_RetriesTransientPullError(t *testing.T) {
+	withFastImagePullRetry(t)
+	lc, rt, store := installFixture(t, "llama.yaml")
+	rt.pullErrs = []error{errors.New("ghcr 502"), nil}
+	if _, err := store.db.Exec(
+		`UPDATE plugin_volume_paths SET host_path = '/mnt/media/.plugins/llama-cpp/models' WHERE plugin_name = 'llama-cpp'`,
+	); err != nil {
+		t.Fatalf("fake tier resolution: %v", err)
+	}
+
+	if err := lc.Materialise(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	if len(rt.pullCalls) != 2 {
+		t.Fatalf("pull calls = %d want 2: %v", len(rt.pullCalls), rt.pullCalls)
 	}
 }
 
