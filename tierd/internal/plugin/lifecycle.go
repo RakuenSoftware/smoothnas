@@ -52,6 +52,11 @@ type ProxyManager interface {
 // then SIGKILLs after this many seconds.
 const DefaultStopTimeoutSeconds = 10
 
+var (
+	imagePullMaxAttempts = 3
+	imagePullRetryDelay  = 5 * time.Second
+)
+
 // Lifecycle owns the install/start/stop/uninstall flow that touches
 // the runtime daemon. It does not own the database schema (that's
 // Store) or the manifest format (that's manifest.go); it sits on
@@ -311,7 +316,7 @@ func (l *Lifecycle) materialiseImage(ctx context.Context, p *PluginRow, m *Manif
 		// "pulling…" progress.
 		_ = l.setInstanceState(p.Name, 1, StatePulling, "")
 		ref := digestPinnedImageRef(m.Artifact.Image, m.Artifact.Digest)
-		resolved, err := l.rt.PullImage(ctx, ref, nil)
+		resolved, err := l.pullImageWithRetry(ctx, ref, nil)
 		if err != nil {
 			_ = l.setInstanceState(p.Name, 1, StateFailed, err.Error())
 			return "", fmt.Errorf("pull image %s: %w", ref, err)
@@ -328,7 +333,7 @@ func (l *Lifecycle) materialiseImage(ctx context.Context, p *PluginRow, m *Manif
 	case ArtifactLXCDistro:
 		baseRef := m.Artifact.Distro + ":" + m.Artifact.Release
 		_ = l.setInstanceState(p.Name, 1, StatePulling, "")
-		if _, err := l.rt.PullImage(ctx, baseRef, nil); err != nil {
+		if _, err := l.pullImageWithRetry(ctx, baseRef, nil); err != nil {
 			_ = l.setInstanceState(p.Name, 1, StateFailed, err.Error())
 			return "", fmt.Errorf("pull distro template %s: %w", baseRef, err)
 		}
@@ -349,6 +354,28 @@ func (l *Lifecycle) materialiseImage(ctx context.Context, p *PluginRow, m *Manif
 	default:
 		return "", fmt.Errorf("unknown artifact type %q", m.Artifact.Type)
 	}
+}
+
+func (l *Lifecycle) pullImageWithRetry(ctx context.Context, ref string, onProgress func(runtime.PullEvent)) (string, error) {
+	var lastErr error
+	for attempt := 1; attempt <= imagePullMaxAttempts; attempt++ {
+		resolved, err := l.rt.PullImage(ctx, ref, onProgress)
+		if err == nil {
+			return resolved, nil
+		}
+		lastErr = err
+		if attempt == imagePullMaxAttempts {
+			break
+		}
+		timer := time.NewTimer(imagePullRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return "", fmt.Errorf("failed after %d attempts: %w", imagePullMaxAttempts, lastErr)
 }
 
 // runSetupScript runs the apt-install + setup commands inside a
