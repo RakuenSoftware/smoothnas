@@ -320,6 +320,34 @@ func TestPluginsAPI_InstallHappyPath(t *testing.T) {
 	}
 }
 
+func TestPluginsAPI_DetailUsesEmptyArraysForNoPortPlugin(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	install := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{
+		"manifest":        readManifestFixture(t, "gh-runner.yaml"),
+		"tierAssignments": map[string]any{"default": "media"},
+	})
+	if install.Code != http.StatusCreated {
+		t.Fatalf("install status = %d body=%s", install.Code, install.Body.String())
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/plugins/gh-runner", nil)
+	(&routeHandler{h}).ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("detail status = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	for _, key := range []string{"instances", "volumes", "ports", "config"} {
+		if _, ok := raw[key].([]any); !ok {
+			t.Fatalf("%s = %#v, want JSON array", key, raw[key])
+		}
+	}
+}
+
 func TestPluginsAPI_InstallAppliesInitialConfig(t *testing.T) {
 	h, _ := newPluginsHandlerForTest(t)
 	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{

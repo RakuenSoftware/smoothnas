@@ -288,6 +288,33 @@ type pluginDetail struct {
 	Manifest  string               `json:"manifest"`
 }
 
+func toPluginDetail(rec *plugin.PluginRecord) pluginDetail {
+	instances := rec.Instances
+	if instances == nil {
+		instances = []plugin.InstanceRow{}
+	}
+	volumes := rec.Volumes
+	if volumes == nil {
+		volumes = []plugin.VolumeRow{}
+	}
+	ports := rec.Ports
+	if ports == nil {
+		ports = []plugin.PortRow{}
+	}
+	config := rec.Config
+	if config == nil {
+		config = []plugin.ConfigRow{}
+	}
+	return pluginDetail{
+		Plugin:    toPluginListItem(rec.Plugin),
+		Instances: instances,
+		Volumes:   volumes,
+		Ports:     ports,
+		Config:    config,
+		Manifest:  rec.Plugin.ManifestYAML,
+	}
+}
+
 func (h *PluginsHandler) detail(w http.ResponseWriter, _ *http.Request, name string) {
 	rec, err := h.store.Get(name)
 	if err != nil {
@@ -298,14 +325,7 @@ func (h *PluginsHandler) detail(w http.ResponseWriter, _ *http.Request, name str
 		serverError(w, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(pluginDetail{
-		Plugin:    toPluginListItem(rec.Plugin),
-		Instances: rec.Instances,
-		Volumes:   rec.Volumes,
-		Ports:     rec.Ports,
-		Config:    rec.Config,
-		Manifest:  rec.Plugin.ManifestYAML,
-	})
+	_ = json.NewEncoder(w).Encode(toPluginDetail(rec))
 }
 
 // parseRequest is the body of POST /api/plugins/parse. Used by the
@@ -468,14 +488,7 @@ func (h *PluginsHandler) install(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(pluginDetail{
-		Plugin:    toPluginListItem(rec.Plugin),
-		Instances: rec.Instances,
-		Volumes:   rec.Volumes,
-		Ports:     rec.Ports,
-		Config:    rec.Config,
-		Manifest:  rec.Plugin.ManifestYAML,
-	})
+	_ = json.NewEncoder(w).Encode(toPluginDetail(rec))
 }
 
 func (h *PluginsHandler) update(w http.ResponseWriter, r *http.Request, name string) {
@@ -542,14 +555,7 @@ func (h *PluginsHandler) update(w http.ResponseWriter, r *http.Request, name str
 		serverError(w, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(pluginDetail{
-		Plugin:    toPluginListItem(rec.Plugin),
-		Instances: rec.Instances,
-		Volumes:   rec.Volumes,
-		Ports:     rec.Ports,
-		Config:    rec.Config,
-		Manifest:  rec.Plugin.ManifestYAML,
-	})
+	_ = json.NewEncoder(w).Encode(toPluginDetail(rec))
 }
 
 // lifecycleVerb dispatches start/stop/restart/materialise.
