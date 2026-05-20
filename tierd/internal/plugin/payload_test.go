@@ -298,6 +298,20 @@ func TestBuildCreatePayload_AppliesConfigurableMemoryLimit(t *testing.T) {
 	}
 }
 
+func TestBuildCreatePayload_AppliesConfigurableCPULimit(t *testing.T) {
+	in := fakePayloadInputs(t, "llama.yaml")
+	in.Manifest.Container.Resources.CPU = "${CPU_LIMIT}"
+	in.Config = append(in.Config, ConfigRow{PluginName: "llama-cpp", Key: "CPU_LIMIT", Value: "1.5"})
+
+	got, err := BuildCreatePayload(in)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got.HostConfig.NanoCPUs != 1_500_000_000 {
+		t.Errorf("NanoCPUs = %d want 1500000000", got.HostConfig.NanoCPUs)
+	}
+}
+
 func TestBuildCreatePayload_ManifestMemoryOverridesProfileMemory(t *testing.T) {
 	in := fakePayloadInputs(t, "llama.yaml")
 	in.Manifest.Container.Resources.Memory = "64GiB"
@@ -319,6 +333,16 @@ func TestBuildCreatePayload_InvalidMemoryLimitFails(t *testing.T) {
 	_, err := BuildCreatePayload(in)
 	if err == nil || !strings.Contains(err.Error(), "container.resources.memory") {
 		t.Fatalf("err = %v, want container.resources.memory error", err)
+	}
+}
+
+func TestBuildCreatePayload_InvalidCPULimitFails(t *testing.T) {
+	in := fakePayloadInputs(t, "llama.yaml")
+	in.Manifest.Container.Resources.CPU = "fast"
+
+	_, err := BuildCreatePayload(in)
+	if err == nil || !strings.Contains(err.Error(), "container.resources.cpu") {
+		t.Fatalf("err = %v, want container.resources.cpu error", err)
 	}
 }
 

@@ -397,6 +397,44 @@ func TestInstaller_Uninstall_RemovesTierBoundDirsAndParent(t *testing.T) {
 	}
 }
 
+func TestInstaller_Uninstall_RemovesTierBoundParentWhenPathRowMissing(t *testing.T) {
+	inst, _ := newTestInstaller(t)
+	tierMount := filepath.Join(t.TempDir(), "media")
+	if err := os.MkdirAll(tierMount, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	tp := newFakeTP()
+	tp.put("media", tierMount, "healthy", "NVME")
+	inst.SetTierProvider(tp, fakeStatfs{}.avail)
+
+	if _, err := inst.InstallWithOptions(readFixture(t, "llama.yaml"), InstallOptions{
+		Tiers: TierAssignments{Default: "media"},
+	}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	pluginParent := filepath.Join(tierMount, ".plugins", "llama-cpp")
+	volumeDir := filepath.Join(pluginParent, "models")
+	if err := os.WriteFile(filepath.Join(volumeDir, "model.gguf"), []byte("GGUF"), 0o640); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	if _, err := inst.store.db.Exec(
+		`UPDATE plugin_volume_paths SET host_path = '' WHERE plugin_name = ? AND volume_name = ?`,
+		"llama-cpp", "models",
+	); err != nil {
+		t.Fatalf("blank stored host path: %v", err)
+	}
+
+	if err := inst.Uninstall("llama-cpp"); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if _, err := os.Stat(pluginParent); !os.IsNotExist(err) {
+		t.Errorf("plugin parent dir should be gone: %v", err)
+	}
+	if _, err := inst.store.Get("llama-cpp"); !errors.Is(err, ErrPluginNotFound) {
+		t.Errorf("plugin should be deleted: %v", err)
+	}
+}
+
 func TestInstaller_Uninstall_RemoveErrorPreservesPluginRecord(t *testing.T) {
 	inst, _ := newTestInstaller(t)
 	tierMount := filepath.Join(t.TempDir(), "media")

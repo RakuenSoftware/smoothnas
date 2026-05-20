@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -113,6 +114,7 @@ type Container struct {
 // payload builder rather than passed only as container environment.
 type Resources struct {
 	Memory string `json:"memory,omitempty" yaml:"memory,omitempty"`
+	CPU    string `json:"cpu,omitempty" yaml:"cpu,omitempty"`
 }
 
 // Instances controls replica fan-out. When omitted entirely the
@@ -303,17 +305,22 @@ func validateContainer(v *ValidationError, c *Container, a *Artifact, config []C
 }
 
 func validateResources(v *ValidationError, r *Resources, config []ConfigField) {
-	if r.Memory == "" {
+	validateConfigurableResource(v, "container.resources.memory", r.Memory, config, parseByteSize)
+	validateConfigurableResource(v, "container.resources.cpu", r.CPU, config, parseCPUCount)
+}
+
+func validateConfigurableResource(v *ValidationError, field, value string, config []ConfigField, parse func(string) (int64, error)) {
+	if value == "" {
 		return
 	}
-	if key, ok := configReference(r.Memory); ok {
+	if key, ok := configReference(value); ok {
 		if !configKeyExists(config, key) {
-			v.add("container.resources.memory", "references unknown config key %q", key)
+			v.add(field, "references unknown config key %q", key)
 		}
 		return
 	}
-	if _, err := parseByteSize(r.Memory); err != nil {
-		v.add("container.resources.memory", "%v", err)
+	if _, err := parse(value); err != nil {
+		v.add(field, "%v", err)
 	}
 }
 
@@ -381,6 +388,25 @@ func parseByteSize(value string) (int64, error) {
 		return 0, fmt.Errorf("byte size overflows int64")
 	}
 	return n * mult, nil
+}
+
+func parseCPUCount(value string) (int64, error) {
+	s := strings.TrimSpace(value)
+	if s == "" {
+		return 0, fmt.Errorf("must be a positive CPU count")
+	}
+	n, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsNaN(n) || math.IsInf(n, 0) || n <= 0 {
+		return 0, fmt.Errorf("must be a positive CPU count")
+	}
+	if n > float64(math.MaxInt64)/1_000_000_000 {
+		return 0, fmt.Errorf("CPU count overflows int64 nanocpus")
+	}
+	nano := int64(n * 1_000_000_000)
+	if nano <= 0 {
+		return 0, fmt.Errorf("must be at least 0.000000001 CPUs")
+	}
+	return nano, nil
 }
 
 func validateInstances(v *ValidationError, in *Instances, vols []Volume) {

@@ -1,0 +1,18 @@
+apiVersion: smoothnas.io/v1
+kind: PluginProfile
+metadata:
+  name: rocm-runtime
+  description: |
+    ROCm/HSA runtime passthrough for AMD inference containers. Use with
+    gpu-amd so the container receives both DRM render nodes and /dev/kfd.
+container:
+  hostConfig:
+    devices:
+      - { path: /dev/kfd, cgroupPermissions: rwm }
+lxc:
+  rawConfig:
+    - "lxc.cgroup2.devices.allow = c 235:* rwm"
+    - "lxc.mount.entry = /dev/kfd dev/kfd none bind,optional,create=file 0 0"
+preflight:
+  hostHas:
+    - { path: /dev/kfd, requirement: required }

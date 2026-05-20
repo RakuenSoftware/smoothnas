@@ -349,14 +349,23 @@ func (i *Installer) Uninstall(name string) error {
 				}
 			}
 		}
+		if vol.Mode == VolumeModeTierBound {
+			if parent := i.resolveTierPluginParent(name, vol); parent != "" {
+				tierParents[parent] = struct{}{}
+			}
+		}
 	}
 
 	// Remove per-plugin parent directories. Best effort — leftover
-	// content (operator junk, race with another writer) is fine.
+	// flat content (operator junk, race with another writer) is fine.
+	// Tier-bound parents are plugin-owned and block reinstall preflight,
+	// so failure there preserves the DB row for retry.
 	flatParent := filepath.Join(i.pluginsRoot, name)
 	_ = os.Remove(flatParent) //nolint:errcheck // best-effort cleanup
 	for tierParent := range tierParents {
-		_ = os.RemoveAll(tierParent) //nolint:errcheck // best-effort cleanup
+		if err := i.removeAll(tierParent); err != nil {
+			return fmt.Errorf("remove %s: %w", tierParent, err)
+		}
 	}
 
 	if err := i.store.Delete(name); err != nil {
@@ -364,6 +373,17 @@ func (i *Installer) Uninstall(name string) error {
 	}
 
 	return nil
+}
+
+func (i *Installer) resolveTierPluginParent(pluginName string, vol VolumeRow) string {
+	if i.tierProvider == nil || vol.TierPool == "" || vol.TierPool == "<unresolved>" {
+		return ""
+	}
+	pool, err := i.tierProvider.GetTierInstance(vol.TierPool)
+	if err != nil || pool == nil || pool.MountPoint == "" {
+		return ""
+	}
+	return filepath.Join(pool.MountPoint, ".plugins", pluginName)
 }
 
 // tierPluginParent walks back from a resolved volume host path to
