@@ -568,6 +568,8 @@ function displayPluginName(name: string): string {
       return 'GitHub Actions runner';
     case 'llama-cpp':
       return 'llama.cpp';
+    case 'vllm':
+      return 'vLLM';
     case 'wolf':
       return 'Wolf';
     default:
@@ -583,6 +585,7 @@ function inferManifestVariant(assetName: string, manifest: ParsedManifest): stri
   const raw = `${assetName} ${manifest.artifact.image ?? ''} ${(manifest.profiles ?? []).join(' ')}`.toLowerCase();
   if (raw.includes('cpu')) return 'CPU only';
   if (raw.includes('cuda')) return 'NVIDIA CUDA';
+  if (raw.includes('rocm')) return 'AMD ROCm';
   if (raw.includes('vulkan')) return 'Vulkan';
   if (raw.includes('gpu-nvidia')) return 'NVIDIA';
   if (raw.includes('gpu-amd')) return 'AMD';
@@ -595,7 +598,7 @@ function manifestAccelerator(assetName: string, manifest: ParsedManifest): strin
   if (raw.includes('cpu')) return 'cpu';
   if (raw.includes('cuda') || raw.includes('gpu-nvidia')) return 'nvidia';
   if (raw.includes('gpu-intel')) return 'intel';
-  if (raw.includes('vulkan') || raw.includes('gpu-amd')) return 'amd';
+  if (raw.includes('rocm') || raw.includes('vulkan') || raw.includes('gpu-amd')) return 'amd';
   return 'unknown';
 }
 

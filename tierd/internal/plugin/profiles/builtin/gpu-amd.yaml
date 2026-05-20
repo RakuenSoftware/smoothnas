@@ -5,8 +5,9 @@ metadata:
   description: |
     AMD GPU passthrough via /dev/dri. Binds the entire DRI tree
     (card0/renderD128/etc.) and grants cgroup permissions for
-    char-major 226 (DRM). Same binds work for Intel iGPUs; use
-    the gpu-intel alias for clarity.
+    char-major 226 (DRM). ROCm plugins should also opt into
+    rocm-runtime for /dev/kfd. Same DRM binds work for Intel iGPUs;
+    use the gpu-intel alias for clarity.
 container:
   hostConfig:
     devices:
