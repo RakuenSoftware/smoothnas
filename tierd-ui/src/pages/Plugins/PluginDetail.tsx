@@ -18,6 +18,17 @@ type Detail = {
   manifest: string;
 };
 
+function normalizeDetail(raw: any): Detail {
+  return {
+    plugin: raw?.plugin ?? {},
+    instances: Array.isArray(raw?.instances) ? raw.instances : [],
+    volumes: Array.isArray(raw?.volumes) ? raw.volumes : [],
+    ports: Array.isArray(raw?.ports) ? raw.ports : [],
+    config: Array.isArray(raw?.config) ? raw.config : [],
+    manifest: raw?.manifest ?? '',
+  };
+}
+
 type GPUInfo = {
   id: string;
   vendor: string;
@@ -94,7 +105,7 @@ export default function PluginDetail() {
     setLoading(true);
     setError('');
     api.getPlugin(name)
-      .then(setDetail)
+      .then(resp => setDetail(normalizeDetail(resp)))
       .catch(e => setError(extractError(e, t('plugins.error.list'))))
       .finally(() => setLoading(false));
   }

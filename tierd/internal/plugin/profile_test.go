@@ -24,7 +24,7 @@ func TestNewCatalog_LoadsBuiltins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("catalog: %v", err)
 	}
-	for _, want := range []string{"default-limits", "gpu-amd", "gpu-intel", "gpu-nvidia", "runtime-control", "wolf-runtime"} {
+	for _, want := range []string{"default-limits", "gpu-amd", "gpu-intel", "gpu-nvidia", "rocm-runtime", "runtime-control", "wolf-runtime"} {
 		if _, ok := c.Get(want); !ok {
 			t.Errorf("built-in %q missing from catalog", want)
 		}
@@ -185,6 +185,49 @@ func TestResolve_OptionalPreflightWarnsAndContinues(t *testing.T) {
 		if strings.Contains(raw, "lxc.mount.entry = /dev/dri ") {
 			t.Errorf("missing optional mount should be dropped, got %q", raw)
 		}
+	}
+}
+
+func TestResolve_ROCmRuntimeProfile(t *testing.T) {
+	c, _ := NewCatalog("")
+	m := &Manifest{Profiles: []string{"!default-limits", "gpu-amd", "rocm-runtime"}}
+	r, err := Resolve(c, m, statHostFromMap(map[string]bool{
+		"/dev/dri": true,
+		"/dev/kfd": true,
+	}))
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	for _, path := range []string{"/dev/dri", "/dev/kfd"} {
+		found := false
+		for _, d := range r.Devices {
+			if d.Path == path {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("Devices missing %s: %+v", path, r.Devices)
+		}
+	}
+	for _, raw := range []string{
+		"lxc.cgroup2.devices.allow = c 226:* rwm",
+		"lxc.cgroup2.devices.allow = c 235:* rwm",
+		"lxc.mount.entry = /dev/kfd dev/kfd none bind,optional,create=file 0 0",
+	} {
+		if !containsString(r.LXCRaw, raw) {
+			t.Errorf("LXCRaw missing %q: %+v", raw, r.LXCRaw)
+		}
+	}
+}
+
+func TestResolve_ROCmRuntimeRequiresKFD(t *testing.T) {
+	c, _ := NewCatalog("")
+	m := &Manifest{Profiles: []string{"!default-limits", "gpu-amd", "rocm-runtime"}}
+	_, err := Resolve(c, m, statHostFromMap(map[string]bool{
+		"/dev/dri": true,
+	}))
+	if err == nil || !strings.Contains(err.Error(), "/dev/kfd") {
+		t.Fatalf("err = %v, want missing /dev/kfd error", err)
 	}
 }
 
