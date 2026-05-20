@@ -30,6 +30,7 @@ type HostConfig struct {
 	Devices       []DeviceMapping          `json:"Devices,omitempty"`      // populated by phase 05 (profiles)
 	CapAdd        []string                 `json:"CapAdd,omitempty"`       // capabilities a profile can grant
 	Memory        int64                    `json:"Memory,omitempty"`       // bytes; 0 = unlimited
+	NanoCPUs      int64                    `json:"NanoCpus,omitempty"`     // Docker CPU limit; 1 CPU = 1e9
 	PidsLimit     int64                    `json:"PidsLimit,omitempty"`    // 0 = unlimited; profiles can cap
 	OomScoreAdj   int                      `json:"OomScoreAdj,omitempty"`  // -1000..1000; default-limits sets 100
 	PortBindings  map[string][]PortBinding `json:"PortBindings,omitempty"` // populated for manifest ports with hostExpose=true

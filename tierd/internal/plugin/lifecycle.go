@@ -275,6 +275,9 @@ func hostConfigMatchesDesired(existing, desired runtime.HostConfig) bool {
 	if desired.Memory != existing.Memory {
 		return false
 	}
+	if desired.NanoCPUs != existing.NanoCPUs {
+		return false
+	}
 	if desired.PidsLimit != existing.PidsLimit {
 		return false
 	}

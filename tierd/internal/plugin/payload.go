@@ -199,6 +199,14 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 		}
 		host.Memory = memory
 	}
+	if in.Manifest.Container.Resources.CPU != "" {
+		raw := expandArg(in.Manifest.Container.Resources.CPU, envMap)
+		nanoCPUs, err := parseCPUCount(raw)
+		if err != nil {
+			return runtime.CreateContainerRequest{}, fmt.Errorf("container.resources.cpu: %w", err)
+		}
+		host.NanoCPUs = nanoCPUs
+	}
 
 	req := runtime.CreateContainerRequest{
 		Image:      in.ImageRef,

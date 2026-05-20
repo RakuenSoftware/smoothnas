@@ -629,6 +629,29 @@ func TestContainerMatchesDesired_HostExposeChanges(t *testing.T) {
 	}
 }
 
+func TestContainerMatchesDesired_CPUResourceChanges(t *testing.T) {
+	existing := runtime.ContainerInspect{
+		Config: runtime.ContainerConfig{Image: "ghcr.io/example/plugin:1"},
+		HostConfig: runtime.HostConfig{
+			NanoCPUs: 1_000_000_000,
+		},
+	}
+	desired := runtime.CreateContainerRequest{
+		Image: "ghcr.io/example/plugin:1",
+		HostConfig: runtime.HostConfig{
+			NanoCPUs: 1_000_000_000,
+		},
+	}
+	if !containerMatchesDesired(existing, desired) {
+		t.Fatal("matching CPU limit should not force recreate")
+	}
+
+	desired.HostConfig.NanoCPUs = 2_000_000_000
+	if containerMatchesDesired(existing, desired) {
+		t.Fatal("changed CPU limit should force recreate")
+	}
+}
+
 // fakeProxyManager records every Apply / Remove for lifecycle
 // integration assertions.
 type fakeProxyManager struct {
