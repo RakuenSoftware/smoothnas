@@ -167,6 +167,16 @@ func TestValidateManifest_FailureModes(t *testing.T) {
 			wantField: "container.resources.memory",
 		},
 		{
+			name:      "bad container.resources.cpu",
+			mutate:    func(m *Manifest) { m.Container.Resources.CPU = "fast" },
+			wantField: "container.resources.cpu",
+		},
+		{
+			name:      "container.resources.cpu references unknown config",
+			mutate:    func(m *Manifest) { m.Container.Resources.CPU = "${CPU_LIMIT}" },
+			wantField: "container.resources.cpu",
+		},
+		{
 			name:      "instances.count negative",
 			mutate:    func(m *Manifest) { m.Instances.Count = -3 },
 			wantField: "instances.count",
@@ -293,6 +303,20 @@ func TestValidateManifest_AllowsConfigurableMemoryResource(t *testing.T) {
 		Default: "64GiB",
 	})
 	m.Container.Resources.Memory = "${MEMORY_LIMIT}"
+
+	if err := ValidateManifest(m); err != nil {
+		t.Fatalf("ValidateManifest: %v", err)
+	}
+}
+
+func TestValidateManifest_AllowsConfigurableCPUResource(t *testing.T) {
+	m := loadFixture(t, "llama.yaml")
+	m.Config = append(m.Config, ConfigField{
+		Key:     "CPU_LIMIT",
+		Type:    "number",
+		Default: "1",
+	})
+	m.Container.Resources.CPU = "${CPU_LIMIT}"
 
 	if err := ValidateManifest(m); err != nil {
 		t.Fatalf("ValidateManifest: %v", err)
