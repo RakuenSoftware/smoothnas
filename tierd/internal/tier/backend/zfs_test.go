@@ -72,7 +72,7 @@ func TestEnsureLegacyFSTabEntryIdempotent(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 fstab line, got %d: %q", len(lines), string(data))
 	}
-	want := "tank/tierd/media/HDD /mnt/.tierd-backing/media/HDD zfs defaults,nofail 0 0"
+	want := "tank/tierd/media/HDD /mnt/.tierd-backing/media/HDD zfs defaults,nofail,x-systemd.requires=zfs-import-cache.service,x-systemd.after=zfs-import-cache.service 0 0"
 	if lines[0] != want {
 		t.Fatalf("fstab line = %q, want %q", lines[0], want)
 	}
@@ -96,7 +96,7 @@ func TestEnsureLegacyFSTabEntryUpgradesExistingEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fstab: %v", err)
 	}
-	want := "tank/tierd/media/HDD /mnt/.tierd-backing/media/HDD zfs defaults,nofail 0 0"
+	want := "tank/tierd/media/HDD /mnt/.tierd-backing/media/HDD zfs defaults,nofail,x-systemd.requires=zfs-import-cache.service,x-systemd.after=zfs-import-cache.service 0 0"
 	if got := strings.TrimSpace(string(data)); got != want {
 		t.Fatalf("fstab line = %q, want %q", got, want)
 	}

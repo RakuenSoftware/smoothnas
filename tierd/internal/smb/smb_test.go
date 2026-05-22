@@ -1,6 +1,8 @@
 package smb
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -200,6 +202,60 @@ func TestGenerateConfigWithShares(t *testing.T) {
 	}
 	if !strings.Contains(publicSection, "valid users = alice bob") {
 		t.Error("missing valid users")
+	}
+}
+
+func TestSmbdMountDropInConfigRequiresShareMounts(t *testing.T) {
+	config := SmbdMountDropInConfig([]Share{
+		{Name: "storage", Path: "/mnt/media/storage"},
+		{Name: "backup", Path: "/mnt/backup"},
+		{Name: "duplicate", Path: "/mnt/media/storage/."},
+	})
+	if !strings.Contains(config, "[Unit]\n") {
+		t.Fatalf("drop-in missing unit section:\n%s", config)
+	}
+	if !strings.Contains(config, "RequiresMountsFor=/mnt/backup /mnt/media/storage\n") {
+		t.Fatalf("drop-in missing sorted mount requirements:\n%s", config)
+	}
+}
+
+func TestApplyServiceMountDependenciesWritesAndRemovesDropIn(t *testing.T) {
+	origPath := smbdMountDropInPath
+	origSystemctl := smbSystemctl
+	dir := t.TempDir()
+	smbdMountDropInPath = filepath.Join(dir, "smbd.service.d", "10-smoothnas-shares.conf")
+	var calls []string
+	smbSystemctl = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	t.Cleanup(func() {
+		smbdMountDropInPath = origPath
+		smbSystemctl = origSystemctl
+	})
+
+	if err := applyServiceMountDependencies([]Share{{Name: "storage", Path: "/mnt/media/storage"}}); err != nil {
+		t.Fatalf("apply mount dependencies: %v", err)
+	}
+	data, err := os.ReadFile(smbdMountDropInPath)
+	if err != nil {
+		t.Fatalf("read drop-in: %v", err)
+	}
+	if !strings.Contains(string(data), "RequiresMountsFor=/mnt/media/storage\n") {
+		t.Fatalf("unexpected drop-in:\n%s", data)
+	}
+	if len(calls) != 1 || calls[0] != "daemon-reload" {
+		t.Fatalf("systemctl calls = %#v, want daemon-reload", calls)
+	}
+
+	if err := applyServiceMountDependencies(nil); err != nil {
+		t.Fatalf("remove mount dependencies: %v", err)
+	}
+	if _, err := os.Stat(smbdMountDropInPath); !os.IsNotExist(err) {
+		t.Fatalf("drop-in still exists or unexpected stat error: %v", err)
+	}
+	if len(calls) != 2 || calls[1] != "daemon-reload" {
+		t.Fatalf("systemctl calls after remove = %#v", calls)
 	}
 }
 
