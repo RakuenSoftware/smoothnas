@@ -146,6 +146,7 @@ jobs:
           - deb_arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
         with:
@@ -303,6 +304,7 @@ jobs:
           npm ci && npm run build
 
       - name: Build SmoothNAS runtime
+        timeout-minutes: 10
         run: ./scripts/build-smoothnas-runtime.sh
 
       - name: Download SmoothKernel + ZFS .debs
