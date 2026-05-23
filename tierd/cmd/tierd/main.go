@@ -108,10 +108,6 @@ func main() {
 		log.Fatalf("failed to run migrations: %v", err)
 	}
 
-	// Any runs marked "running" from a previous tierd instance are now orphaned.
-	if err := store.MarkStaleRunsFailed(); err != nil {
-		log.Printf("warning: could not mark stale backup runs as failed: %v", err)
-	}
 	if err := api.ReconcileSharingConfig(store); err != nil {
 		log.Printf("warning: could not reconcile sharing config: %v", err)
 	}
@@ -176,13 +172,16 @@ func main() {
 		log.Printf("plugin profile catalog: %v (built-ins still loaded)", catalogErr)
 	}
 	pluginLifecycle, stopPluginRuntime := setupPluginRuntime(plugin.NewStore(store), pluginCatalog)
+	backupHandler := api.NewBackupHandler(store)
 
-	router := api.NewRouterFullWithPlugins(store, version, startTime, historyStore, alarmStore, mon,
+	router := api.NewRouterFullWithPluginsAndBackupHandler(store, version, startTime, historyStore, alarmStore, mon,
 		pluginLifecycle,
 		pluginCatalog,
+		backupHandler,
 		mdadmAdapter,
 		zfsAdapter,
 	)
+	backupHandler.ResumeActiveRuns()
 
 	// Boot-time adapter reconciliation: ensures smoothfs-backed namespace
 	// processes exist for all healthy pools. Runs in the background so it
@@ -266,6 +265,23 @@ func main() {
 
 	<-done
 	log.Println("shutting down...")
+	backupHandler.BeginShutdown()
+
+	forceDone := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+			log.Printf("second shutdown signal received; cancelling active backups")
+			backupHandler.CancelAll()
+		case <-forceDone:
+		}
+	}()
+	if n := backupHandler.ActiveRunCount(); n > 0 {
+		log.Printf("waiting for %d active backup run(s) to finish before shutdown", n)
+		backupHandler.Wait()
+		log.Printf("active backup runs drained")
+	}
+	close(forceDone)
 
 	// Stop schedulers before shutting down the HTTP server so in-flight planner
 	// cycles complete cleanly before the adapters are torn down.

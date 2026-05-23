@@ -1162,6 +1162,7 @@ const en: LanguageTranslations = {
   'error.backup.config_not_found': 'Backup config not found',
   'error.backup.run_not_found': 'Backup run not found',
   'error.backup.run_not_found_or_finished': 'Backup run not found or already finished',
+  'error.backup.service_shutting_down': 'Backup service is shutting down; try again after restart',
   'error.smoothfs.pool_not_found': 'SmoothFS pool not found',
   'error.smoothfs.pool_name_taken': 'A SmoothFS pool with that name already exists',
   'error.smoothfs.full_threshold_out_of_range': 'Full threshold percentage must be between 1 and 100',

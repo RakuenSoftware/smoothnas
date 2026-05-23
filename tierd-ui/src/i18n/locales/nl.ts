@@ -1179,6 +1179,7 @@ const nl: LanguageTranslations = {
   'error.backup.config_not_found': 'Back-upconfiguratie niet gevonden',
   'error.backup.run_not_found': 'Back-upuitvoering niet gevonden',
   'error.backup.run_not_found_or_finished': 'Back-upuitvoering niet gevonden of al voltooid',
+  'error.backup.service_shutting_down': 'Back-upservice wordt afgesloten; probeer het opnieuw na de herstart',
   'error.smoothfs.pool_not_found': 'SmoothFS-pool niet gevonden',
   'error.smoothfs.pool_name_taken': 'Een SmoothFS-pool met die naam bestaat al',
   'error.smoothfs.full_threshold_out_of_range': 'Vol-drempelpercentage moet tussen 1 en 100 liggen',

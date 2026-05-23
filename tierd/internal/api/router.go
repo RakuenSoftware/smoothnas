@@ -25,7 +25,7 @@ func NewRouter(store *db.Store, version string, startTime time.Time) http.Handle
 // NewRouterFull builds the HTTP handler tree with all dependencies.
 // adapters are registered with the tiering handler before the first request.
 func NewRouterFull(store *db.Store, version string, startTime time.Time, historyStore *smart.HistoryStore, alarmStore *smart.AlarmStore, mon *monitor.Monitor, adapters ...tiering.TieringAdapter) http.Handler {
-	return newRouterFull(store, version, startTime, historyStore, alarmStore, mon, nil, nil, adapters...)
+	return newRouterFull(store, version, startTime, historyStore, alarmStore, mon, nil, nil, nil, adapters...)
 }
 
 // NewRouterFullWithPlugins builds the HTTP handler tree with the
@@ -33,10 +33,17 @@ func NewRouterFull(store *db.Store, version string, startTime time.Time, history
 // developer environments can keep using NewRouterFull, which leaves
 // lifecycle verbs returning 503.
 func NewRouterFullWithPlugins(store *db.Store, version string, startTime time.Time, historyStore *smart.HistoryStore, alarmStore *smart.AlarmStore, mon *monitor.Monitor, pluginLifecycle *plugin.Lifecycle, pluginCatalog *plugin.Catalog, adapters ...tiering.TieringAdapter) http.Handler {
-	return newRouterFull(store, version, startTime, historyStore, alarmStore, mon, pluginLifecycle, pluginCatalog, adapters...)
+	return newRouterFull(store, version, startTime, historyStore, alarmStore, mon, pluginLifecycle, pluginCatalog, nil, adapters...)
 }
 
-func newRouterFull(store *db.Store, version string, startTime time.Time, historyStore *smart.HistoryStore, alarmStore *smart.AlarmStore, mon *monitor.Monitor, pluginLifecycle *plugin.Lifecycle, pluginCatalog *plugin.Catalog, adapters ...tiering.TieringAdapter) http.Handler {
+// NewRouterFullWithPluginsAndBackupHandler builds the production router with
+// an externally-owned backup handler so the daemon can coordinate backup
+// resume and shutdown draining with HTTP routing.
+func NewRouterFullWithPluginsAndBackupHandler(store *db.Store, version string, startTime time.Time, historyStore *smart.HistoryStore, alarmStore *smart.AlarmStore, mon *monitor.Monitor, pluginLifecycle *plugin.Lifecycle, pluginCatalog *plugin.Catalog, backupHandler *BackupHandler, adapters ...tiering.TieringAdapter) http.Handler {
+	return newRouterFull(store, version, startTime, historyStore, alarmStore, mon, pluginLifecycle, pluginCatalog, backupHandler, adapters...)
+}
+
+func newRouterFull(store *db.Store, version string, startTime time.Time, historyStore *smart.HistoryStore, alarmStore *smart.AlarmStore, mon *monitor.Monitor, pluginLifecycle *plugin.Lifecycle, pluginCatalog *plugin.Catalog, backupHandler *BackupHandler, adapters ...tiering.TieringAdapter) http.Handler {
 	healthHandler := health.NewHandler(version, startTime, health.RuntimeChecks(store))
 	sessions := sgauth.NewSessionStore(store.DB(), 24*time.Hour)
 	rateLimiter := sgauth.NewRateLimiter(store.DB(), 5, 15*time.Minute)
@@ -145,7 +152,9 @@ func newRouterFull(store *db.Store, version string, startTime time.Time, history
 			break
 		}
 	}
-	backupHandler := NewBackupHandler(store)
+	if backupHandler == nil {
+		backupHandler = NewBackupHandler(store)
+	}
 	arraysHandler.SetPurgeBackupsForPath(backupHandler.PurgeBackupsUnderPath)
 
 	// Authenticated endpoints grouped into a single handler.
