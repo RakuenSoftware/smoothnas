@@ -164,10 +164,6 @@ jobs:
             sudo apt-get install -y ca-certificates curl
           fi
           find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-          git config --global --unset-all credential.helper || true
-          git config --global --unset-all url.https://github.com/.insteadOf || true
-          git config --global --unset-all http.https://github.com/.extraheader || true
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
           archive="${RUNNER_TEMP:-/tmp}/smoothnas-source.tar.gz"
           curl -fsSL \
