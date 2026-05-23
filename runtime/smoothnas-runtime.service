@@ -17,6 +17,7 @@ ExecStart=/usr/lib/smoothnas/docker-lxc-daemon \
     --statepath=${SMOOTHNAS_RUNTIME_STATEPATH}
 Restart=always
 RestartSec=5
+TimeoutStopSec=5min
 User=root
 Group=root
 RuntimeDirectory=smoothnas-runtime

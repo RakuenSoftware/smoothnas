@@ -22,6 +22,8 @@ type BackupHandler struct {
 
 	mu          sync.Mutex
 	cancelFuncs map[int64]context.CancelFunc
+	runWG       sync.WaitGroup
+	draining    bool
 	// liveProgress holds transient progress state for currently-running
 	// backup runs. rsync emits progress ticks at high frequency
 	// (hundreds per second on a fast source) and the old code persisted
@@ -32,8 +34,8 @@ type BackupHandler struct {
 	// Progress is pure ephemeral UI state:
 	//   - CompleteBackupRun / FailBackupRun wipe the progress column on
 	//     terminal transition anyway
-	//   - MarkStaleRunsFailed fails any "running" row on tierd restart,
-	//     so any progress surviving a crash is discarded
+	//   - A restarted tierd resumes any "running" row and rebuilds live
+	//     progress from the new rsync/cp process.
 	// Holding it in memory only is correct and drops the SQL write
 	// entirely. Terminal state (started → completed / failed) is
 	// unchanged and still persisted.
@@ -48,12 +50,78 @@ type liveRunProgress struct {
 	Total int
 }
 
+var runBackupFunc = backup.Run
+
 func NewBackupHandler(store *db.Store) *BackupHandler {
 	return &BackupHandler{
 		store:        store,
 		cancelFuncs:  make(map[int64]context.CancelFunc),
 		liveProgress: make(map[int64]liveRunProgress),
 	}
+}
+
+// ResumeActiveRuns restarts any backup rows that were still marked running
+// when tierd last exited. rsync runs are naturally incremental with --inplace,
+// so re-running the same config continues the partial destination tree toward
+// completion instead of converting the run to a restart failure.
+func (h *BackupHandler) ResumeActiveRuns() {
+	runs, err := h.store.ListActiveBackupRuns()
+	if err != nil {
+		log.Printf("backup resume: list active runs: %v", err)
+		return
+	}
+	for _, run := range runs {
+		cfg, err := h.store.GetBackupConfig(run.ConfigID)
+		if err != nil {
+			log.Printf("backup resume: config %d for run %d: %v", run.ConfigID, run.ID, err)
+			_ = h.store.FailBackupRun(run.ID, fmt.Sprintf("resume failed: backup config %d unavailable", run.ConfigID))
+			continue
+		}
+		if h.startRun(run.ID, cfg, true, true) {
+			log.Printf("backup run %d (config %d) resumed after restart", run.ID, run.ConfigID)
+		}
+	}
+}
+
+// BeginShutdown prevents new backup runs from being accepted. Existing runs
+// keep running and may still be cancelled through their cancel endpoint until
+// the HTTP server is shut down.
+func (h *BackupHandler) BeginShutdown() {
+	h.mu.Lock()
+	h.draining = true
+	h.mu.Unlock()
+}
+
+// ActiveRunCount returns the number of runs currently owned by this handler.
+func (h *BackupHandler) ActiveRunCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.cancelFuncs)
+}
+
+// Wait blocks until every run owned by this handler reaches a terminal state.
+func (h *BackupHandler) Wait() {
+	h.runWG.Wait()
+}
+
+// CancelAll cancels all active runs. It is reserved for an explicit forced
+// shutdown signal; normal service stop drains instead.
+func (h *BackupHandler) CancelAll() {
+	h.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(h.cancelFuncs))
+	for _, cancel := range h.cancelFuncs {
+		cancels = append(cancels, cancel)
+	}
+	h.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (h *BackupHandler) isDraining() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.draining
 }
 
 // setLiveProgress replaces the in-memory progress entry for a run.
@@ -419,6 +487,10 @@ func (h *BackupHandler) updateConfig(w http.ResponseWriter, r *http.Request, id 
 }
 
 func (h *BackupHandler) runBackup(w http.ResponseWriter, r *http.Request, id int64) {
+	if h.isDraining() {
+		jsonErrorCoded(w, "backup service is shutting down; try again after restart", http.StatusConflict, "backup.service_shutting_down")
+		return
+	}
 	cfg, err := h.store.GetBackupConfig(id)
 	if err != nil {
 		if err == db.ErrNotFound {
@@ -441,13 +513,36 @@ func (h *BackupHandler) runBackup(w http.ResponseWriter, r *http.Request, id int
 
 	log.Printf("backup run %d (config %d) started: %s %s→%s via %s", runID, id, cfg.Direction, cfg.Host, cfg.LocalPath, cfg.Method)
 
+	if !h.startRun(runID, cfg, false, false) {
+		_ = h.store.FailBackupRun(runID, "backup service is shutting down")
+		jsonErrorCoded(w, "backup service is shutting down; try again after restart", http.StatusConflict, "backup.service_shutting_down")
+		return
+	}
+
+	w.WriteHeader(http.StatusAccepted)
+	fmt.Fprintf(w, `{"run_id":%d}`, runID)
+}
+
+func (h *BackupHandler) startRun(runID int64, cfg *db.BackupConfig, resumed bool, allowDuringDrain bool) bool {
 	ctx, cancel := context.WithCancel(context.Background())
 	h.mu.Lock()
+	if h.draining && !allowDuringDrain {
+		h.mu.Unlock()
+		cancel()
+		return false
+	}
+	if _, exists := h.cancelFuncs[runID]; exists {
+		h.mu.Unlock()
+		cancel()
+		return false
+	}
 	h.cancelFuncs[runID] = cancel
+	h.runWG.Add(1)
 	h.mu.Unlock()
 
 	go func() {
 		defer func() {
+			h.runWG.Done()
 			cancel() // always release context resources
 			h.mu.Lock()
 			delete(h.cancelFuncs, runID)
@@ -455,7 +550,11 @@ func (h *BackupHandler) runBackup(w http.ResponseWriter, r *http.Request, id int
 			h.mu.Unlock()
 		}()
 
-		h.setLiveProgress(runID, "Starting backup...", -1, -1)
+		if resumed {
+			h.setLiveProgress(runID, "Resuming backup after restart...", -1, -1)
+		} else {
+			h.setLiveProgress(runID, "Starting backup...", -1, -1)
+		}
 		runCfg := backupConfigFromDB(cfg)
 		// Backups write through the smoothfs mountpoint and let the
 		// kernel module apply the documented placement policy: new
@@ -468,25 +567,24 @@ func (h *BackupHandler) runBackup(w http.ResponseWriter, r *http.Request, id int
 		// the very workload it was built for and produced incoming
 		// data with the inverted heat profile (cold tier loaded,
 		// fast tier empty).
-		summary, err := backup.Run(ctx, runCfg, func(msg string, done, total int) {
+		summary, err := runBackupFunc(ctx, runCfg, func(msg string, done, total int) {
 			h.setLiveProgress(runID, msg, done, total)
 		})
 		if err != nil {
 			if ctx.Err() != nil {
-				log.Printf("backup run %d (config %d): cancelled", runID, id)
+				log.Printf("backup run %d (config %d): cancelled", runID, cfg.ID)
 				_ = h.store.FailBackupRun(runID, "Cancelled")
 			} else {
-				log.Printf("backup run %d (config %d) failed: %v", runID, id, err)
+				log.Printf("backup run %d (config %d) failed: %v", runID, cfg.ID, err)
 				_ = h.store.FailBackupRun(runID, err.Error())
 			}
 			return
 		}
-		log.Printf("backup run %d (config %d) completed", runID, id)
+		log.Printf("backup run %d (config %d) completed", runID, cfg.ID)
 		_ = h.store.CompleteBackupRun(runID, summary)
 	}()
 
-	w.WriteHeader(http.StatusAccepted)
-	fmt.Fprintf(w, `{"run_id":%d}`, runID)
+	return true
 }
 
 func backupConfigFromDB(cfg *db.BackupConfig) backup.Config {

@@ -53,7 +53,7 @@ install_zfs_stack() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y $SMOOTHKERNEL_ZFS_PACKAGES
     grep -qxF 'zfs' /etc/modules 2>/dev/null || echo 'zfs' >> /etc/modules
     modprobe zfs 2>/dev/null || true
-    systemctl enable zfs-import-cache.service zfs-mount.service 2>/dev/null || true
+    systemctl enable zfs.target zfs-import.target zfs-import-cache.service zfs-mount.service 2>/dev/null || true
 }
 
 install_smoothfs_dkms() {
