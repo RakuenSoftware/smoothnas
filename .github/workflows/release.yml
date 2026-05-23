@@ -163,7 +163,7 @@ jobs:
           fi
           sudo apt-get install -y \
             xorriso $bios_pkgs cpio gzip file curl \
-            gh libpam0g-dev build-essential dpkg-dev xz-utils ripgrep \
+            gh jq libpam0g-dev build-essential dpkg-dev xz-utils ripgrep \
             pkg-config lxc-dev
           cc1="$(gcc -print-prog-name=cc1 2>/dev/null || true)"
           if [ -z "$cc1" ] || [ ! -x "$cc1" ]; then
@@ -306,32 +306,21 @@ jobs:
         run: ./scripts/build-smoothnas-runtime.sh
 
       - name: Download SmoothKernel + ZFS .debs
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          release_api="https://api.github.com/repos/RakuenSoftware/smoothkernel/releases/tags/${{ needs.meta.outputs.smoothkernel_tag }}"
           for attempt in 1 2 3; do
             rm -rf deps/smoothkernel-out
             mkdir -p deps/smoothkernel-out
-            gh_bin="$(command -v gh || true)"
-            if [ -z "$gh_bin" ] && [ -x /usr/bin/gh ]; then
-              gh_bin="/usr/bin/gh"
-            fi
-            if [ -z "$gh_bin" ]; then
-              echo "::warning::gh missing before SmoothKernel download; reinstalling gh"
-              sudo apt-get update
-              sudo apt-get install --reinstall -y gh
-              gh_bin="$(command -v gh || true)"
-              if [ -z "$gh_bin" ] && [ -x /usr/bin/gh ]; then
-                gh_bin="/usr/bin/gh"
-              fi
-              test -n "$gh_bin"
-            fi
-            if timeout 180s "$gh_bin" release download "${{ needs.meta.outputs.smoothkernel_tag }}" \
-              --repo RakuenSoftware/smoothkernel \
-              --pattern '*.deb' \
-              --pattern 'SHA256SUMS' \
-              --dir deps/smoothkernel-out \
+            if timeout 240s bash -c '
+              set -euo pipefail
+              curl -fsSL --connect-timeout 10 --retry 5 --retry-delay 3 "$1" -o "$2/release.json"
+              jq -er ".assets[] | select(.name == \"SHA256SUMS\" or (.name | endswith(\".deb\"))) | [.name, .browser_download_url] | @tsv" "$2/release.json" |
+                while IFS=$'\''\t'\'' read -r name url; do
+                  curl -fL --connect-timeout 10 --retry 5 --retry-delay 3 "$url" -o "$2/$name"
+                done
+              test -s "$2/SHA256SUMS"
+            ' _ "$release_api" deps/smoothkernel-out \
               && (cd deps/smoothkernel-out && sha256sum -c SHA256SUMS); then
               break
             fi
