@@ -159,18 +159,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if ! command -v curl >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ca-certificates curl
+          fi
           find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
           git config --global --unset-all credential.helper || true
           git config --global --unset-all url.https://github.com/.insteadOf || true
           git config --global --unset-all http.https://github.com/.extraheader || true
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
-          git init .
-          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
-            fetch --no-tags --prune --depth=1 origin "$GITHUB_SHA"
-          git checkout --force FETCH_HEAD
+          archive="${RUNNER_TEMP:-/tmp}/smoothnas-source.tar.gz"
+          curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/tarball/${GITHUB_SHA}" \
+            -o "$archive"
+          tar -xzf "$archive" --strip-components=1
 
       - name: Install system dependencies
         run: |
@@ -367,10 +372,24 @@ jobs:
           ls -lh deps/smoothkernel-out/
 
       - name: Checkout smoothiso
+        if: ${{ contains(matrix.runner, 'self-hosted') == false }}
         uses: actions/checkout@v6
         with:
           repository: RakuenSoftware/smoothiso
           path: deps/smoothiso
+
+      - name: Checkout smoothiso on self-hosted Linux
+        if: ${{ contains(matrix.runner, 'self-hosted') }}
+        run: |
+          set -euo pipefail
+          rm -rf deps/smoothiso
+          mkdir -p deps/smoothiso
+          archive="${RUNNER_TEMP:-/tmp}/smoothiso-source.tar.gz"
+          curl -fsSL \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/RakuenSoftware/smoothiso/tarball" \
+            -o "$archive"
+          tar -xzf "$archive" -C deps/smoothiso --strip-components=1
 
       - name: Build ISO
         env:
