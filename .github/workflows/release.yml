@@ -166,13 +166,25 @@ jobs:
             xorriso $bios_pkgs cpio gzip file curl \
             gh jq libpam0g-dev build-essential dpkg-dev xz-utils ripgrep \
             pkg-config lxc-dev
-          cc1="$(gcc -print-prog-name=cc1 2>/dev/null || true)"
-          if [ -z "$cc1" ] || [ ! -x "$cc1" ]; then
-            echo "::warning::gcc cannot execute cc1; reinstalling compiler toolchain"
-            sudo apt-get install --reinstall -y gcc cpp build-essential
-            cc1="$(gcc -print-prog-name=cc1)"
+
+          compiler_smoke() {
+            local out
+            out="$(mktemp "${RUNNER_TEMP:-/tmp}/smoothnas-cc-check.XXXXXX")"
+            rm -f "$out"
+            printf '%s\n' 'int main(void) { return 0; }' | gcc -x c - -o "$out"
+            rm -f "$out"
+          }
+
+          if ! compiler_smoke; then
+            echo "::warning::gcc smoke test failed; reinstalling compiler toolchain"
+            cc1_path="$(gcc -print-file-name=cc1 2>/dev/null || true)"
+            cc1_pkgs=""
+            if [ -n "$cc1_path" ] && [ -e "$cc1_path" ]; then
+              cc1_pkgs="$(dpkg-query -S "$cc1_path" 2>/dev/null | cut -d: -f1 | sort -u | xargs echo || true)"
+            fi
+            sudo apt-get install --reinstall -y gcc cpp build-essential $cc1_pkgs
+            compiler_smoke
           fi
-          test -x "$cc1"
           if ! command -v gh >/dev/null 2>&1; then
             echo "::warning::gh not found after dependency install; reinstalling gh"
             sudo apt-get install --reinstall -y gh
