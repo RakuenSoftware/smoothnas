@@ -19,7 +19,7 @@ jobs:
           go-version-file: tierd/go.mod
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libpam0g-dev gcc
+        run: sudo apt-get update && sudo apt-get install -y libpam0g-dev build-essential
 
       - name: Run go vet
         working-directory: tierd
@@ -35,7 +35,7 @@ jobs:
           go-version-file: tierd/go.mod
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libpam0g-dev gcc
+        run: sudo apt-get update && sudo apt-get install -y libpam0g-dev build-essential
 
       - name: Build
         working-directory: tierd
@@ -51,7 +51,7 @@ jobs:
           go-version-file: tierd/go.mod
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libpam0g-dev gcc
+        run: sudo apt-get update && sudo apt-get install -y libpam0g-dev build-essential
 
       - name: Run Go tests
         working-directory: tierd
