@@ -263,7 +263,10 @@ func applyRuntimeNfsdThreads() error {
 		return fmt.Errorf("stat nfsd threads: %w", err)
 	}
 	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d\n", ServerThreads)), 0o644); err != nil {
-		return fmt.Errorf("apply nfsd thread tuning: %w", err)
+		// nfsd may be mid-restart (started with --no-block); the thread count
+		// is already in /etc/nfs.conf.d/smoothnas.conf and will be applied at
+		// service start. Log and continue rather than failing the share create.
+		log.Printf("nfs: runtime thread tuning skipped: %v", err)
 	}
 	return nil
 }
