@@ -177,6 +177,10 @@ func (p *PoolMetaStore) walkTier(ctx context.Context, nsID uint64, src Reconcile
 			rec.PinState = existing.PinState
 			rec.HeatCounter = existing.HeatCounter
 			rec.LastAccessNS = existing.LastAccessNS
+			// Record is already current; no write needed.
+			if existing.NamespaceID == nsID && existing.Version == RecordVersion {
+				return nil
+			}
 		}
 		// Use blocking put so a large backlog never silently drops records on
 		// the cold startup path.
