@@ -15,7 +15,6 @@ import (
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	diskpkg "github.com/JBailes/SmoothNAS/tierd/internal/disk"
-	"github.com/JBailes/SmoothNAS/tierd/internal/iopressure"
 	mdadmraid "github.com/JBailes/SmoothNAS/tierd/internal/mdadm"
 	"github.com/JBailes/SmoothNAS/tierd/internal/spindown"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tiering/meta"
@@ -26,44 +25,10 @@ import (
 // that new pins move quickly, long enough not to thrash under steady load.
 const placementInterval = 2 * time.Minute
 
-// placementQuiescentPeriod is the minimum time a namespace must be idle
-// before the planner will consider migrations. Prevents the planner from
-// interfering with active backups or user workloads by walking tens of
-// thousands of files every cycle and potentially starting migrations.
-// Reset on every HandleOpen, so any user touching the namespace delays
-// the next planner run by at least this long.
-const placementQuiescentPeriod = 10 * time.Minute
-
 // heatDecayEvery counts placement cycles between heat-decay passes. At 2
 // min per cycle, 30 cycles = 1 hour — long enough that short-lived bursts
 // don't evaporate, short enough that an old hot file cools within a day.
 const heatDecayEvery = 30
-
-// tierActiveWriteThreshold is the per-tier filesystem-usage delta-rate
-// (bytes/sec, sampled by statfs) above which the planner treats the tier
-// as actively written and skips the cycle. Value is conservative — well
-// above mdadm bitmap / XFS journal background traffic and ZFS metadata
-// activity, well below any meaningful ingest. The dest-side rate of a
-// rsync pull on a 1 GbE link is ≥ 100 MB/s, so this catches both that
-// case and any user-driven heavy IO.
-const tierActiveWriteThreshold = 5 * 1024 * 1024 // 5 MB/s
-
-// tierActivityProbeInterval is how long the planner waits between two
-// statfs samples of each tier mountpoint when checking whether any tier
-// is being actively written. A 2-second window is long enough that an
-// ongoing write stream registers a meaningful delta and short enough
-// that the once-per-2-min planner cycle barely notices the cost.
-const tierActivityProbeInterval = 2 * time.Second
-
-// placementIOPressureThreshold is the Linux PSI avg10 percentage above which
-// cold placement work defers. Backup reads put real pressure on the backing
-// disks without changing filesystem used bytes, so this catches the read-heavy
-// case that activeWritesOnAnyTier intentionally cannot see.
-const placementIOPressureThreshold = 5.0
-
-// placementIOPressureRecheckInterval bounds how long a candidate walk can keep
-// scanning after a backup or other heavy IO starts.
-const placementIOPressureRecheckInterval = 10 * time.Second
 
 // sizeBucketStep is the multiplicative size ratio that moves a file one
 // tier slower under the pure-size heuristic. Every 16× in size demotes
@@ -262,32 +227,9 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 			_ = spindown.StoreTargetBalanceStatus(a.store, ns.PoolName, balanceStatus)
 		}()
 	}
-	// Idle gates must pass. If any of them reports activity
-	// the planner skips the cycle entirely. This keeps large backing walks,
-	// meta-store reads, and potential migrations out of the way of
-	// anything actively touching the pool.
-	if !a.poolIdleForPlacement(ns.NamespaceID) {
-		balanceStatus.Reason = "target-balance placement deferred; pool is not idle"
-		return
-	}
-	if sample, active, err := placementHostIOBusy(); err == nil && active {
-		log.Printf("placement: pool %s skipped; host IO pressure %s above %.1f",
-			ns.PoolName, sample.Short(), placementIOPressureThreshold)
-		balanceStatus.Reason = "target-balance placement deferred; host IO pressure is high"
-		return
-	} else if err != nil {
-		log.Printf("placement: pool %s IO pressure unavailable: %v", ns.PoolName, err)
-	}
-
 	ranked := a.poolRankedTargets(ns.PoolName)
 	if len(ranked) < 2 {
 		balanceStatus.Reason = "target-balance placement skipped; pool has fewer than two tiers"
-		return
-	}
-	if mp, active := a.activeWritesOnAnyTier(ranked); active {
-		log.Printf("placement: pool %s skipped; active writes on tier mount %s above %d MB/s",
-			ns.PoolName, mp, tierActiveWriteThreshold>>20)
-		balanceStatus.Reason = "target-balance placement deferred; active tier writes detected"
 		return
 	}
 	store := a.metaStoreFor(ns.PoolName)
@@ -322,32 +264,12 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 
 	// Walk every tier and collect candidates. We'll sort+pack below.
 	var cands []candidate
-	now := time.Now()
-	lastIOPressureCheck := now
-	hostIOActive := false
-	var hostIOSample iopressure.Sample
-	checkHostIO := func() bool {
-		if time.Since(lastIOPressureCheck) < placementIOPressureRecheckInterval {
-			return false
-		}
-		lastIOPressureCheck = time.Now()
-		sample, active, err := placementHostIOBusy()
-		if err != nil || !active {
-			return false
-		}
-		hostIOActive = true
-		hostIOSample = sample
-		return true
-	}
 	for _, rt := range ranked {
 		if ctx.Err() != nil {
 			balanceStatus.Reason = "target-balance placement canceled"
 			return
 		}
 		_ = filepath.WalkDir(rt.target.MountPath, func(path string, d fs.DirEntry, err error) error {
-			if checkHostIO() {
-				return filepath.SkipAll
-			}
 			if err != nil || ctx.Err() != nil {
 				if ctx.Err() != nil {
 					return filepath.SkipAll
@@ -363,9 +285,6 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 			}
 			info, err := d.Info()
 			if err != nil {
-				return nil
-			}
-			if now.Sub(info.ModTime()) < placementQuiescentPeriod {
 				return nil
 			}
 			st, ok := info.Sys().(*syscall.Stat_t)
@@ -387,13 +306,6 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 			})
 			return nil
 		})
-		if hostIOActive {
-			log.Printf("placement: pool %s aborting candidate walk; host IO pressure %s above %.1f",
-				ns.PoolName, hostIOSample.Short(), placementIOPressureThreshold)
-			balanceStatus.Reason = "target-balance placement paused; host IO pressure became high"
-			balanceStatus.CandidateCount = len(cands)
-			return
-		}
 	}
 
 	// caps.usedBytes currently includes every candidate file's bytes —
@@ -421,47 +333,18 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 	slowestRank := ranked[len(ranked)-1].rank
 	assignments, assigned := assignCandidateRanks(cands, caps, ranked, fastestRank, slowestRank)
 
-	// Enqueue moves for any file whose assigned rank != current rank.
-	// Re-check the idle gate every few moves so the planner bails out
-	// as soon as a user starts heavy I/O mid-cycle. Already-done moves
-	// stay; remaining moves are dropped and retried next cycle.
 	moved := 0
 	skipped := 0
 	planned := 0
-	const idleRecheckEvery = 8
-	for i, c := range cands {
+	for idx, c := range cands {
 		if ctx.Err() != nil {
 			balanceStatus.Reason = "target-balance placement canceled"
 			break
 		}
-		if i > 0 && i%idleRecheckEvery == 0 {
-			if !a.poolIdleForPlacement(ns.NamespaceID) {
-				log.Printf("placement: pool %s aborting mid-cycle after %d moves (activity resumed)",
-					ns.PoolName, moved)
-				balanceStatus.Reason = "target-balance placement paused; pool activity resumed"
-				balanceStatus.CandidateCount = len(cands)
-				balanceStatus.PlannedMoves = planned
-				balanceStatus.PendingMoves = max1(planned-moved, 0)
-				balanceStatus.Moved = moved
-				balanceStatus.Skipped = skipped
-				return
-			}
-			if sample, active, err := placementHostIOBusy(); err == nil && active {
-				log.Printf("placement: pool %s aborting mid-cycle after %d moves; host IO pressure %s above %.1f",
-					ns.PoolName, moved, sample.Short(), placementIOPressureThreshold)
-				balanceStatus.Reason = "target-balance placement paused; host IO pressure became high"
-				balanceStatus.CandidateCount = len(cands)
-				balanceStatus.PlannedMoves = planned
-				balanceStatus.PendingMoves = max1(planned-moved, 0)
-				balanceStatus.Moved = moved
-				balanceStatus.Skipped = skipped
-				return
-			}
-		}
-		if !assigned[i] || assignments[i] == c.curRank {
+		if !assigned[idx] || assignments[idx] == c.curRank {
 			continue
 		}
-		want := assignments[i]
+		want := assignments[idx]
 		planned++
 		dest := caps[want]
 		if dest == nil {
@@ -656,84 +539,6 @@ func admitWithFallback(caps map[int]*tierCapacity, ranked []rankedPoolTarget, pr
 		}
 	}
 	return preferredRank
-}
-
-// poolIdleForPlacement gates the planner on the absence of running
-// backup_runs. Live I/O signalling now comes from the smoothfs kernel
-// module's netlink events; per-namespace open counters are no longer
-// tracked by this adapter.
-func (a *Adapter) poolIdleForPlacement(namespaceID string) bool {
-	runs, err := a.store.ListActiveBackupRuns()
-	if err == nil && len(runs) > 0 {
-		return false
-	}
-	return true
-}
-
-func placementHostIOBusy() (iopressure.Sample, bool, error) {
-	sample, err := iopressure.ReadDefault()
-	if err != nil {
-		return sample, false, err
-	}
-	return sample, sample.High(placementIOPressureThreshold), nil
-}
-
-// activeWritesOnAnyTier samples each tier's mountpoint twice with a small
-// gap and returns the first mountpoint whose used-bytes delta-rate exceeds
-// tierActiveWriteThreshold (in either direction — a tier shrinking fast
-// is also being actively rewritten or evicted from). The intent is to
-// suppress migrations whenever something is moving data on the pool, not
-// only when an explicit tierd-managed backup_run is registered. This
-// catches manual rsync, in-place dataset writes, and any other path that
-// bypasses the backup runner — `ListActiveBackupRuns` only knows about
-// jobs scheduled through the API.
-//
-// Returns ("", false) when every tier is quiet within threshold.
-func (a *Adapter) activeWritesOnAnyTier(targets []rankedPoolTarget) (string, bool) {
-	if len(targets) == 0 {
-		return "", false
-	}
-	type sample struct {
-		used int64
-		ts   time.Time
-	}
-	first := make(map[int]sample, len(targets))
-	for _, rt := range targets {
-		var st syscall.Statfs_t
-		if err := syscall.Statfs(rt.target.MountPath, &st); err != nil {
-			// If statfs fails here the main planner will hit the same
-			// error and report it cleanly; don't double-log.
-			return "", false
-		}
-		first[rt.rank] = sample{
-			used: int64(st.Blocks-st.Bavail) * int64(st.Bsize),
-			ts:   time.Now(),
-		}
-	}
-	time.Sleep(tierActivityProbeInterval)
-	for _, rt := range targets {
-		var st syscall.Statfs_t
-		if err := syscall.Statfs(rt.target.MountPath, &st); err != nil {
-			return "", false
-		}
-		used2 := int64(st.Blocks-st.Bavail) * int64(st.Bsize)
-		f, ok := first[rt.rank]
-		if !ok {
-			continue
-		}
-		dt := time.Since(f.ts).Seconds()
-		if dt < 0.5 {
-			continue
-		}
-		delta := float64(used2 - f.used)
-		if delta < 0 {
-			delta = -delta
-		}
-		if delta/dt > float64(tierActiveWriteThreshold) {
-			return rt.target.MountPath, true
-		}
-	}
-	return "", false
 }
 
 func max1(x, floor int) int {
