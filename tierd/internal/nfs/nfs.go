@@ -397,8 +397,12 @@ func EnableService(enableV3 bool) error {
 	if err := systemctl("restart", "--no-block", "nfs-kernel-server"); err != nil {
 		return err
 	}
+	// nfs-kernel-server restarted non-blocking above, so nfsd may not have
+	// initialised its procfs yet. The config file (smoothnas.conf) already
+	// contains the right thread count and takes effect on restart, so a
+	// failure here is non-fatal — log and continue.
 	if err := applyRuntimeNfsdThreads(); err != nil {
-		return err
+		log.Printf("nfs: runtime thread tuning skipped (nfsd not ready yet): %v", err)
 	}
 	return nil
 }
