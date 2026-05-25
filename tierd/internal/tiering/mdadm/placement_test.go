@@ -157,27 +157,82 @@ func TestAdmitDrainsWhenOverTargetFill(t *testing.T) {
 	}
 }
 
+func TestAdmitFullFallbackDrainsToSlowestEligibleTier(t *testing.T) {
+	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	caps := map[int]*tierCapacity{
+		1: {totalBytes: 1000, usedBytes: 600, targetCap: 500, fullCap: 950},
+		2: {totalBytes: 1000, usedBytes: 500, targetCap: 500, fullCap: 950},
+	}
+
+	if r := admitWithFallback(caps, ranked, 1, 100); r != 2 {
+		t.Errorf("fallback above target_fill: got rank %d, want 2", r)
+	}
+	if caps[1].usedBytes != 600 {
+		t.Errorf("upper tier usedBytes = %d, want 600", caps[1].usedBytes)
+	}
+	if caps[2].usedBytes != 600 {
+		t.Errorf("bottom tier usedBytes = %d, want 600", caps[2].usedBytes)
+	}
+}
+
+func TestAssignCandidateRanksDrainsUpperTierTowardTargetFill(t *testing.T) {
+	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	caps := map[int]*tierCapacity{
+		1: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
+		2: {totalBytes: 1000, usedBytes: 500, targetCap: 500, fullCap: 950},
+	}
+	cands := []candidate{
+		{curRank: 1, size: 400, pin: meta.PinNone},
+		{curRank: 1, size: 400, pin: meta.PinNone},
+	}
+
+	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
+	for i := range cands {
+		if !assigned[i] {
+			t.Fatalf("candidate %d was not assigned", i)
+		}
+	}
+	if assignments[0] != 1 {
+		t.Fatalf("candidate 0 assignment = %d, want 1", assignments[0])
+	}
+	if assignments[1] != 2 {
+		t.Fatalf("candidate 1 assignment = %d, want 2", assignments[1])
+	}
+	if caps[1].usedBytes != 400 {
+		t.Fatalf("upper tier usedBytes = %d, want 400", caps[1].usedBytes)
+	}
+}
+
+func TestAdmitPinnedHotFullFallbackKeepsFastestEligibleTier(t *testing.T) {
+	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	caps := map[int]*tierCapacity{
+		1: {totalBytes: 1000, usedBytes: 600, targetCap: 500, fullCap: 950},
+		2: {totalBytes: 1000, usedBytes: 500, targetCap: 500, fullCap: 950},
+	}
+
+	if r := admitWithFallbackOrder(caps, ranked, 1, 100, fullFallbackFastestFirst); r != 1 {
+		t.Errorf("pinned-hot fallback: got rank %d, want 1", r)
+	}
+}
+
 // TestAdmitFallsToFullCapLastResort: admissionCap refuses every tier
 // from the preferred rank downward; Pass B falls back to fullCap so
 // the file isn't stranded.
 func TestAdmitFallsToFullCapLastResort(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	// Rank 2 is in drain mode (above fullCap), rank 1 fills all the way
-	// to fullCap already. A 10 MB file has nowhere under admissionCap
-	// but rank 1 still has sub-fullCap slack (fullCap - usedBytes > 10 MB).
+	// Rank 2 is in drain mode (above fullCap), and rank 1 is already at
+	// fullCap. A 10 MB file has nowhere under either admissionCap or fullCap.
 	usedFast := (int64(1) << 30) * 95 / 100
 	usedSlow := (int64(10) << 30) * 96 / 100
 	caps := map[int]*tierCapacity{
 		1: {totalBytes: 1 << 30, usedBytes: usedFast, targetCap: 1 << 29, fullCap: (1 << 30) * 95 / 100},
 		2: {totalBytes: 10 << 30, usedBytes: usedSlow, targetCap: 10 << 29, fullCap: (10 << 30) * 95 / 100},
 	}
-	// Both tiers refuse in Pass A: rank 1 is at fullCap, rank 2 is draining.
-	// Pass B admits at rank 1 (fullCap fallback still has room after we
-	// subtract — but in this setup both are above fullCap-rounding, so it
-	// should at least not strand the file by returning preferredRank=1).
+	// Both tiers refuse in Pass A and Pass B, so the planner returns the
+	// preferred rank unchanged and leaves the file in place.
 	r := admitWithFallback(caps, ranked, 1, 10<<20)
-	if r != 1 && r != 2 {
-		t.Errorf("last-resort: got rank %d, want 1 or 2", r)
+	if r != 1 {
+		t.Errorf("last-resort: got rank %d, want 1", r)
 	}
 }
 
