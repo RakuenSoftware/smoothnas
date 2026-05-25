@@ -20,8 +20,12 @@ flowchart TD
     API --> ZFS["zpool / zfs"]
     API --> Smoothfs["smoothfs kernel module\n(generic netlink)"]
     API --> Sharing["smb / nfs / iscsi tools"]
+    API --> Firewall["nftables"]
     API --> Network["system network config"]
     API --> Smart["smartctl"]
+    API --> Backup["backup runs\n(rsync / cp+sha256)"]
+    API --> Runtime["smoothnas-runtime\n(LXC2Docker socket)"]
+    Runtime --> Plugins["plugin containers\n(LXC)"]
 ```
 
 ## 1.1 Engineering Topology
@@ -55,8 +59,10 @@ That makes the system more inspectable and easier to recover manually.
 
 ### Tiered storage lives in the kernel
 
-The data-plane filesystem for tiered pools is `smoothfs`, an in-tree
-stacked kernel module (`src/smoothfs/`). A pool is a kernel mount of
+The data-plane filesystem for tiered pools is `smoothfs`, a stacked
+kernel module developed in the standalone
+[`RakuenSoftware/smoothfs`](https://github.com/RakuenSoftware/smoothfs)
+project and built on the appliance via DKMS. A pool is a kernel mount of
 `-t smoothfs` over one or more lower-tier mount points provisioned on
 mdadm/LVM (and optionally ZFS). Per-file placement and movement are
 planned in `tierd` and executed through the kernel module over generic
@@ -85,10 +91,23 @@ monitoring, reconciliation, and scheduler/control-loop work.
 SmoothNAS supports:
 
 - mdadm arrays
-- named tiers
+- non-striped single/dual-parity ("nonraid") arrays
+- first-class btrfs / bcachefs arrays (`fsarray`)
+- named tiers (smoothfs)
 - ZFS
 
 These are treated as parallel capabilities, not as temporary compatibility hacks.
+
+### Co-located workloads are containers, not host hacks
+
+The appliance usually has spare CPU, RAM, GPU, and tier-backed storage.
+Rather than leave operators to `curl | sh` workloads onto the host, the
+plugin system runs them as LXC system containers behind a private
+Docker-compatible runtime (`smoothnas-runtime` / LXC2Docker). tierd owns
+the runtime, the bridge network, the volume drivers, and the nginx routes,
+so plugins integrate with the tier model, the firewall, and the UI the same
+way built-in subsystems do — and uninstalling one removes everything it
+touched.
 
 ## 3. Storage Control Flow
 
@@ -155,6 +174,12 @@ The important persistent state buckets are:
 | operations | migration regions and states |
 | observability | SMART history, alarms |
 | sharing | SMB/NFS/iSCSI definitions |
+| data protection | backup job definitions and run state |
+| apps | installed plugins and profiles |
+
+On-disk tier metadata (`devmeta` JSON on the fastest tier, `tiermeta` binary
+envelopes on per-tier metadata LVs) is the source of truth for pool/tier
+topology; the SQLite store is a reconstructable cache of it.
 
 The schema is managed through [`tierd/internal/db/migrations.go`](../tierd/internal/db/migrations.go).
 

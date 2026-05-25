@@ -48,6 +48,16 @@ SMOOTHNAS_RELEASE_GATE_DESTRUCTIVE=1 SMOOTHNAS_RELEASE_GATE_DISKS='/dev/...' scr
 - Backup config deletion must cleanly block or cancel active runs before removing state.
 - SmoothFS bulk-ingest routing must only activate when the target path resolves to a mounted SmoothFS pool.
 
+## Plugins And App Runtime
+
+- `smoothnas-runtime` must be active and its socket reachable before plugin operations are attempted.
+- Installing a plugin from a manifest (URL or local file) must pull/build, create the container, and report progress without manual host steps.
+- Start, stop, configure, log view, and the embedded plugin UI must work from the Plugins page.
+- Tier-bound volumes must resolve to the declared tier slot and preflight against available capacity before install proceeds.
+- Uninstall must be all-or-none: container, cached image/template, nginx route, firewall holes, bridge endpoint, and persistent volumes are removed together.
+- An operator-issued stop must be sticky across reboot; a crashed container must restart per its policy.
+- Plugin networking must not collide on host ports — routes go through nginx to the container bridge IP unless a manifest explicitly opts into host exposure.
+
 ## Update And Install
 
 - Fresh install boots to a reachable UI and healthy `tierd`.

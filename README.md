@@ -7,8 +7,9 @@ It combines:
 - `mdadm` for RAID
 - `LVM` for named tier backing
 - `ZFS` for pool-based storage
-- `smoothfs` — the in-tree stacked kernel filesystem that presents tiered storage as a single mount and drives file placement across tiers
+- `smoothfs` — a stacked kernel filesystem (developed in the standalone [`RakuenSoftware/smoothfs`](https://github.com/RakuenSoftware/smoothfs) project and consumed by the appliance) that presents tiered storage as a single mount and drives file placement across tiers
 - `SMART`, benchmarking, networking, and sharing controls
+- scheduled backups, and a plugin system for running co-located apps in managed containers
 - a custom Debian installer and a web UI that drives the whole system
 - repo-local `aimee` MCP support for engineering agents
 
@@ -36,9 +37,12 @@ If you know Linux and you want an appliance that still feels like Linux, this is
 - Create named storage tiers with slot-based array assignment for `NVME`, `SSD`, and `HDD`.
 - Run ZFS pools, datasets, zvols, and snapshots alongside the mdadm/LVM path.
 - Publish storage over SMB, NFS, and iSCSI.
+- Schedule backups of your storage with live progress, throughput, and cancel control.
+- Run co-located apps as managed plugins (local LLM inference, runners, media tools) in isolated containers.
 - Benchmark local and remote targets with live fio-driven telemetry.
-- Monitor disk health and system alerts.
+- Monitor disk health and system alerts, and spin idle disks down to save power.
 - Install updates from GitHub releases or local release artifacts.
+- Use the web UI in English or Dutch.
 
 ## Who It Is For
 
@@ -63,7 +67,8 @@ SmoothNAS intentionally supports multiple storage paths because different worklo
 | `ZFS` | pool-based storage, datasets, snapshots | Pools and ZFS pages |
 
 The data-plane filesystem for tiered pools is `smoothfs`, a stacked kernel
-module (sources under `src/smoothfs/`). tierd is the control plane: it
+module developed in the standalone [`RakuenSoftware/smoothfs`](https://github.com/RakuenSoftware/smoothfs)
+project and built on the appliance via DKMS. tierd is the control plane: it
 provisions per-tier backings with `mdadm`/`LVM`/`ZFS`, writes a systemd
 mount unit that mounts `-t smoothfs` over those lower tiers, and then
 drives planning, movement, and heat tracking through generic-netlink
@@ -120,13 +125,34 @@ Once you have storage online, publish it through:
 - NFS for Unix/Linux clients
 - iSCSI for block-oriented consumers
 
-### 6. Tune and observe
+### 6. Protect your data
+
+SmoothNAS includes a built-in backup system:
+
+- define backup jobs that copy storage paths to a destination
+- watch live progress, throughput, and terminal state in the UI
+- cancel a running job, and survive a UI reload without losing visibility
+
+Backups refuse to target paths that resolve to the root filesystem, so a missing mount cannot silently fill the OS disk.
+
+### 7. Run apps on the appliance
+
+The box usually has spare CPU, RAM, GPU, and tier-backed storage. The plugin system lets you spend it on co-located workloads — local LLM inference, runners, media tools — without hand-rolling systemd units:
+
+- install a plugin from a manifest (sideload by URL or file)
+- each plugin runs in an isolated container managed by SmoothNAS
+- plugin storage can bind to a specific slot of a named tier
+- start, stop, configure, view logs, and open the plugin's own UI from the browser
+- uninstall removes the container, network, firewall holes, and volumes as one object
+
+### 8. Tune and observe
 
 Day-2 operations are part of the product, not an afterthought:
 
 - benchmark arrays, paths, and remote shares
 - inspect SMART history and alarms
 - watch alerts and hardware state
+- spin idle disks down to save power
 - adjust update channels and apply new releases
 
 ## Architecture At A Glance
@@ -144,6 +170,8 @@ flowchart LR
     API --> Net["network config"]
     API --> Share["SMB / NFS / iSCSI"]
     API --> Smart["smartctl + monitoring"]
+    API --> Backup["backup jobs\n(rsync)"]
+    API --> Runtime["plugin runtime\n(LXC2Docker)"]
 ```
 
 ```mermaid
