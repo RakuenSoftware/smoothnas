@@ -15,8 +15,11 @@ The root [README.md](../README.md) is for users deciding whether the project is 
 | Path | Role |
 | --- | --- |
 | [`/tierd`](../tierd) | Go backend service, API handlers, storage orchestration, monitoring, updater |
-| [`/tierd-ui`](../tierd-ui) | React/Vite UI |
+| [`/tierd/cmd`](../tierd/cmd) | `tierd` daemon and `tierd-cli` operator CLI (smoothfs / iSCSI / plugin / profile subcommands) |
+| [`/tierd-ui`](../tierd-ui) | React/Vite UI (English + Dutch via i18n) |
+| [`/runtime`](../runtime) | `smoothnas-runtime` plugin container runtime (LXC2Docker, Docker-compatible socket) |
 | [`/iso`](../iso) | custom Debian installer and first-boot scripts |
+| [`/scripts`](../scripts) | build, release-gate, and protocol-soak helpers |
 | [`/docs`](../docs) | design history, architecture, operations, `aimee`, and proposals |
 | [`/tierd/deploy`](../tierd/deploy) | nginx and systemd deployment assets |
 
@@ -85,8 +88,11 @@ The `tierd/internal/api` package is the backend shell presented to the UI.
 Major handlers:
 
 - `arrays.go`: mdadm array CRUD, async jobs, rich array listing
-- `tiers.go`: named tier instances and array-slot assignment
+- `tiers.go` / `tiering.go`: named tier instances, array-slot assignment, and the unified tiering control plane
 - `sharing.go`: SMB, NFS, and iSCSI configuration APIs
+- `backup.go`: backup job definitions, async runs, progress, and cancel
+- `plugins.go`: plugin install, lifecycle, profiles, and the embed proxy
+- `spindown.go`: disk power-management policy
 - `system.go`: update channels, update checks, uploads, alerts, hardware, reboot/shutdown
 - `network.go`: interface, bond, VLAN, DNS, route management
 - `benchmark.go`: async fio-based benchmark execution
@@ -99,31 +105,73 @@ The `tierd/internal/db` package stores durable appliance state in SQLite:
 - SMART history and alarms
 - storage and sharing metadata
 - named tier instances and slot assignments
+- backup and plugin records
 
 Important files:
 
 - [`tier_instances.go`](../tierd/internal/db/tier_instances.go)
 - [`migrations.go`](../tierd/internal/db/migrations.go)
 
+SQLite is treated as a reconstructable cache for pool/tier topology. The
+source of truth for that topology is on-disk tier metadata: `devmeta`
+writes a JSON envelope on the fastest tier, and `tiermeta` writes a binary
+envelope at the start of each per-tier metadata LV.
+
 ### Storage orchestration
 
 Storage behavior is split across focused packages:
 
-- `mdadm`: RAID creation, disk prep, scrub, membership changes
-- `lvm`: PV/VG/LV helpers, filesystems, and mounts for named tiers
-- `tier`: named tier provisioning and teardown
-- `zfs`: pools, datasets, zvols, snapshots
+| Package | Role |
+| --- | --- |
+| `disk` | block-device discovery via `lsblk` |
+| `mdadm` | RAID creation, disk prep, scrub, membership changes, stripe-cache tuning |
+| `nonraid` | non-striped single/dual-parity ("unRAID-style") arrays, wrapping [`RakuenSoftware/nonraid`](https://github.com/RakuenSoftware/nonraid) |
+| `fsarray` | first-class btrfs and bcachefs arrays built from raw disks |
+| `lvm` | PV/VG/LV helpers, filesystems, and mounts for named tiers |
+| `zfs` | pools, datasets, zvols, snapshots |
+| `tier` | named tier provisioning and teardown |
+| `tiering` | unified tiering control plane with per-backend adapters (mdadm / ZFS-raw / ZFS-managed) and activity bands |
+| `tiermeta` / `devmeta` | persisted tier/pool topology metadata |
+
+### Sharing, network, and observability
+
+| Package | Role |
+| --- | --- |
+| `smb` / `nfs` / `iscsi` | share/export/LUN generation and service control |
+| `firewall` | regenerates the full nftables ruleset for sharing ports on every change |
+| `network` | interface, bond, VLAN, DNS, and route configuration |
+| `nettest` | iperf3-based network throughput tests |
+| `benchmark` | fio-driven storage benchmarks |
+| `smart` | `smartctl` access and parsing |
+| `monitor` | background polling for storage health, SMART history, alarm rules, and active alerts |
+| `health` | structured health checks surfaced to the UI |
+| `spindown` | idle-disk detection and spin-down power management |
+| `iopressure` | Linux PSI (`/proc/pressure/io`) sampling |
+
+### Apps, backup, and system
+
+| Package | Role |
+| --- | --- |
+| `backup` | NFS/SMB backup runs via `cp`+sha256 verification or rsync |
+| `plugin` (+ `plugin/runtime`) | plugin manifests, install/lifecycle/scale, tier-bound volumes, nginx embed proxy, and the LXC2Docker runtime client |
+| `gpu` | GPU hardware discovery (system hardware page and plugin passthrough) |
+| `updater` | GitHub release checks and artifact apply |
+| `tuning` | idempotent kernel/network parameter tuning at startup |
+| `cache` | small TTL value-cache utility |
+| `integration` | end-to-end tests against a real `tierd` (root-only) |
 
 ### Background control loops
 
 - `monitor`: SMART polling and alert generation
 - per-adapter schedulers and planner loops for placement/movement work
+- the plugin reconciler, which converges container state with declared manifests
 - async job runner model in the API layer for destructive or slow operations
 
 One-shot host remediation and tuning now sit outside the long-lived daemon:
 
 - `tierd-host-init` systemd unit: orphaned backup mount cleanup, package healing, mdadm stripe-cache repair, and host tuning before `tierd` starts
 - `tierd`: long-lived API, monitoring, reconciliation, schedulers, and smoothfs control-plane work
+- `smoothnas-runtime`: separate systemd service exposing the LXC2Docker Docker-compatible socket for plugins
 
 ## Current Storage Model
 
@@ -223,6 +271,43 @@ Managed separately in [`tierd/internal/zfs`](../tierd/internal/zfs).
 
 That separation is intentional. SmoothNAS is not trying to force one storage substrate onto every workload.
 
+### Other array shapes
+
+Two further array models live alongside mdadm:
+
+- [`tierd/internal/nonraid`](../tierd/internal/nonraid): non-striped single/dual-parity arrays in the unRAID tradition, wrapping the [`RakuenSoftware/nonraid`](https://github.com/RakuenSoftware/nonraid) module. Useful when independent-disk recovery matters more than striped throughput.
+- [`tierd/internal/fsarray`](../tierd/internal/fsarray): first-class btrfs and bcachefs arrays built directly from raw disks.
+
+### Unified tiering control plane
+
+[`tierd/internal/tiering`](../tierd/internal/tiering) is the convergence layer for the tier model. It exposes a backend-agnostic control plane with per-backend adapters (mdadm, ZFS-raw, ZFS-managed) registered at startup via `tieringHandler.RegisterAdapter`. Each adapter derives its own "activity band" values; the control plane deliberately never compares band derivations across adapters.
+
+This is the surface the named-tier UI and the smoothfs planner sit on top of, and it is the long-term home for the tier behavior that the older `tier` package still partly implements.
+
+## Plugins and the App Runtime
+
+SmoothNAS runs co-located workloads as managed containers rather than hand-rolled host services. The implementation spans:
+
+- [`tierd/internal/plugin`](../tierd/internal/plugin): manifest schema and parsing, install/lifecycle/scale, tier-bound and flat volume resolution, the nginx embed proxy, and a reconciler that converges container state with declared manifests
+- [`tierd/internal/plugin/runtime`](../tierd/internal/plugin/runtime): the client for the runtime daemon
+- [`/runtime`](../runtime): `smoothnas-runtime`, a systemd service that exposes the [LXC2Docker](https://github.com/games-on-whales/LXC2Docker) Docker-compatible API on `/run/smoothnas-runtime/docker.sock`
+
+Plugins are LXC system containers spoken to over the Docker Engine API. tierd treats LXC2Docker the same way it treats `mdadm` or `nginx` — an external binary with a stable interface. Operators never reach around tierd to the runtime directly.
+
+Two artifact shapes resolve to the same managed-container model: published OCI images, and distro templates with an optional package + setup overlay. Plugin volumes can bind to a specific slot of a named tier, ports are reverse-proxied through nginx to the container's bridge IP (no host port publishing by default), and uninstall is all-or-none — container, image cache, network, firewall holes, and volumes go together.
+
+The design history and phase breakdown live in [../docs/proposals/pending/smoothnas-plugins.md](../docs/proposals/pending/smoothnas-plugins.md).
+
+## Backup
+
+[`tierd/internal/backup`](../tierd/internal/backup) implements backup runs over `cp`+sha256 verification or rsync, with the API surface in [`tierd/internal/api/backup.go`](../tierd/internal/api/backup.go).
+
+Behavior worth knowing before editing:
+
+- runs are async jobs with live progress, throughput, cancel, and terminal state
+- a backup refuses a local target that resolves to the root filesystem, so an absent mount cannot fill the OS disk
+- when the target resolves to a mounted smoothfs pool, bulk-ingest routing applies
+
 ## Frontend Structure
 
 The frontend app lives in [`tierd-ui/src`](../tierd-ui/src), with the route tree rooted in [`tierd-ui/src/App.tsx`](../tierd-ui/src/App.tsx) and the browser bootstrap in [`tierd-ui/src/main.tsx`](../tierd-ui/src/main.tsx).
@@ -232,9 +317,11 @@ The UI is organized around operational domains:
 - dashboard
 - disks and SMART
 - arrays
-- tiers
+- tiers and tiering inventory
 - pools and ZFS objects
 - sharing
+- backups
+- plugins (install, detail, and embedded plugin UI)
 - benchmarks
 - network
 - users
@@ -242,6 +329,8 @@ The UI is organized around operational domains:
 - terminal
 
 The frontend uses the backend job model heavily. Long-running tasks are started, handed a `job_id`, and then polled until completion so the UI stays responsive.
+
+Localization is handled through an `I18nProvider` with English and Dutch locale bundles under [`tierd-ui/src/i18n/locales`](../tierd-ui/src/i18n/locales); the active language follows the logged-in user's saved preference.
 
 ## Agent Workflow
 
@@ -273,6 +362,7 @@ If you are new to the codebase:
 5. [`tierd/internal/api/tiers.go`](../tierd/internal/api/tiers.go)
 6. [`tierd/internal/api/arrays.go`](../tierd/internal/api/arrays.go)
 7. [`tierd/internal/db/tier_instances.go`](../tierd/internal/db/tier_instances.go)
-8. [`tierd/internal/tier`](../tierd/internal/tier)
+8. [`tierd/internal/tier`](../tierd/internal/tier) and [`tierd/internal/tiering`](../tierd/internal/tiering)
+9. [`tierd/internal/plugin`](../tierd/internal/plugin) if you are working on the app runtime
 
 That path gets you from product shape to request flow to storage implementation with the least context switching.
