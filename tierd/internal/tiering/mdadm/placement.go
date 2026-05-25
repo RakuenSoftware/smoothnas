@@ -159,6 +159,13 @@ func (c *tierCapacity) admissionCap() int64 {
 	return c.targetCap
 }
 
+type fullFallbackOrder int
+
+const (
+	fullFallbackSlowestFirst fullFallbackOrder = iota
+	fullFallbackFastestFirst
+)
+
 func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked []rankedPoolTarget, fastestRank, slowestRank int) ([]int, []bool) {
 	assignments := make([]int, len(cands))
 	assigned := make([]bool, len(cands))
@@ -167,7 +174,7 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 	for i, c := range cands {
 		switch c.pin {
 		case meta.PinHot:
-			assignments[i] = admitWithFallback(caps, ranked, fastestRank, c.size)
+			assignments[i] = admitWithFallbackOrder(caps, ranked, fastestRank, c.size, fullFallbackFastestFirst)
 			assigned[i] = true
 		case meta.PinCold:
 			assignments[i] = admitWithFallback(caps, ranked, slowestRank, c.size)
@@ -201,8 +208,9 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 // under target_fill. Smallest files go first so they lock in the
 // highest tier; large files fall through. Pinned files force-place to
 // fastest (PinHot) or slowest (PinCold) and consume capacity accordingly.
-// If a tier has no room below target_fill, the packer falls through to
-// full_threshold as a hard cap; files that don't fit anywhere stay put.
+// If no eligible tier has room below target_fill, the packer falls through
+// to full_threshold as a hard cap from the bottom tier upward; files that
+// don't fit anywhere stay put.
 func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNamespaceRow) {
 	maintenanceMode, ok := a.poolReadyForSmoothNASMaintenance(ns.PoolName)
 	if !ok {
@@ -502,22 +510,24 @@ func backingDevicesStandbyBlocked(devices []string) (bool, string) {
 	return false, ""
 }
 
-// admitWithFallback finds the highest-ranking tier (fastest) at or slower
-// than preferredRank whose remaining budget (cap - usedBytes) can absorb
-// size. Two passes:
+// admitWithFallback finds an eligible tier at or slower than preferredRank
+// whose remaining budget (cap - usedBytes) can absorb size. Two passes:
 //
 //	Pass A — each tier's target_fill_pct is honoured so migration drains
 //	  excess data down to slower tiers.
-//	Pass B — fall back to full_threshold_pct everywhere. Only reached when
-//	  Pass A refuses every tier from preferred downward; this keeps oversized
-//	  or fully packed pools from stranding a file when another tier still has
-//	  hard-cap room.
+//	Pass B — fall back to full_threshold_pct from the slowest eligible tier
+//	  upward. full_threshold_pct is a hard ceiling; target_fill_pct is the
+//	  migration target for every tier above the bottom tier.
 //
 // Returns the rank of the tier that accepted the file, or the preferred
 // rank if no admission succeeded (in which case the caller just leaves
 // the file where it is — assignments[] becomes a no-op compared to its
 // current rank).
 func admitWithFallback(caps map[int]*tierCapacity, ranked []rankedPoolTarget, preferredRank int, size int64) int {
+	return admitWithFallbackOrder(caps, ranked, preferredRank, size, fullFallbackSlowestFirst)
+}
+
+func admitWithFallbackOrder(caps map[int]*tierCapacity, ranked []rankedPoolTarget, preferredRank int, size int64, order fullFallbackOrder) int {
 	// Pass A: honour each tier's fill target. "Preferred" is usually fastest,
 	// so the scan walks ranks ascending (fastest → slowest) from there.
 	for _, rt := range ranked {
@@ -534,21 +544,37 @@ func admitWithFallback(caps map[int]*tierCapacity, ranked []rankedPoolTarget, pr
 		}
 	}
 	// Pass B: admission cap exceeded everywhere from preferred downward.
-	// Accept at full_threshold so we don't strand the file.
-	for _, rt := range ranked {
-		if rt.rank < preferredRank {
-			continue
+	// Accept at full_threshold so we don't strand the file, but for normal
+	// migration try lower tiers first so upper tiers drain toward target_fill.
+	if order == fullFallbackFastestFirst {
+		for _, rt := range ranked {
+			if r, ok := admitAtFullCap(caps, rt, preferredRank, size); ok {
+				return r
+			}
 		}
-		c := caps[rt.rank]
-		if c == nil {
-			continue
-		}
-		if c.usedBytes+size <= c.fullCap {
-			c.usedBytes += size
-			return rt.rank
+	} else {
+		for i := len(ranked) - 1; i >= 0; i-- {
+			if r, ok := admitAtFullCap(caps, ranked[i], preferredRank, size); ok {
+				return r
+			}
 		}
 	}
 	return preferredRank
+}
+
+func admitAtFullCap(caps map[int]*tierCapacity, rt rankedPoolTarget, preferredRank int, size int64) (int, bool) {
+	if rt.rank < preferredRank {
+		return 0, false
+	}
+	c := caps[rt.rank]
+	if c == nil {
+		return 0, false
+	}
+	if c.usedBytes+size <= c.fullCap {
+		c.usedBytes += size
+		return rt.rank, true
+	}
+	return 0, false
 }
 
 func max1(x, floor int) int {
