@@ -42,6 +42,12 @@ const sizeBucketStep = 16
 // under this size never drop below the fastest tier on size alone.
 const sizeBucketBaseBytes int64 = 1 << 20 // 1 MB
 
+// placementQuiescentPeriod is how recently a file must NOT have been
+// modified before the planner will migrate it. Skipping recently-written
+// files prevents copying a partial file off the NVME tier mid-rsync, which
+// would truncate or corrupt the destination copy.
+const placementQuiescentPeriod = 10 * time.Minute
+
 // StartPlacementPlanner launches a per-pool goroutine that walks tier
 // backings on a periodic interval, looks up each file's meta record, and
 // migrates pinned files onto the correct tier.
@@ -263,6 +269,7 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 	}
 
 	// Walk every tier and collect candidates. We'll sort+pack below.
+	now := time.Now()
 	var cands []candidate
 	for _, rt := range ranked {
 		if ctx.Err() != nil {
@@ -285,6 +292,9 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 			}
 			info, err := d.Info()
 			if err != nil {
+				return nil
+			}
+			if now.Sub(info.ModTime()) < placementQuiescentPeriod {
 				return nil
 			}
 			st, ok := info.Sys().(*syscall.Stat_t)
@@ -684,8 +694,12 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 	// Source copy is now redundant. Unlinking it here preserves the
 	// existing openat-fastest-first semantics in openUnregisteredObject:
 	// a subsequent OPEN hits the dest tier.
-	if err := os.Remove(srcPath); err != nil {
-		log.Printf("placement: unlink src %s after move: %v", srcPath, err)
+	if err := os.Remove(srcPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Roll back the installed destination so the source remains the
+		// sole copy. The next placement cycle will retry the move cleanly
+		// rather than seeing duplicate copies on two tiers.
+		_ = os.Remove(dstPath)
+		return fmt.Errorf("unlink src after copy: %w", err)
 	}
 
 	// Move the meta record from src tier to dest tier. The dest file has
