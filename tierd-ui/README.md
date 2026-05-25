@@ -8,12 +8,16 @@ It is not a generic admin dashboard scaffold. It is the operator-facing control 
 
 - disks and SMART
 - RAID arrays
-- named tiers
+- named tiers and tiering inventory
 - ZFS objects
 - sharing services
+- backups
+- plugins (install, manage, and embedded plugin UIs)
 - benchmarks
 - networking
 - updates and system controls
+
+The UI is localized (English and Dutch) via an `I18nProvider`; the active language follows the logged-in user's saved preference.
 
 ## Dev Commands
 

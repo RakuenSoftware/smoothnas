@@ -77,6 +77,23 @@ SmoothNAS or aimee sessions do not contend as aggressively for the same disk.
 make test
 ```
 
+### Plugin runtime
+
+The plugin container runtime is built separately from the appliance backend:
+
+```bash
+make build-runtime     # writes bin/docker-lxc-daemon
+make install-runtime   # installs the daemon + smoothnas-runtime.service
+```
+
+The runtime wraps [LXC2Docker](https://github.com/games-on-whales/LXC2Docker)
+(defaulting to upstream `main`; pin with `LXC2DOCKER_REF`). Build hosts need
+`golang-go`, `pkg-config`, `build-essential`, and `lxc-dev`; runtime hosts
+need `lxc`, `lxc-templates`, `skopeo`, `umoci`, `rsync`, `nftables`,
+`iptables`, `iproute2`, and `uidmap`. SmoothNAS carries no local LXC2Docker
+patches — fixes land upstream and are picked up on the next runtime build.
+See [../runtime/README.md](../runtime/README.md) for detail.
+
 ### Kernel and OpenZFS
 
 SmoothNAS ships a custom kernel (`6.18.22-smoothnas-lts`, `LOCALVERSION=-smoothnas-lts`) and a matching OpenZFS DKMS build. Both are produced by the shared appliance-kernel harness at [`RakuenSoftware/smoothkernel`](https://github.com/RakuenSoftware/smoothkernel); SmoothNAS no longer carries inline `bindeb-pkg` / `deb-dkms` recipes.
@@ -126,8 +143,13 @@ The project installs into a conventional appliance layout:
 | `/usr/share/tierd-ui` | built static frontend assets |
 | `/etc/systemd/system/tierd-host-init.service` | one-shot host repair/tuning before `tierd` |
 | `/etc/systemd/system/tierd.service` | backend service |
+| `/etc/systemd/system/smoothnas-runtime.service` | plugin container runtime (LXC2Docker) |
+| `/usr/lib/smoothnas/docker-lxc-daemon` | runtime daemon binary |
 | `/etc/nginx/sites-available/tierd` | nginx config |
+| `/etc/nginx/conf.d/plugins.d` | generated per-plugin nginx route fragments |
 | `/var/lib/tierd/tierd.db` | SQLite database |
+| `/var/lib/smoothnas/runtime` | plugin image/template cache and container rootfs |
+| `/var/lib/smoothnas/plugins` | flat (non-tier-bound) plugin volumes |
 | `/etc/tierd/update-channel` | persisted update channel |
 
 The Makefile already captures the expected deployment shape.
@@ -162,9 +184,10 @@ managed storage disks.
 
 | Service | Role |
 | --- | --- |
-| `nginx` | TLS termination, static UI hosting, API proxy |
+| `nginx` | TLS termination, static UI hosting, API proxy, plugin embed routes |
 | `tierd-host-init` | one-shot backup cleanup, package healing, and host tuning before `tierd` |
 | `tierd` | backend API and orchestration |
+| `smoothnas-runtime` | plugin container runtime (LXC2Docker) on `/run/smoothnas-runtime/docker.sock` |
 
 Backend defaults:
 
