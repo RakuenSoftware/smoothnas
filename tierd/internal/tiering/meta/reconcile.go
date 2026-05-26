@@ -145,9 +145,9 @@ func (p *PoolMetaStore) walkTier(ctx context.Context, nsID uint64, src Reconcile
 			// Don't abort the whole walk on a single readdir error.
 			return nil
 		}
-		// Skip the meta directory itself and any dotfile subtrees.
+		// Skip internal SmoothNAS metadata/runtime directories.
 		name := d.Name()
-		if d.IsDir() && (name == ".tierd-meta" || name == "lost+found") {
+		if d.IsDir() && (name == ".tierd-meta" || name == ".smoothnas" || name == "lost+found") {
 			return filepath.SkipDir
 		}
 		if !d.Type().IsRegular() {

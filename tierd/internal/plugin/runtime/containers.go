@@ -93,6 +93,21 @@ func (c *Client) RemoveContainer(ctx context.Context, id string, force bool) err
 	return nil
 }
 
+// ListContainers returns every container known by the runtime daemon,
+// regardless of SmoothNAS ownership. It is used only for host-side cleanup
+// safety checks where externally-created containers, such as gh-runner workers,
+// must also keep their LXC backing directories.
+func (c *Client) ListContainers(ctx context.Context) ([]ContainerSummary, error) {
+	q := url.Values{}
+	q.Set("all", "1")
+
+	var out []ContainerSummary
+	if err := c.getJSON(ctx, "/containers/json", q, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // InspectContainer returns full container state for the given ID.
 // Surfaces IsNotFound so callers can detect "container missing on
 // startup" during reconciliation.
@@ -114,7 +129,7 @@ func (c *Client) WaitContainer(ctx context.Context, id string) (int, error) {
 	}
 	defer resp.Body.Close()
 	var out struct {
-		StatusCode int    `json:"StatusCode"`
+		StatusCode int `json:"StatusCode"`
 		Error      *struct {
 			Message string `json:"Message"`
 		} `json:"Error,omitempty"`

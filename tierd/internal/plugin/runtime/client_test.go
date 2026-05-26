@@ -280,6 +280,33 @@ func TestListManagedContainers_FilterEncoding(t *testing.T) {
 	}
 }
 
+func TestListContainers_UnfilteredAllContainers(t *testing.T) {
+	var seenAll string
+	var seenFilters string
+	sock := newFakeRuntime(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAll = r.URL.Query().Get("all")
+		seenFilters = r.URL.Query().Get("filters")
+		_ = json.NewEncoder(w).Encode([]ContainerSummary{
+			{ID: "managed", Labels: map[string]string{PluginManagedLabel: "true"}},
+			{ID: "worker", Labels: map[string]string{"io.smoothnas.gh-runner.worker": "true"}},
+		})
+	}))
+	c := NewClient(sock)
+	out, err := c.ListContainers(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("containers = %d want 2", len(out))
+	}
+	if seenAll != "1" {
+		t.Errorf("all = %q want 1", seenAll)
+	}
+	if seenFilters != "" {
+		t.Errorf("filters = %q want empty", seenFilters)
+	}
+}
+
 func TestPullImage_StreamingAndDigestExtraction(t *testing.T) {
 	sock := newFakeRuntime(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/images/create" {
