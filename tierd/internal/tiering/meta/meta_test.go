@@ -95,6 +95,31 @@ func TestStoreOpenPutGet(t *testing.T) {
 	}
 }
 
+func TestReconcileSkipsSmoothNASRuntimeTree(t *testing.T) {
+	dir := t.TempDir()
+	store, err := openSingleTier(t, dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	if err := os.WriteFile(filepath.Join(dir, "user-file"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runtimeDir := filepath.Join(dir, ".smoothnas", "runtime", "lxc", "container")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "rootfs-file"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stats := store.Reconcile(context.Background(), "media", []ReconcileSource{{BackingMount: dir, TierRank: 1}})
+	if stats.FilesWalked != 1 {
+		t.Fatalf("FilesWalked = %d want 1", stats.FilesWalked)
+	}
+}
+
 func TestOpenWithRankAliasesStoresLogicalRanksOnPhysicalRank(t *testing.T) {
 	dir := t.TempDir()
 	store, err := OpenWithRankAliases(

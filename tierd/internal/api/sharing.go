@@ -634,17 +634,26 @@ func (h *SharingHandler) deleteNFSExport(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	exports, found, err := h.nfsExportsWithout(id)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !found {
+		jsonErrorCoded(w, "export not found", http.StatusNotFound, "sharing.export_not_found")
+		return
+	}
+
+	if err := writeNFSExports(exports); err != nil {
+		serverError(w, err)
+		return
+	}
 	if err := h.store.DeleteNfsExport(id); err != nil {
 		if err == db.ErrNotFound {
 			jsonErrorCoded(w, "export not found", http.StatusNotFound, "sharing.export_not_found")
 		} else {
 			serverError(w, err)
 		}
-		return
-	}
-
-	if err := h.regenerateExports(); err != nil {
-		serverError(w, err)
 		return
 	}
 	fmt.Fprintf(w, `{"status":"deleted"}`)
@@ -687,21 +696,52 @@ func (h *SharingHandler) regenerateExports() error {
 	if err != nil {
 		return err
 	}
+	exports, err := h.nfsExportsFromDB(dbExports)
+	if err != nil {
+		return err
+	}
+	return writeNFSExports(exports)
+}
+
+func (h *SharingHandler) nfsExportsWithout(id int64) ([]nfs.Export, bool, error) {
+	dbExports, err := h.store.ListNfsExports()
+	if err != nil {
+		return nil, false, err
+	}
+	filtered := make([]db.NfsExport, 0, len(dbExports))
+	found := false
+	for _, exp := range dbExports {
+		if exp.ID == id {
+			found = true
+			continue
+		}
+		filtered = append(filtered, exp)
+	}
+	if !found {
+		return nil, false, nil
+	}
+	exports, err := h.nfsExportsFromDB(filtered)
+	if err != nil {
+		return nil, false, err
+	}
+	return exports, true, nil
+}
+
+func (h *SharingHandler) nfsExportsFromDB(dbExports []db.NfsExport) ([]nfs.Export, error) {
 	for i := range dbExports {
 		path, err := h.resolveDirectorySharePath(dbExports[i].Path, "")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		dbExports[i].Path = path
 	}
 
 	pools, err := h.store.ListSmoothfsPools()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	exports := buildNFSExports(dbExports, pools)
-	return writeNFSExports(exports)
+	return buildNFSExports(dbExports, pools), nil
 }
 
 func buildNFSExports(dbExports []db.NfsExport, pools []db.SmoothfsPool) []nfs.Export {

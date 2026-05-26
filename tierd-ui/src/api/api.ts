@@ -214,7 +214,7 @@ export const api = {
   getNfsExports: () => apiFetch<any[]>('GET', '/nfs/exports'),
   createNfsExport: (exp: any) => apiFetch('POST', '/nfs/exports', exp),
   updateNfsExport: (id: string | number, patch: any) => apiFetch('PATCH', `/nfs/exports/${id}`, patch),
-  deleteNfsExport: (id: string) => apiFetch('DELETE', `/nfs/exports/${id}`),
+  deleteNfsExport: (id: string | number) => apiFetch('DELETE', `/nfs/exports/${id}`),
 
   // --- iSCSI ---
   getIscsiTargets: () => apiFetch<any[]>('GET', '/iscsi/targets'),

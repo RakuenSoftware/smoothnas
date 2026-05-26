@@ -106,6 +106,34 @@ func runtimePathsFromRoot(root string) (string, string, error) {
 	return filepath.Join(root, "lxc"), filepath.Join(root, "state"), nil
 }
 
+func lxcPathFromConfig() string {
+	if value := strings.TrimSpace(os.Getenv("SMOOTHNAS_RUNTIME_LXCPATH")); value != "" {
+		return value
+	}
+	data, err := os.ReadFile(runtimeEnvPath)
+	if err != nil {
+		return defaultRuntimeLXCPath
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) != "SMOOTHNAS_RUNTIME_LXCPATH" {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if unquoted, err := strconv.Unquote(value); err == nil {
+			value = unquoted
+		}
+		if value != "" {
+			return value
+		}
+	}
+	return defaultRuntimeLXCPath
+}
+
 func migrateRuntimeStorage(oldPath, newPath string) error {
 	if oldPath == "" || newPath == "" || filepath.Clean(oldPath) == filepath.Clean(newPath) {
 		return nil

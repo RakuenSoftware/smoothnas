@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/runtime"
 )
@@ -62,6 +65,20 @@ func (f *fakeRuntime) InspectContainerBridgeIP(ctx context.Context, id string) (
 }
 func (f *fakeRuntime) ListManagedContainers(ctx context.Context) ([]runtime.ContainerSummary, error) {
 	return nil, nil
+}
+func (f *fakeRuntime) ListContainers(ctx context.Context) ([]runtime.ContainerSummary, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]runtime.ContainerSummary, 0, len(f.containers))
+	for id, req := range f.containers {
+		out = append(out, runtime.ContainerSummary{
+			ID:     id,
+			Names:  []string{"/" + id},
+			State:  "running",
+			Labels: req.Labels,
+		})
+	}
+	return out, nil
 }
 func (f *fakeRuntime) StreamLogs(ctx context.Context, id string, opts runtime.LogsOptions) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
@@ -523,6 +540,101 @@ func TestLifecycle_Demolish_RemovesContainersAndImage(t *testing.T) {
 	rec, _ := store.Get("llama-cpp")
 	if rec.Instances[0].ContainerID != "" {
 		t.Errorf("container_id should be cleared, got %q", rec.Instances[0].ContainerID)
+	}
+}
+
+func TestLifecycle_Demolish_RemovesLXCContainerDir(t *testing.T) {
+	lc, _, store := installFixture(t, "llama.yaml")
+	if _, err := store.db.Exec(
+		`UPDATE plugin_volume_paths SET host_path = '/mnt/m' WHERE plugin_name = 'llama-cpp'`,
+	); err != nil {
+		t.Fatalf("fake tier resolution: %v", err)
+	}
+	lxcPath := t.TempDir()
+	lc.SetLXCPath(lxcPath)
+	if err := lc.Materialise(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	rec, _ := store.Get("llama-cpp")
+	containerDir := filepath.Join(lxcPath, rec.Instances[0].ContainerID)
+	if err := os.MkdirAll(containerDir, 0o755); err != nil {
+		t.Fatalf("mkdir container dir: %v", err)
+	}
+	if err := lc.Demolish(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("demolish: %v", err)
+	}
+	if _, err := os.Stat(containerDir); !os.IsNotExist(err) {
+		t.Fatalf("container dir still exists or stat failed: %v", err)
+	}
+}
+
+func TestLifecycle_CleanupOrphanedLXCDirs(t *testing.T) {
+	store := openTestStore(t)
+	rt := &fakeRuntime{
+		containers: map[string]runtime.CreateContainerRequest{
+			"aaaaaaaaaaaa1111111111111111111111111111111111111111111111111111": {},
+		},
+	}
+	lc := NewLifecycle(store, rt)
+	lxcPath := t.TempDir()
+	lc.SetLXCPath(lxcPath)
+
+	liveDir := filepath.Join(lxcPath, "aaaaaaaaaaaa1111111111111111111111111111111111111111111111111111")
+	orphanDir := filepath.Join(lxcPath, "bbbbbbbbbbbb2222222222222222222222222222222222222222222222222222")
+	namedDir := filepath.Join(lxcPath, "not-a-container")
+	for _, dir := range []string{liveDir, orphanDir, namedDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(liveDir, "config"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphanDir, "config"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(namedDir, "config"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := lc.CleanupOrphanedLXCDirs(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d want 1", removed)
+	}
+	if _, err := os.Stat(orphanDir); !os.IsNotExist(err) {
+		t.Fatalf("orphan dir still exists or stat failed: %v", err)
+	}
+	for _, dir := range []string{liveDir, namedDir} {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("expected %s to remain: %v", dir, err)
+		}
+	}
+}
+
+func TestLifecycle_CleanupOrphanedLXCDirsHonorsMinAge(t *testing.T) {
+	store := openTestStore(t)
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lxcPath := t.TempDir()
+	lc.SetLXCPath(lxcPath)
+	orphanDir := filepath.Join(lxcPath, "cccccccccccc3333333333333333333333333333333333333333333333333333")
+	if err := os.MkdirAll(orphanDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphanDir, "config"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := lc.CleanupOrphanedLXCDirs(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("removed = %d want 0", removed)
+	}
+	if _, err := os.Stat(orphanDir); err != nil {
+		t.Fatalf("expected fresh orphan to remain: %v", err)
 	}
 }
 

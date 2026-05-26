@@ -54,6 +54,8 @@ const (
 	metaReconcileMonitorInterval     = 10 * time.Second
 	metaReconcileRetryDelay          = 5 * time.Minute
 	metaReconcilePeriod              = time.Hour
+	runtimeLXCCleanupInterval        = time.Hour
+	runtimeLXCOrphanMinAge           = time.Hour
 )
 
 // systemd-networkd config dir + sysfs root for the default-bond
@@ -341,6 +343,7 @@ func setupPluginRuntime(pluginStore *plugin.Store, catalog *plugin.Catalog) (*pl
 
 	lifecycle := plugin.NewLifecycle(pluginStore, rt)
 	lifecycle.SetProxy(plugin.NewProxy())
+	lifecycle.SetLXCPath(lxcPathFromConfig())
 	if catalog != nil {
 		lifecycle.SetCatalog(catalog)
 	}
@@ -354,12 +357,31 @@ func setupPluginRuntime(pluginStore *plugin.Store, catalog *plugin.Catalog) (*pl
 
 	watchCtx, stopWatch := context.WithCancel(context.Background())
 	go reconciler.WatchEvents(watchCtx)
+	go runRuntimeLXCCleanupLoop(watchCtx, lifecycle)
 	go func() {
 		if err := lifecycle.AutostartAll(context.Background()); err != nil {
 			log.Printf("plugin runtime autostart: %v", err)
 		}
 	}()
 	return lifecycle, stopWatch
+}
+
+func runRuntimeLXCCleanupLoop(ctx context.Context, lifecycle *plugin.Lifecycle) {
+	for {
+		if removed, err := lifecycle.CleanupOrphanedLXCDirs(ctx, runtimeLXCOrphanMinAge); err != nil && ctx.Err() == nil {
+			log.Printf("plugin runtime cleanup: %v", err)
+		} else if removed > 0 {
+			log.Printf("plugin runtime cleanup: removed %d orphaned lxc container dirs", removed)
+		}
+
+		timer := time.NewTimer(runtimeLXCCleanupInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 func runHostInit() {

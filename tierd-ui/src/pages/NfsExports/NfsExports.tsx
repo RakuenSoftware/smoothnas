@@ -57,6 +57,13 @@ export default function NfsExports() {
       .finally(() => setUpdatingExport(null));
   }
 
+  function deleteExport(id: number, path: string) {
+    if (!confirm(t('nfs.confirm.delete', { path }))) return;
+    api.deleteNfsExport(id)
+      .then(loadData)
+      .catch(e => setError(extractError(e, t('nfs.error.delete'))));
+  }
+
   function formatNetworks(networks: unknown) {
     if (Array.isArray(networks)) return networks.join(', ');
     if (typeof networks === 'string') return networks;
@@ -117,7 +124,7 @@ export default function NfsExports() {
           <div className="empty-state"><p>{t('nfs.empty')}</p></div>
         ) : (
           <table className="data-table">
-            <thead><tr><th>{t('iscsi.col.path')}</th><th>{t('nfs.col.networks')}</th><th>{t('nfs.col.writeMode')}</th><th>{t('nfs.col.rootSquash')}</th></tr></thead>
+            <thead><tr><th>{t('iscsi.col.path')}</th><th>{t('nfs.col.networks')}</th><th>{t('nfs.col.writeMode')}</th><th>{t('nfs.col.rootSquash')}</th><th>{t('arrays.col.actions')}</th></tr></thead>
             <tbody>
               {exports.map((e: any, i: number) => (
                 <tr key={i}>
@@ -135,6 +142,9 @@ export default function NfsExports() {
                     </label>
                   </td>
                   <td>{e.root_squash ? t('common.yes') : t('common.no')}</td>
+                  <td className="action-cell">
+                    <button className="btn danger" onClick={() => deleteExport(e.id, e.path)}>{t('common.delete')}</button>
+                  </td>
                 </tr>
               ))}
             </tbody>
