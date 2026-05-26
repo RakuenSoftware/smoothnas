@@ -494,10 +494,12 @@ const nl: LanguageTranslations = {
   'nfs.col.rootSquash': 'Root squash',
   'nfs.writeMode.sync': 'Sync',
   'nfs.writeMode.async': 'Async',
+  'nfs.confirm.delete': 'NFS-export {path} verwijderen?',
   'nfs.error.load': 'Laden van NFS-exports mislukt',
   'nfs.error.toggle': 'Wisselen van NFS mislukt',
   'nfs.error.create': 'Aanmaken van NFS-export mislukt',
   'nfs.error.update': 'Bijwerken van NFS-export mislukt',
+  'nfs.error.delete': 'Verwijderen van NFS-export mislukt',
 
   'network.title': 'Netwerk',
   'network.subtitle': 'Configuratie van netwerkinterfaces en routering',

@@ -64,6 +64,10 @@ var (
 type Lifecycle struct {
 	store *Store
 	rt    RuntimeClient
+	// lxcPath is the smoothnas-runtime container directory root. When
+	// configured, lifecycle removes the backing LXC directory after the
+	// runtime daemon successfully unregisters a container.
+	lxcPath string
 	// proxy is optional: when nil (legacy / test setups), Lifecycle
 	// skips nginx route generation. Production wires *Proxy via
 	// SetProxy at startup.
@@ -97,6 +101,12 @@ func (l *Lifecycle) SetProxy(p ProxyManager) {
 // (phase 1-4 behaviour).
 func (l *Lifecycle) SetCatalog(c *Catalog) {
 	l.catalog = c
+}
+
+// SetLXCPath attaches the smoothnas-runtime LXC root used for container
+// backing directories. Pass an empty string to disable filesystem cleanup.
+func (l *Lifecycle) SetLXCPath(path string) {
+	l.lxcPath = strings.TrimSpace(path)
 }
 
 // Materialise pulls the image (and runs the lxc-distro setup flow if
@@ -176,7 +186,7 @@ func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 			}
 			if err == nil {
 				_ = l.rt.StopContainer(ctx, inst.ContainerID, DefaultStopTimeoutSeconds)
-				if err := l.rt.RemoveContainer(ctx, inst.ContainerID, true); err != nil {
+				if err := l.removeContainerWithCleanup(ctx, inst.ContainerID, true); err != nil {
 					return fmt.Errorf("remove stale container for instance %d: %w", inst.Instance, err)
 				}
 				_ = l.store.SetInstanceContainerID(name, inst.Instance, "")
@@ -445,7 +455,7 @@ func (l *Lifecycle) runSetupScript(ctx context.Context, p *PluginRow, m *Manifes
 		// context was cancelled mid-flow.
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = l.rt.RemoveContainer(cleanupCtx, resp.ID, true)
+		_ = l.removeContainerWithCleanup(cleanupCtx, resp.ID, true)
 	}()
 
 	if err := l.rt.StartContainer(ctx, resp.ID); err != nil {
@@ -730,7 +740,7 @@ func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 			continue
 		}
 		_ = l.rt.StopContainer(ctx, inst.ContainerID, DefaultStopTimeoutSeconds)
-		if err := l.rt.RemoveContainer(ctx, inst.ContainerID, true); err != nil {
+		if err := l.removeContainerWithCleanup(ctx, inst.ContainerID, true); err != nil {
 			return fmt.Errorf("remove instance %d container: %w", inst.Instance, err)
 		}
 		_ = l.store.SetInstanceContainerID(name, inst.Instance, "")

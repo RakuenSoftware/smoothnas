@@ -474,10 +474,12 @@ const en: LanguageTranslations = {
   'nfs.col.rootSquash': 'Root Squash',
   'nfs.writeMode.sync': 'Sync',
   'nfs.writeMode.async': 'Async',
+  'nfs.confirm.delete': 'Delete NFS export {path}?',
   'nfs.error.load': 'Failed to load NFS exports',
   'nfs.error.toggle': 'Failed to toggle NFS',
   'nfs.error.create': 'Failed to create NFS export',
   'nfs.error.update': 'Failed to update NFS export',
+  'nfs.error.delete': 'Failed to delete NFS export',
 
   'network.title': 'Network',
   'network.subtitle': 'Network interface and routing configuration',

@@ -188,7 +188,7 @@ func (l *Lifecycle) scaleDown(ctx context.Context, rec *PluginRecord, target int
 			continue
 		}
 		_ = l.rt.StopContainer(ctx, inst.ContainerID, DefaultStopTimeoutSeconds)
-		_ = l.rt.RemoveContainer(ctx, inst.ContainerID, true)
+		_ = l.removeContainerWithCleanup(ctx, inst.ContainerID, true)
 	}
 
 	// Snapshot volume dirs before the DB rows go (they're our only
@@ -231,7 +231,7 @@ func (l *Lifecycle) rollbackScaleUp(ctx context.Context, name string, originalCo
 					continue
 				}
 				_ = l.rt.StopContainer(ctx, inst.ContainerID, DefaultStopTimeoutSeconds)
-				_ = l.rt.RemoveContainer(ctx, inst.ContainerID, true)
+				_ = l.removeContainerWithCleanup(ctx, inst.ContainerID, true)
 			}
 		}
 	}

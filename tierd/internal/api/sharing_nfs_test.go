@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -152,6 +154,88 @@ func TestPatchNFSExportSyncRegeneratesExports(t *testing.T) {
 	}
 	if len(stored) != 1 || !stored[0].Sync {
 		t.Fatalf("stored exports = %#v, want sync true", stored)
+	}
+}
+
+func TestDeleteNFSExportRegeneratesExports(t *testing.T) {
+	h := newTestSharingHandler(t)
+
+	origWrite := writeNFSExports
+	t.Cleanup(func() { writeNFSExports = origWrite })
+
+	exp1, err := h.store.CreateNfsExport(db.NfsExport{
+		Path: "/mnt/data", Networks: "127.0.0.1", Sync: false, RootSquash: true,
+	})
+	if err != nil {
+		t.Fatalf("create export 1: %v", err)
+	}
+	exp2, err := h.store.CreateNfsExport(db.NfsExport{
+		Path: "/mnt/backups", Networks: "192.168.1.0/24", Sync: true, RootSquash: false,
+	})
+	if err != nil {
+		t.Fatalf("create export 2: %v", err)
+	}
+
+	var generated []nfs.Export
+	writeNFSExports = func(exports []nfs.Export) error {
+		generated = append([]nfs.Export(nil), exports...)
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/nfs/exports/%d", exp1.ID), nil)
+	w := httptest.NewRecorder()
+	h.Route(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(generated) != 1 || generated[0].Path != exp2.Path {
+		t.Fatalf("generated exports = %#v, want only %q", generated, exp2.Path)
+	}
+
+	stored, err := h.store.ListNfsExports()
+	if err != nil {
+		t.Fatalf("list exports: %v", err)
+	}
+	if len(stored) != 1 || stored[0].ID != exp2.ID {
+		t.Fatalf("stored exports = %#v, want only id %d", stored, exp2.ID)
+	}
+	if stored[0].ID == exp1.ID {
+		t.Fatalf("deleted export id %d is still stored", exp1.ID)
+	}
+}
+
+func TestDeleteNFSExportWriteFailureKeepsStoredExport(t *testing.T) {
+	h := newTestSharingHandler(t)
+
+	origWrite := writeNFSExports
+	t.Cleanup(func() { writeNFSExports = origWrite })
+
+	exp, err := h.store.CreateNfsExport(db.NfsExport{
+		Path: "/mnt/data", Networks: "127.0.0.1", Sync: false, RootSquash: true,
+	})
+	if err != nil {
+		t.Fatalf("create export: %v", err)
+	}
+
+	writeNFSExports = func(exports []nfs.Export) error {
+		return errors.New("reload failed")
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/nfs/exports/%d", exp.ID), nil)
+	w := httptest.NewRecorder()
+	h.Route(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+
+	stored, err := h.store.ListNfsExports()
+	if err != nil {
+		t.Fatalf("list exports: %v", err)
+	}
+	if len(stored) != 1 || stored[0].ID != exp.ID {
+		t.Fatalf("stored exports = %#v, want original id %d", stored, exp.ID)
 	}
 }
 
