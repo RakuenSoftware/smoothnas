@@ -292,7 +292,7 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 				return nil
 			}
 			name := d.Name()
-			if d.IsDir() && (name == ".tierd-meta" || name == "lost+found") {
+			if d.IsDir() && placementExcludedDir(rt.target.MountPath, path, name) {
 				return filepath.SkipDir
 			}
 			if !d.Type().IsRegular() {
@@ -396,6 +396,22 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 	// Meta records always live on the same tier as their data file, so
 	// no separate meta-eviction step is needed; moveForPlacement updates
 	// the meta as part of every successful data move.
+}
+
+func placementExcludedDir(root, path, name string) bool {
+	if name == "lost+found" {
+		return true
+	}
+	switch name {
+	case ".tierd-meta", ".smoothnas", ".smoothfs", ".plugins":
+	default:
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return filepath.Dir(rel) == "."
 }
 
 type placementMaintenanceMode int
