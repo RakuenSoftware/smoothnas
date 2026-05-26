@@ -70,6 +70,32 @@ func TestIdealRank_PinOverridesSize(t *testing.T) {
 	}
 }
 
+func TestPlacementExcludedDirSkipsRootInternalDirsOnly(t *testing.T) {
+	root := t.TempDir()
+	tests := []struct {
+		name string
+		path string
+		dir  string
+		want bool
+	}{
+		{"root smoothnas", root + "/.smoothnas", ".smoothnas", true},
+		{"root plugins", root + "/.plugins", ".plugins", true},
+		{"root smoothfs", root + "/.smoothfs", ".smoothfs", true},
+		{"root tierd meta", root + "/.tierd-meta", ".tierd-meta", true},
+		{"nested smoothnas is user data", root + "/storage/.smoothnas", ".smoothnas", false},
+		{"nested plugins is user data", root + "/storage/.plugins", ".plugins", false},
+		{"lost found remains excluded", root + "/storage/lost+found", "lost+found", true},
+		{"regular directory", root + "/storage", "storage", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := placementExcludedDir(root, tt.path, tt.dir); got != tt.want {
+				t.Fatalf("placementExcludedDir() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // --- bin-packing admission --------------------------------------------------
 
 type testRanking struct {
