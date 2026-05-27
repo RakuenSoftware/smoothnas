@@ -192,7 +192,11 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 	sort.Slice(unpinned, func(i, j int) bool { return cands[unpinned[i]].size < cands[unpinned[j]].size })
 	for _, idx := range unpinned {
 		c := cands[idx]
-		assignments[idx] = admitWithFallback(caps, ranked, fastestRank, c.size)
+		// Use curRank as preferred so files drain to slower tiers but are never
+		// promoted to faster ones. Promotion is reserved for PinHot. Without this,
+		// the bin-packer fills the fastest tier first from all candidates, which
+		// pulls small files off HDD to fill NVME/SSD and shrinks HDD utilization.
+		assignments[idx] = admitWithFallback(caps, ranked, c.curRank, c.size)
 		assigned[idx] = true
 	}
 
@@ -204,10 +208,9 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 // before spilling to the next slower tier, and enqueues moves for any
 // file whose current tier differs from its packed destination.
 //
-// Preference: always place on the fastest tier that can hold the file
-// under target_fill. Smallest files go first so they lock in the
-// highest tier; large files fall through. Pinned files force-place to
-// fastest (PinHot) or slowest (PinCold) and consume capacity accordingly.
+// Unpinned files use their current tier as the preferred starting point,
+// so they can only drain to slower tiers — never be promoted to faster
+// ones. Pinned files force-place to fastest (PinHot) or slowest (PinCold).
 // If no eligible tier has room below target_fill, the packer falls through
 // to full_threshold as a hard cap from the bottom tier upward; files that
 // don't fit anywhere stay put.
