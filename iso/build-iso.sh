@@ -28,6 +28,7 @@ OUTPUT_DIR="${PROJECT_DIR}/iso/output"
 ISO_FILE="${OUTPUT_DIR}/smoothnas-${VERSION}-${DEB_ARCH}.iso"
 HOOKS_DIR="${SCRIPT_DIR}/hooks"
 SMOOTHISO_DIR="${SMOOTHISO_DIR:-${PROJECT_DIR}/../smoothiso}"
+SMOOTHISO_PATCH_DIR="${SCRIPT_DIR}/smoothiso-patches"
 # Where to find prebuilt SmoothKernel + OpenZFS .debs. The CI release
 # workflow downloads them from a pinned RakuenSoftware/smoothkernel
 # GitHub release; operators can point this at a local out/ directory
@@ -52,6 +53,7 @@ case "$DEB_ARCH" in
 esac
 SMOOTHFS_FETCH_DIR="${CACHE_DIR}/smoothfs-src"
 SMOOTHFS_SOURCE_DIR=""
+SMOOTHISO_BUILD_DIR=""
 
 KERNEL_IMAGE_DEB=""
 KERNEL_HEADERS_DEB=""
@@ -108,6 +110,40 @@ prepare_smoothfs_source() {
         exit 1
     fi
     SMOOTHFS_SOURCE_DIR="${SMOOTHFS_FETCH_DIR}/src/smoothfs"
+}
+
+prepare_smoothiso_source() {
+    SMOOTHISO_BUILD_DIR="$SMOOTHISO_DIR"
+    if [ ! -d "$SMOOTHISO_PATCH_DIR" ]; then
+        return
+    fi
+
+    local patch_count=0
+    shopt -s nullglob
+    local patches=("$SMOOTHISO_PATCH_DIR"/*.patch)
+    shopt -u nullglob
+    patch_count=${#patches[@]}
+    if [ "$patch_count" -eq 0 ]; then
+        return
+    fi
+
+    SMOOTHISO_BUILD_DIR="${CACHE_DIR}/smoothiso-patched"
+    rm -rf "$SMOOTHISO_BUILD_DIR"
+    mkdir -p "$WORK_DIR"
+    cp -a "$SMOOTHISO_DIR" "$SMOOTHISO_BUILD_DIR"
+
+    local patch
+    for patch in "${patches[@]}"; do
+        if git -C "$SMOOTHISO_BUILD_DIR" apply --reverse --check "$patch" >/dev/null 2>&1; then
+            echo "  Smoothiso patch already present: $(basename "$patch")"
+            continue
+        fi
+        echo "  Applying smoothiso patch: $(basename "$patch")"
+        git -C "$SMOOTHISO_BUILD_DIR" apply "$patch" || {
+            echo "ERROR: failed to apply smoothiso patch $(basename "$patch")." >&2
+            exit 1
+        }
+    done
 }
 
 resolve_appliance_artifacts() {
@@ -232,6 +268,7 @@ main() {
     fi
 
     resolve_appliance_artifacts
+    prepare_smoothiso_source
 
     if [ ! -f "${PROJECT_DIR}/bin/tierd" ]; then
         local host_arch
@@ -278,7 +315,7 @@ main() {
     prepare_smoothnas_payload "$payload_dir"
 
     (
-        cd "$SMOOTHISO_DIR"
+        cd "$SMOOTHISO_BUILD_DIR"
         SMOOTHNAS_PAYLOAD_DIR="$payload_dir" \
         INSTALLER_LANGUAGES="en:English nl:Nederlands" \
         INSTALLER_KERNEL_PACKAGES="" \
