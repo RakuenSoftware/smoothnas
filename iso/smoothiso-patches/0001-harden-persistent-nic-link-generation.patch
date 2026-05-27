@@ -1,6 +1,6 @@
 --- a/installer.sh
 +++ b/installer.sh
-@@ -2290,11 +2290,38 @@
+@@ -2290,11 +2290,41 @@
      # Persistent NIC naming.
      mkdir -p "$TARGET/etc/systemd/network"
      local idx=0
@@ -24,10 +24,13 @@
 +
 +        local mac
 +        mac=$(cat "$dev/address" 2>/dev/null || true)
-+        if ! printf '%s\n' "$mac" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'; then
-+            echo "  Skipping $name with invalid MAC '${mac:-missing}'."
-+            continue
-+        fi
++        case "$mac" in
++            [0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]) ;;
++            *)
++                echo "  Skipping $name with invalid MAC '${mac:-missing}'."
++                continue
++                ;;
++        esac
 +        case "$mac" in
 +            00:00:00:00:00:00|ff:ff:ff:ff:ff:ff)
 +                echo "  Skipping $name with placeholder MAC $mac."
