@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +29,14 @@ var (
 	statPath         = os.Stat
 	statfsBackupPath = unix.Statfs
 	forceUmountFn    = forceUmount
+	nfsDialFn        = func(ctx context.Context, addr string) error {
+		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+		if err != nil {
+			return err
+		}
+		conn.Close()
+		return nil
+	}
 )
 
 const (
@@ -78,6 +87,12 @@ const (
 	// modest bump from the kernel default (~128 KB) — enough to keep the
 	// server's prefetcher warm without risking memory pressure under load.
 	nfsReadAheadKB = 4096
+
+	// nfsPortCheckTimeout is how long the pre-mount TCP probe to port 2049
+	// waits before giving up. mount.nfs can silently retry a dead server for
+	// two minutes before returning an error; a short probe here replaces that
+	// silent hang with an immediate, actionable message.
+	nfsPortCheckTimeout = 5 * time.Second
 
 	// minDestFreeBytes is the lower bound on destination free space we
 	// require before starting a backup. Below this we refuse to start —
@@ -930,11 +945,26 @@ func runCP(ctx context.Context, cfg Config, progress func(msg string, done, tota
 	return fmt.Sprintf("cp backup complete — %d files verified", count), nil
 }
 
+// checkNFSPort does a short TCP probe to port 2049 on host. mount.nfs can
+// hang for up to two minutes when the server is unreachable because it retries
+// the initial TCP connection; a probe here surfaces the real cause immediately.
+func checkNFSPort(host string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), nfsPortCheckTimeout)
+	defer cancel()
+	if err := nfsDialFn(ctx, net.JoinHostPort(host, "2049")); err != nil {
+		return fmt.Errorf("NFS server %s port 2049 not reachable: %w", host, err)
+	}
+	return nil
+}
+
 // mount mounts an NFS or SMB share at mountDir.
 func mount(cfg Config, mountDir string) error {
 	var cmd *exec.Cmd
 	switch cfg.TargetType {
 	case "nfs":
+		if err := checkNFSPort(cfg.Host); err != nil {
+			return err
+		}
 		cmd = exec.Command("mount", "-t", "nfs", "-o", nfsMountOpts,
 			fmt.Sprintf("%s:%s", cfg.Host, cfg.Share),
 			mountDir,

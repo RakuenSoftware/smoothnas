@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -115,6 +116,46 @@ func TestForceUmountOnCancelStopSuppressesCallback(t *testing.T) {
 	case got := <-called:
 		t.Fatalf("force umount unexpectedly called for %q", got)
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestMountNFSFailsFastWhenPortUnreachable(t *testing.T) {
+	orig := nfsDialFn
+	defer func() { nfsDialFn = orig }()
+
+	nfsDialFn = func(_ context.Context, addr string) error {
+		return fmt.Errorf("dial tcp %s: connect: connection refused", addr)
+	}
+
+	start := time.Now()
+	err := mount(Config{TargetType: "nfs", Host: "192.0.2.1", Share: "/share"}, t.TempDir())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error for unreachable NFS port")
+	}
+	if !strings.Contains(err.Error(), "port 2049 not reachable") {
+		t.Fatalf("expected port 2049 error, got: %v", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("mount took %v, expected near-instant failure", elapsed)
+	}
+}
+
+func TestMountNFSProceedsWhenPortReachable(t *testing.T) {
+	orig := nfsDialFn
+	defer func() { nfsDialFn = orig }()
+
+	// Dial succeeds; mount itself will fail because there's no real NFS server,
+	// but the important thing is we get past the port-check step.
+	nfsDialFn = func(_ context.Context, addr string) error { return nil }
+
+	err := mount(Config{TargetType: "nfs", Host: "192.0.2.1", Share: "/share"}, t.TempDir())
+	if err == nil {
+		t.Fatal("expected mount to fail (no real NFS server)")
+	}
+	if strings.Contains(err.Error(), "port 2049 not reachable") {
+		t.Fatalf("should not get port-check error when dial succeeds, got: %v", err)
 	}
 }
 
