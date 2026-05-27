@@ -209,7 +209,7 @@ func isAlreadyMounted(path string) bool {
 }
 
 func ensureLegacyFSTabEntry(dataset, mountPoint string) error {
-	entry := fmt.Sprintf("%s %s zfs defaults,nofail,x-systemd.requires=zfs-import-cache.service,x-systemd.after=zfs-import-cache.service 0 0", dataset, mountPoint)
+	entry := fmt.Sprintf("%s %s zfs defaults,nofail,x-systemd.requires=zfs-import.service,x-systemd.after=zfs-import.service 0 0", dataset, mountPoint)
 	return upsertLegacyFSTabEntry(dataset, mountPoint, entry)
 }
 
