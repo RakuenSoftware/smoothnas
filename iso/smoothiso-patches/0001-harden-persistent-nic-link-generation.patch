@@ -1,0 +1,44 @@
+--- a/installer.sh
++++ b/installer.sh
+@@ -2290,11 +2290,38 @@
+     # Persistent NIC naming.
+     mkdir -p "$TARGET/etc/systemd/network"
+     local idx=0
++    local seen_macs=""
+     for dev in /sys/class/net/*; do
+-        local name=$(basename "$dev")
++        [ -e "$dev" ] || continue
++        local name
++        name=$(basename "$dev")
+         [ "$name" = "lo" ] && continue
+-        local mac=$(cat "$dev/address" 2>/dev/null)
+-        [ -z "$mac" ] && continue
++
++        # Only pin real hardware NICs. Bare-metal installer environments can
++        # expose virtual/control links or placeholder MACs under /sys/class/net;
++        # writing permanent rename rules for those can break first boot.
++        [ -e "$dev/device" ] || {
++            echo "  Skipping non-physical interface $name for persistent naming."
++            continue
++        }
++
++        local mac
++        mac=$(cat "$dev/address" 2>/dev/null || true)
++        if ! printf '%s\n' "$mac" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'; then
++            echo "  Skipping $name with invalid MAC '${mac:-missing}'."
++            continue
++        fi
++        case "$mac" in
++            00:00:00:00:00:00|ff:ff:ff:ff:ff:ff)
++                echo "  Skipping $name with placeholder MAC $mac."
++                continue
++                ;;
++        esac
++        case " $seen_macs " in
++            *" $mac "*) echo "  Skipping $name with duplicate MAC $mac."; continue ;;
++        esac
++        seen_macs="${seen_macs} ${mac}"
++
+         cat > "$TARGET/etc/systemd/network/00-net${idx}.link" << LINK
+ [Match]
+ MACAddress=$mac
