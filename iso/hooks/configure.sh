@@ -46,8 +46,9 @@ vm.vfs_cache_pressure = 50
 SYSCTL
 
 if [ -f /smoothnas/90-smoothnas-net.conf ]; then
-    install -m 644 /smoothnas/90-smoothnas-net.conf \
+    cp /smoothnas/90-smoothnas-net.conf \
         "$TARGET/etc/sysctl.d/90-smoothnas-net.conf"
+    chmod 644 "$TARGET/etc/sysctl.d/90-smoothnas-net.conf"
 fi
 
 # I/O scheduler udev rules: none for NVMe, BFQ for spinners and md arrays.
@@ -175,17 +176,21 @@ ui_status "Configuring system" "Installing tierd daemon and the SmoothNAS web UI
 
 # tierd binary + UI.
 if [ -f /smoothnas/tierd ]; then
-    install -m 755 /smoothnas/tierd "$TARGET/usr/local/bin/tierd"
+    cp /smoothnas/tierd "$TARGET/usr/local/bin/tierd"
+    chmod 755 "$TARGET/usr/local/bin/tierd"
 fi
 if [ -d /smoothnas/tierd-ui ]; then
     mkdir -p "$TARGET/usr/share/tierd-ui"
     cp -r /smoothnas/tierd-ui/. "$TARGET/usr/share/tierd-ui/"
 fi
 if [ -f /smoothnas/docker-lxc-daemon ]; then
-    install -m 755 -D /smoothnas/docker-lxc-daemon "$TARGET/usr/lib/smoothnas/docker-lxc-daemon"
+    mkdir -p "$TARGET/usr/lib/smoothnas"
+    cp /smoothnas/docker-lxc-daemon "$TARGET/usr/lib/smoothnas/docker-lxc-daemon"
+    chmod 755 "$TARGET/usr/lib/smoothnas/docker-lxc-daemon"
 fi
 if [ -f /smoothnas/smoothnas-runtime.service ]; then
-    install -m 644 /smoothnas/smoothnas-runtime.service "$TARGET/etc/systemd/system/smoothnas-runtime.service"
+    cp /smoothnas/smoothnas-runtime.service "$TARGET/etc/systemd/system/smoothnas-runtime.service"
+    chmod 644 "$TARGET/etc/systemd/system/smoothnas-runtime.service"
 fi
 mkdir -p "$TARGET/var/lib/tierd"
 
