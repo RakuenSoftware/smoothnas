@@ -203,6 +203,34 @@ func TestAssignCandidateRanksDrainsUpperTierTowardTargetFill(t *testing.T) {
 	}
 }
 
+// TestAssignCandidateRanksDoesNotPromoteUnpinnedFromHDD ensures that an
+// unpinned file currently on the slowest tier is not promoted to a faster
+// tier just because that faster tier has room below its target_fill. HDD
+// utilization must never decrease due to the planner pulling small files
+// upward to fill NVME/SSD capacity.
+func TestAssignCandidateRanksDoesNotPromoteUnpinnedFromHDD(t *testing.T) {
+	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	caps := map[int]*tierCapacity{
+		1: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
+		2: {totalBytes: 2000, usedBytes: 0, targetCap: 1000, fullCap: 1900},
+	}
+	// Small file on tier 2 (HDD). Tier 1 has plenty of room under targetCap,
+	// but the file must stay on tier 2 — promotion is not the planner's job.
+	cands := []candidate{
+		{curRank: 2, size: 100, pin: meta.PinNone},
+	}
+	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
+	if !assigned[0] {
+		t.Fatal("candidate was not assigned")
+	}
+	if assignments[0] != 2 {
+		t.Errorf("HDD file promoted to rank %d, want 2", assignments[0])
+	}
+	if caps[1].usedBytes != 0 {
+		t.Errorf("tier 1 usedBytes = %d after HDD-only assignment, want 0", caps[1].usedBytes)
+	}
+}
+
 func TestAdmitPinnedHotFullFallbackKeepsFastestEligibleTier(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
 	caps := map[int]*tierCapacity{
