@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -348,12 +349,11 @@ func rsyncSSH(ctx context.Context, cfg Config, progress func(msg string, done, t
 	// materially faster for small-file backups because each temp file otherwise
 	// pays a full create, placement, metadata, and rename cycle. New files are
 	// still placed by smoothfs when rsync creates the final path.
-	// --timeout=60: exit if no data moves for 60 seconds. This is the primary
-	// stall detector — it fires at the rsync protocol level based on actual
-	// data flow, independent of SSH keepalives. A server under heavy I/O load
-	// may delay SSH protocol keepalive responses (causing false kills) but
-	// cannot delay actual rsync data without triggering this timeout.
-	args := rsyncArchiveArgs(60)
+	// --timeout: exit if no data moves for this many seconds. SSH backups
+	// face the same HDD-spinup stall risk as NFS-mounted backups: when the
+	// remote rsync builds its file list, it reads directory metadata off
+	// potentially sleeping drives. Use the same 120 s budget as rsyncMount.
+	args := rsyncArchiveArgs(120)
 	if cfg.Compress {
 		// rsync 3.2+ negotiates zstd; older rsync falls back to zlib. Either
 		// way this only helps when the wire is slower than available CPU —
@@ -363,6 +363,26 @@ func rsyncSSH(ctx context.Context, cfg Config, progress func(msg string, done, t
 	if cfg.DeleteMode {
 		args = append(args, "--delete")
 	}
+	// When parallelism > 1 and this is a pull, split the transfer by
+	// top-level destination subdirectory so each worker handles a smaller
+	// file-list. This both reduces per-worker enumeration time (less chance
+	// of hitting the timeout while the remote rsync scans sleeping HDDs)
+	// and saturates the link with concurrent senders.
+	parallelism := cfg.Parallelism
+	if parallelism < 1 {
+		parallelism = 1
+	}
+	if parallelism > 1 && cfg.Direction == "pull" {
+		summary, pErr := runParallelRsyncSSH(ctx, cfg, sshArgs, remoteSpec, localPath, parallelism, progress)
+		if pErr == nil {
+			return summary, nil
+		}
+		if !isParallelSSHFallback(pErr) {
+			return "", pErr
+		}
+		log.Printf("backup: parallel SSH rsync fallback to single-stream: %v", pErr)
+	}
+
 	args = append(args, "-e", sshArgs, src, dst)
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -397,6 +417,146 @@ func rsyncSSH(ctx context.Context, cfg Config, progress func(msg string, done, t
 		}
 	}
 	return summary, nil
+}
+
+// errParallelSSHFallback is a sentinel used when runParallelRsyncSSH finds no
+// work units (empty or unreadable destination) and the caller should retry
+// single-stream instead of propagating an error.
+type errParallelSSHFallback struct{ reason string }
+
+func (e errParallelSSHFallback) Error() string { return e.reason }
+
+func isParallelSSHFallback(err error) bool {
+	var e errParallelSSHFallback
+	return errors.As(err, &e)
+}
+
+// runParallelRsyncSSH splits a pull backup by top-level local destination
+// subdirectory and runs one rsync-over-SSH worker per subdirectory. Each
+// worker enumerates only its own subtree, keeping per-worker file-list
+// sizes small and avoiding the single-stream enumeration timeout that
+// strikes when the remote rsync scans 300K+ files off sleeping HDDs.
+//
+// Falls back via errParallelSSHFallback when the local destination has no
+// subdirectories (e.g. first-ever run before anything is synced); the
+// caller retries with a single-stream rsync that creates the tree.
+func runParallelRsyncSSH(ctx context.Context, cfg Config, sshArgs, remoteBase, localBase string, parallelism int, progress func(msg string, done, total int)) (string, error) {
+	units, err := enumerateRsyncWorkUnits(localBase)
+	if err != nil || len(units) == 0 {
+		reason := "no local destination subdirectories for parallel SSH split"
+		if err != nil {
+			reason = err.Error()
+		}
+		return "", errParallelSSHFallback{reason: reason}
+	}
+	if parallelism > len(units) {
+		parallelism = len(units)
+	}
+
+	progress(fmt.Sprintf("Running rsync over SSH: %d parallel streams across %d work units...",
+		parallelism, len(units)), -1, -1)
+
+	workerCtx, cancelAll := context.WithCancel(ctx)
+	defer cancelAll()
+
+	queue := make(chan rsyncWorkUnit, len(units))
+	for _, u := range units {
+		queue <- u
+	}
+	close(queue)
+
+	type result struct {
+		err error
+		rel string
+		out string
+	}
+	results := make(chan result, len(units))
+	var wg sync.WaitGroup
+	for i := 0; i < parallelism; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-workerCtx.Done():
+					return
+				case u, ok := <-queue:
+					if !ok {
+						return
+					}
+					unitRemotePath := strings.TrimSuffix(remoteBase, "/") + "/" + u.rel
+					unitLocalPath := filepath.Join(localBase, u.rel)
+
+					// Determine whether this work unit is a file or a
+					// directory. rsync adds trailing "/" only for
+					// directories (to copy contents-into vs item-itself).
+					// os.Stat returns IsNotExist for brand-new source
+					// dirs; default to directory in that case.
+					isFile := false
+					if fi, statErr := os.Stat(unitLocalPath); statErr == nil {
+						isFile = !fi.IsDir()
+					}
+					var unitRemote, unitLocal string
+					if isFile {
+						unitRemote = unitRemotePath
+						unitLocal = unitLocalPath
+						if mkErr := os.MkdirAll(filepath.Dir(unitLocal), 0o755); mkErr != nil {
+							results <- result{err: fmt.Errorf("mkdir parent %s: %w", unitLocal, mkErr), rel: u.rel}
+							return
+						}
+					} else {
+						unitRemote = unitRemotePath + "/"
+						unitLocal = unitLocalPath + "/"
+						if mkErr := os.MkdirAll(unitLocal, 0o755); mkErr != nil {
+							results <- result{err: fmt.Errorf("mkdir %s: %w", unitLocal, mkErr), rel: u.rel}
+							return
+						}
+					}
+					args := rsyncArchiveArgs(120)
+					if cfg.Compress {
+						args = append(args, "--compress")
+					}
+					if cfg.DeleteMode {
+						args = append(args, "--delete")
+					}
+					args = append(args, "-e", sshArgs, unitRemote, unitLocal)
+					cmd := exec.CommandContext(workerCtx, "rsync", args...)
+					if cfg.SSHPass != "" {
+						cmd.Env = append(os.Environ(), "SSHPASS="+cfg.SSHPass)
+					}
+					out, err := cmd.CombinedOutput()
+					results <- result{err: err, rel: u.rel, out: string(out)}
+					if err != nil {
+						cancelAll()
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var firstErr error
+	completed := 0
+	for r := range results {
+		if r.err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("parallel SSH unit %q: %w: %s",
+					r.rel, r.err, strings.TrimSpace(r.out))
+			}
+			continue
+		}
+		completed++
+	}
+	if firstErr != nil {
+		return "", firstErr
+	}
+	progress(fmt.Sprintf("rsync complete: %d work units across %d streams", completed, parallelism), -1, -1)
+	return fmt.Sprintf("[parallel SSH] %d work units across %d streams\n", completed, parallelism), nil
 }
 
 // runRsyncProcess starts the given rsync exec.Cmd, streams its stdout while
