@@ -179,7 +179,10 @@ func TestIoprioIdleCmdWrapsRsync(t *testing.T) {
 	if cmd.Args[0] != "ionice" {
 		t.Fatalf("expected ionice as program, got %q", cmd.Args[0])
 	}
-	want := []string{"ionice", "-c", "3", "rsync", "-rltW", "--inplace", "src/", "dst/"}
+	// Must be best-effort (-c 2) lowest priority (-n 7), not idle class (-c 3).
+	// Idle class causes burst-then-pause ZFS write storms; best-effort lowest
+	// keeps writes continuous and dirty data small.
+	want := []string{"ionice", "-c", "2", "-n", "7", "rsync", "-rltW", "--inplace", "src/", "dst/"}
 	if len(cmd.Args) != len(want) {
 		t.Fatalf("args length %d != %d: %v", len(cmd.Args), len(want), cmd.Args)
 	}
