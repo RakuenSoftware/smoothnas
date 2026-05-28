@@ -164,6 +164,12 @@ type fullFallbackOrder int
 const (
 	fullFallbackSlowestFirst fullFallbackOrder = iota
 	fullFallbackFastestFirst
+	// fullFallbackFasterTiersAsOverflow is used for size-biased unpinned
+	// placement. When all tiers at the preferred rank and slower are above
+	// full_threshold, try faster tiers under their target_fill as a last
+	// resort. Size rank is a preference, not a hard cap: a large file can
+	// legitimately land on NVME when HDD/SSD are genuinely full.
+	fullFallbackFasterTiersAsOverflow
 )
 
 func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked []rankedPoolTarget, fastestRank, slowestRank int) ([]int, []bool) {
@@ -192,18 +198,16 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 	sort.Slice(unpinned, func(i, j int) bool { return cands[unpinned[i]].size < cands[unpinned[j]].size })
 	for _, idx := range unpinned {
 		c := cands[idx]
-		// Use max(curRank, idealRank) as preferred so that:
-		//   - large files written to NVME by smoothfs (e.g. rsync backup writes)
-		//     drain to their size-appropriate tier (sizeBucketRank) rather than
-		//     staying on NVME as long as it has capacity under target_fill.
-		//   - files are never promoted to a tier faster than their ideal rank:
-		//     a small file already on HDD (curRank > idealRank) keeps preferred
-		//     at curRank, so admitWithFallback only tries HDD-or-slower.
-		preferred := c.curRank
-		if ideal := idealRank(c.pin, c.size, fastestRank, slowestRank); ideal > preferred {
-			preferred = ideal
-		}
-		assignments[idx] = admitWithFallback(caps, ranked, preferred, c.size)
+		// Use idealRank (size-based bias) as the starting preference:
+		//   - small files start at the fastest tier, spilling to slower
+		//     tiers if the fast tier is full (Pass A).
+		//   - large files start at the appropriate slower tier, spilling
+		//     to faster tiers only as a last resort when slower tiers are
+		//     genuinely full (Pass C via fullFallbackFasterTiersAsOverflow).
+		// Size rank is a bias, not a hard constraint. Capacity decides
+		// the final tier; idealRank only sets the search starting point.
+		preferred := idealRank(c.pin, c.size, fastestRank, slowestRank)
+		assignments[idx] = admitWithFallbackOrder(caps, ranked, preferred, c.size, fullFallbackFasterTiersAsOverflow)
 		assigned[idx] = true
 	}
 
@@ -582,6 +586,24 @@ func admitWithFallbackOrder(caps map[int]*tierCapacity, ranked []rankedPoolTarge
 		for i := len(ranked) - 1; i >= 0; i-- {
 			if r, ok := admitAtFullCap(caps, ranked[i], preferredRank, size); ok {
 				return r
+			}
+		}
+	}
+	// Pass C (size-biased unpinned only): all tiers at the preferred rank and
+	// slower are above full_threshold. Try faster tiers under their target_fill
+	// so a large file is not stranded when HDD/SSD are genuinely full.
+	if order == fullFallbackFasterTiersAsOverflow {
+		for _, rt := range ranked {
+			if rt.rank >= preferredRank {
+				break
+			}
+			c := caps[rt.rank]
+			if c == nil {
+				continue
+			}
+			if c.usedBytes+size <= c.admissionCap() {
+				c.usedBytes += size
+				return rt.rank
 			}
 		}
 	}
