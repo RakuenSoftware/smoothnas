@@ -28,20 +28,14 @@ func TestParseRsyncWriteFailedPathMissing(t *testing.T) {
 	}
 }
 
-func TestRsyncArchiveArgsKeepInplaceForSmoothfsDestination(t *testing.T) {
-	if !containsArg(rsyncArchiveArgs("/mnt/media/storage"), "--inplace") {
-		t.Fatal("smoothfs destination should keep --inplace")
-	}
-}
-
-func TestRsyncArchiveArgsKeepInplaceForNormalDestination(t *testing.T) {
-	if !containsArg(rsyncArchiveArgs("/srv/backups"), "--inplace") {
-		t.Fatal("normal destination should keep --inplace")
+func TestRsyncArchiveArgsKeepInplace(t *testing.T) {
+	if !containsArg(rsyncArchiveArgs(60), "--inplace") {
+		t.Fatal("rsync args should keep --inplace")
 	}
 }
 
 func TestRsyncArchiveArgsSkipExpensiveOwnershipMetadata(t *testing.T) {
-	args := rsyncArchiveArgs("/mnt/media/storage")
+	args := rsyncArchiveArgs(60)
 	for _, want := range []string{"-rltW", "--links", "--no-perms", "--no-owner", "--no-group", "--omit-dir-times"} {
 		if !containsArg(args, want) {
 			t.Fatalf("rsync args missing %s: %v", want, args)
@@ -49,6 +43,26 @@ func TestRsyncArchiveArgsSkipExpensiveOwnershipMetadata(t *testing.T) {
 	}
 	if containsArg(args, "-aW") {
 		t.Fatalf("rsync args should not use archive owner/group/perms preservation: %v", args)
+	}
+}
+
+func TestRsyncMountArgsUsesLongerTimeoutForHDDSpinup(t *testing.T) {
+	// NFS-mounted backups need a longer timeout than SSH backups so that
+	// a sleeping source HDD has time to spin up before rsync declares a stall.
+	args := rsyncMountArgs("/mnt/dst")
+	for _, a := range args {
+		if a == "--timeout=60" {
+			t.Fatalf("rsyncMountArgs should not use --timeout=60; source HDDs may need > 60 s to spin up: %v", args)
+		}
+	}
+	hasTimeout := false
+	for _, a := range args {
+		if strings.HasPrefix(a, "--timeout=") {
+			hasTimeout = true
+		}
+	}
+	if !hasTimeout {
+		t.Fatalf("rsyncMountArgs missing --timeout flag: %v", args)
 	}
 }
 
