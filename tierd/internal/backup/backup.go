@@ -134,14 +134,20 @@ var rsyncSupportsOpenNoAtime = sync.OnceValue(func() bool {
 	return err == nil && bytes.Contains(out, []byte("--open-noatime"))
 })
 
-// ioprioIdleCmd returns a Cmd that runs name with the given args at idle
-// I/O scheduling class (ionice -c 3). Backup rsync at default priority
-// saturates the ZFS dirty-data watermark and triggers write throttling
-// that stalls all pool I/O — including active NFS/SMB clients — for
-// hundreds of milliseconds at a time. Idle class yields to any other I/O,
-// so the backup takes longer but active client transfers are unaffected.
+// ioprioIdleCmd returns a Cmd that runs name with the given args at
+// best-effort I/O class, lowest priority (ionice -c 2 -n 7). Backup rsync
+// at default priority saturates the ZFS dirty-data watermark and triggers
+// write throttling that stalls all pool I/O — including active NFS/SMB
+// clients — for hundreds of milliseconds at a time.
+//
+// Idle class (-c 3) is avoided: it causes burst-then-pause behaviour where
+// rsync stops completely when any other I/O is present, then blasts at full
+// speed during quiet windows. The resulting ZFS TXG flush storms (700+ MB/s)
+// stall NFS reads and produce oscillating ("bouncing") client throughput.
+// Best-effort lowest priority (-c 2 -n 7) writes continuously at low
+// priority, keeping dirty data small and ZFS writes steady.
 func ioprioIdleCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
-	return exec.CommandContext(ctx, "ionice", append([]string{"-c", "3", name}, args...)...)
+	return exec.CommandContext(ctx, "ionice", append([]string{"-c", "2", "-n", "7", name}, args...)...)
 }
 
 func rsyncMountArgs(_ string) []string {
