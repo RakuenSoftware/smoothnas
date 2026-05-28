@@ -166,12 +166,6 @@ type fullFallbackOrder int
 const (
 	fullFallbackSlowestFirst fullFallbackOrder = iota
 	fullFallbackFastestFirst
-	// fullFallbackFasterTiersAsOverflow is used for size-biased unpinned
-	// placement. When all tiers at the preferred rank and slower are above
-	// full_threshold, try faster tiers under their target_fill as a last
-	// resort. Size rank is a preference, not a hard cap: a large file can
-	// legitimately land on NVME when HDD/SSD are genuinely full.
-	fullFallbackFasterTiersAsOverflow
 )
 
 func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked []rankedPoolTarget, fastestRank, slowestRank int) ([]int, []bool) {
@@ -190,18 +184,32 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 		}
 	}
 
-	// Pass 2: unpinned, smallest-first fills from the top.
+	// Pass 2: unpinned files, hottest-first then smallest-first.
+	//
+	// Admission always starts at the fastest rank and walks toward slower
+	// tiers. Ordering by heat descending ensures hot files claim fast-tier
+	// capacity first; cold files fall through to the slowest tier once
+	// NVME/SSD have reached their target_fill. This gives every tier above
+	// HDD its fill% with the hottest content before anything spills down.
+	//
+	// Size is the secondary sort key: within equal heat, smaller files get
+	// preference for fast tiers so large files don't crowd out small ones.
 	var unpinned []int
 	for i, c := range cands {
 		if c.pin == meta.PinNone && !assigned[i] {
 			unpinned = append(unpinned, i)
 		}
 	}
-	sort.Slice(unpinned, func(i, j int) bool { return cands[unpinned[i]].size < cands[unpinned[j]].size })
+	sort.SliceStable(unpinned, func(i, j int) bool {
+		ci, cj := cands[unpinned[i]], cands[unpinned[j]]
+		if ci.heat != cj.heat {
+			return ci.heat > cj.heat // hottest first
+		}
+		return ci.size < cj.size // smallest within equal heat
+	})
 	for _, idx := range unpinned {
 		c := cands[idx]
-		preferred := idealRank(c.pin, c.heat, c.size, fastestRank, slowestRank)
-		assignments[idx] = admitWithFallbackOrder(caps, ranked, preferred, c.size, fullFallbackFasterTiersAsOverflow)
+		assignments[idx] = admitWithFallback(caps, ranked, fastestRank, c.size)
 		assigned[idx] = true
 	}
 
@@ -584,24 +592,6 @@ func admitWithFallbackOrder(caps map[int]*tierCapacity, ranked []rankedPoolTarge
 			}
 		}
 	}
-	// Pass C (size-biased unpinned only): all tiers at the preferred rank and
-	// slower are above full_threshold. Try faster tiers under their target_fill
-	// so a large file is not stranded when HDD/SSD are genuinely full.
-	if order == fullFallbackFasterTiersAsOverflow {
-		for _, rt := range ranked {
-			if rt.rank >= preferredRank {
-				break
-			}
-			c := caps[rt.rank]
-			if c == nil {
-				continue
-			}
-			if c.usedBytes+size <= c.admissionCap() {
-				c.usedBytes += size
-				return rt.rank
-			}
-		}
-	}
 	return preferredRank
 }
 
@@ -690,13 +680,15 @@ func heatBucketRank(heatCounter uint32, fastestRank, slowestRank int) int {
 	return r
 }
 
-// idealRank returns where a file "wants" to live. Heat is the primary
-// driver: hot files target faster tiers, cold files target the slowest
-// tier. Size is a secondary bias: among files at the same heat level,
-// larger files are nudged one tier slower to give smaller files a slight
-// edge on fast storage.
+// idealRank returns the tier a file "ideally" wants to live on, for use
+// in UI hints and telemetry. It is NOT used in the placement admission
+// path — admission always starts from the fastest rank and the candidate
+// sort order (hottest first, smallest-within-heat) determines what ends
+// up on each tier.
 //
-// Pin overrides both:  PinHot → fastestRank, PinCold → slowestRank.
+// Heat is primary: hot files target faster tiers, cold files target the
+// slowest. Size nudges one tier slower for larger files within the same
+// heat level. Pin overrides both: PinHot → fastestRank, PinCold → slowestRank.
 func idealRank(pin meta.PinState, heatCounter uint32, sizeBytes int64, fastestRank, slowestRank int) int {
 	switch pin {
 	case meta.PinHot:

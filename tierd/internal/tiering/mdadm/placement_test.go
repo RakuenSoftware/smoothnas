@@ -298,53 +298,97 @@ func TestAssignCandidateRanksDrainsUpperTierTowardTargetFill(t *testing.T) {
 	}
 }
 
-// TestAssignCandidateRanksColdFilesDrainToHDD verifies that cold files
-// (heat=0) are assigned to the slowest tier regardless of which tier they
-// currently live on and regardless of size.
-func TestAssignCandidateRanksColdFilesDrainToHDD(t *testing.T) {
+// TestAssignCandidateRanksColdFilesFillNVMEBeforeSpillingToHDD verifies that
+// cold files use available NVME capacity (fill-before-spill) rather than
+// bypassing NVME and going directly to HDD when NVME has headroom.
+func TestAssignCandidateRanksColdFilesFillNVMEBeforeSpillingToHDD(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
 	caps := map[int]*tierCapacity{
 		1: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
 		2: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
 	}
 	cands := []candidate{
-		{curRank: 1, size: 100, heat: 0, pin: meta.PinNone}, // cold small on NVME
-		{curRank: 1, size: 1 << 20, heat: 0, pin: meta.PinNone}, // cold large on NVME
+		{curRank: 1, size: 100, heat: 0, pin: meta.PinNone}, // cold on NVME, NVME has room
 	}
 	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
-	for i := range cands {
-		if !assigned[i] {
-			t.Fatalf("candidate %d was not assigned", i)
-		}
-		if assignments[i] != 2 {
-			t.Errorf("cold file %d: assigned rank %d, want 2 (HDD)", i, assignments[i])
-		}
+	if !assigned[0] {
+		t.Fatal("candidate was not assigned")
+	}
+	// Cold file uses NVME capacity (fill-before-spill). It only drains to HDD
+	// once NVME is full.
+	if assignments[0] != 1 {
+		t.Errorf("cold file with NVME headroom: assigned rank %d, want 1 (NVME)", assignments[0])
 	}
 }
 
-// TestAssignCandidateRanksDrainsLargeFilesFromFastTier ensures that a large
-// unpinned file currently on NVME is drained to the size-appropriate slower
-// tier even when NVME has capacity below target_fill. Rsync backup writes land
-// on NVME first (smoothfs places new files on the fastest tier); without this
-// drain, cold backup files permanently occupy fast storage as long as NVME
-// is not over its fill target.
-func TestAssignCandidateRanksDrainsLargeFilesFromFastTier(t *testing.T) {
-	// ranks 1=NVME, 2=HDD. NVME has plenty of room under target_fill.
+// TestAssignCandidateRanksColdFilesSpillToHDDWhenNVMEFull verifies that cold
+// files drain to HDD once NVME is at target_fill.
+func TestAssignCandidateRanksColdFilesSpillToHDDWhenNVMEFull(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
 	caps := map[int]*tierCapacity{
-		1: {totalBytes: 10 << 30, usedBytes: 0, targetCap: 5 << 30, fullCap: (10 << 30) * 95 / 100},
-		2: {totalBytes: 100 << 30, usedBytes: 0, targetCap: 50 << 30, fullCap: (100 << 30) * 95 / 100},
+		1: {totalBytes: 1000, usedBytes: 500, targetCap: 500, fullCap: 950}, // NVME at target_fill
+		2: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
 	}
-	// 1 GB file on NVME. idealRank for 1 GB with 2 tiers = HDD (rank 2).
 	cands := []candidate{
-		{curRank: 1, size: 1 << 30, pin: meta.PinNone},
+		{curRank: 1, size: 100, heat: 0, pin: meta.PinNone},
 	}
 	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
 	if !assigned[0] {
 		t.Fatal("candidate was not assigned")
 	}
 	if assignments[0] != 2 {
-		t.Errorf("1 GB file on NVME: assigned rank %d, want 2 (HDD); large backup files must drain from fast tiers", assignments[0])
+		t.Errorf("cold file with full NVME: assigned rank %d, want 2 (HDD)", assignments[0])
+	}
+}
+
+// TestAssignCandidateRanksColdFilesUseNVMEWhenAvailable verifies that a cold
+// large file stays on NVME while NVME has headroom. Backups land on NVME first
+// (smoothfs write path); the planner leaves them there until NVME fills up.
+func TestAssignCandidateRanksColdFilesUseNVMEWhenAvailable(t *testing.T) {
+	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	caps := map[int]*tierCapacity{
+		1: {totalBytes: 10 << 30, usedBytes: 0, targetCap: 5 << 30, fullCap: (10 << 30) * 95 / 100},
+		2: {totalBytes: 100 << 30, usedBytes: 0, targetCap: 50 << 30, fullCap: (100 << 30) * 95 / 100},
+	}
+	cands := []candidate{
+		{curRank: 1, size: 1 << 30, heat: 0, pin: meta.PinNone}, // cold 1 GB on NVME
+	}
+	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
+	if !assigned[0] {
+		t.Fatal("candidate was not assigned")
+	}
+	if assignments[0] != 1 {
+		t.Errorf("cold large file with NVME headroom: assigned rank %d, want 1 (NVME; fill-before-spill)", assignments[0])
+	}
+}
+
+// TestAssignCandidateRanksHotFilesDisplaceColdFilesToHDD verifies that hot
+// files displace cold files from NVME: hot files fill NVME first (sorted
+// ahead of cold), pushing cold files down to HDD.
+func TestAssignCandidateRanksHotFilesDisplaceColdFilesToHDD(t *testing.T) {
+	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	// NVME can hold 500 bytes; HDD has plenty of room.
+	caps := map[int]*tierCapacity{
+		1: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
+		2: {totalBytes: 10000, usedBytes: 0, targetCap: 5000, fullCap: 9500},
+	}
+	// Hot file (sorted first) takes the 500 bytes of NVME capacity.
+	// Cold file (sorted last) finds NVME full → spills to HDD.
+	cands := []candidate{
+		{curRank: 1, size: 500, heat: 4, pin: meta.PinNone}, // hot, fills NVME exactly
+		{curRank: 1, size: 100, heat: 0, pin: meta.PinNone}, // cold, arrives after NVME is full
+	}
+	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
+	for i := range cands {
+		if !assigned[i] {
+			t.Fatalf("candidate %d was not assigned", i)
+		}
+	}
+	if assignments[0] != 1 {
+		t.Errorf("hot file: assigned rank %d, want 1 (NVME)", assignments[0])
+	}
+	if assignments[1] != 2 {
+		t.Errorf("cold file: assigned rank %d, want 2 (HDD; displaced by hot file)", assignments[1])
 	}
 }
 
@@ -370,10 +414,11 @@ func TestAssignCandidateRanksHotSmallFilePromotedToNVME(t *testing.T) {
 	}
 }
 
-// TestAssignCandidateRanksColdSmallFileStaysOnHDD verifies that a cold small
-// file on HDD is not promoted to NVME. Heat=0 means the file belongs on the
-// slowest tier regardless of size.
-func TestAssignCandidateRanksColdSmallFileStaysOnHDD(t *testing.T) {
+// TestAssignCandidateRanksColdSmallFileMovesToNVMEWhenAvailable verifies that
+// a cold small file on HDD is assigned to NVME when NVME has headroom.
+// Fill-before-spill: all tiers above HDD should be utilized before data
+// accumulates on HDD.
+func TestAssignCandidateRanksColdSmallFileMovesToNVMEWhenAvailable(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
 	caps := map[int]*tierCapacity{
 		1: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
@@ -386,11 +431,8 @@ func TestAssignCandidateRanksColdSmallFileStaysOnHDD(t *testing.T) {
 	if !assigned[0] {
 		t.Fatal("candidate was not assigned")
 	}
-	if assignments[0] != 2 {
-		t.Errorf("cold small file on HDD: assigned rank %d, want 2 (HDD)", assignments[0])
-	}
-	if caps[1].usedBytes != 0 {
-		t.Errorf("tier 1 usedBytes = %d after cold file on HDD, want 0", caps[1].usedBytes)
+	if assignments[0] != 1 {
+		t.Errorf("cold small file: assigned rank %d, want 1 (NVME has headroom)", assignments[0])
 	}
 }
 
