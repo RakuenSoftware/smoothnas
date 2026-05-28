@@ -192,11 +192,18 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 	sort.Slice(unpinned, func(i, j int) bool { return cands[unpinned[i]].size < cands[unpinned[j]].size })
 	for _, idx := range unpinned {
 		c := cands[idx]
-		// Use curRank as preferred so files drain to slower tiers but are never
-		// promoted to faster ones. Promotion is reserved for PinHot. Without this,
-		// the bin-packer fills the fastest tier first from all candidates, which
-		// pulls small files off HDD to fill NVME/SSD and shrinks HDD utilization.
-		assignments[idx] = admitWithFallback(caps, ranked, c.curRank, c.size)
+		// Use max(curRank, idealRank) as preferred so that:
+		//   - large files written to NVME by smoothfs (e.g. rsync backup writes)
+		//     drain to their size-appropriate tier (sizeBucketRank) rather than
+		//     staying on NVME as long as it has capacity under target_fill.
+		//   - files are never promoted to a tier faster than their ideal rank:
+		//     a small file already on HDD (curRank > idealRank) keeps preferred
+		//     at curRank, so admitWithFallback only tries HDD-or-slower.
+		preferred := c.curRank
+		if ideal := idealRank(c.pin, c.size, fastestRank, slowestRank); ideal > preferred {
+			preferred = ideal
+		}
+		assignments[idx] = admitWithFallback(caps, ranked, preferred, c.size)
 		assigned[idx] = true
 	}
 

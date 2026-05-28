@@ -231,6 +231,32 @@ func TestAssignCandidateRanksDrainsUpperTierTowardTargetFill(t *testing.T) {
 	}
 }
 
+// TestAssignCandidateRanksDrainsLargeFilesFromFastTier ensures that a large
+// unpinned file currently on NVME is drained to the size-appropriate slower
+// tier even when NVME has capacity below target_fill. Rsync backup writes land
+// on NVME first (smoothfs places new files on the fastest tier); without this
+// drain, cold backup files permanently occupy fast storage as long as NVME
+// is not over its fill target.
+func TestAssignCandidateRanksDrainsLargeFilesFromFastTier(t *testing.T) {
+	// ranks 1=NVME, 2=HDD. NVME has plenty of room under target_fill.
+	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	caps := map[int]*tierCapacity{
+		1: {totalBytes: 10 << 30, usedBytes: 0, targetCap: 5 << 30, fullCap: (10 << 30) * 95 / 100},
+		2: {totalBytes: 100 << 30, usedBytes: 0, targetCap: 50 << 30, fullCap: (100 << 30) * 95 / 100},
+	}
+	// 1 GB file on NVME. idealRank for 1 GB with 2 tiers = HDD (rank 2).
+	cands := []candidate{
+		{curRank: 1, size: 1 << 30, pin: meta.PinNone},
+	}
+	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
+	if !assigned[0] {
+		t.Fatal("candidate was not assigned")
+	}
+	if assignments[0] != 2 {
+		t.Errorf("1 GB file on NVME: assigned rank %d, want 2 (HDD); large backup files must drain from fast tiers", assignments[0])
+	}
+}
+
 // TestAssignCandidateRanksDoesNotPromoteUnpinnedFromHDD ensures that an
 // unpinned file currently on the slowest tier is not promoted to a faster
 // tier just because that faster tier has room below its target_fill. HDD
