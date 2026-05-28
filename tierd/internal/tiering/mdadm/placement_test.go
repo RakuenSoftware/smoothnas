@@ -257,19 +257,39 @@ func TestAssignCandidateRanksDrainsLargeFilesFromFastTier(t *testing.T) {
 	}
 }
 
-// TestAssignCandidateRanksDoesNotPromoteUnpinnedFromHDD ensures that an
-// unpinned file currently on the slowest tier is not promoted to a faster
-// tier just because that faster tier has room below its target_fill. HDD
-// utilization must never decrease due to the planner pulling small files
-// upward to fill NVME/SSD capacity.
-func TestAssignCandidateRanksDoesNotPromoteUnpinnedFromHDD(t *testing.T) {
+// TestAssignCandidateRanksSmallFilePromotedToIdealTier verifies that a small
+// unpinned file on HDD is assigned to its size-ideal tier (NVME) when NVME has
+// capacity below target_fill. Size is a bias that sets the starting preference;
+// small files prefer fast tiers, large files prefer slow tiers.
+func TestAssignCandidateRanksSmallFilePromotedToIdealTier(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
 	caps := map[int]*tierCapacity{
 		1: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
 		2: {totalBytes: 2000, usedBytes: 0, targetCap: 1000, fullCap: 1900},
 	}
-	// Small file on tier 2 (HDD). Tier 1 has plenty of room under targetCap,
-	// but the file must stay on tier 2 — promotion is not the planner's job.
+	// Small file (100 bytes, idealRank=NVME) currently on HDD. NVME has
+	// capacity under target_fill, so it should be assigned to NVME.
+	cands := []candidate{
+		{curRank: 2, size: 100, pin: meta.PinNone},
+	}
+	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
+	if !assigned[0] {
+		t.Fatal("candidate was not assigned")
+	}
+	if assignments[0] != 1 {
+		t.Errorf("small file on HDD: assigned rank %d, want 1 (NVME); small files bias toward faster tiers", assignments[0])
+	}
+}
+
+// TestAssignCandidateRanksSmallFileStaysOnHDDWhenFasterTierFull verifies that
+// a small file on HDD stays there when the ideal faster tier is full — size
+// bias is a preference, capacity decides the actual tier.
+func TestAssignCandidateRanksSmallFileStaysOnHDDWhenFasterTierFull(t *testing.T) {
+	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	caps := map[int]*tierCapacity{
+		1: {totalBytes: 1000, usedBytes: 960, targetCap: 500, fullCap: 950}, // NVME above full_threshold
+		2: {totalBytes: 2000, usedBytes: 0, targetCap: 1000, fullCap: 1900},
+	}
 	cands := []candidate{
 		{curRank: 2, size: 100, pin: meta.PinNone},
 	}
@@ -278,10 +298,29 @@ func TestAssignCandidateRanksDoesNotPromoteUnpinnedFromHDD(t *testing.T) {
 		t.Fatal("candidate was not assigned")
 	}
 	if assignments[0] != 2 {
-		t.Errorf("HDD file promoted to rank %d, want 2", assignments[0])
+		t.Errorf("small file with full NVME: assigned rank %d, want 2 (HDD spill)", assignments[0])
 	}
-	if caps[1].usedBytes != 0 {
-		t.Errorf("tier 1 usedBytes = %d after HDD-only assignment, want 0", caps[1].usedBytes)
+}
+
+// TestAssignCandidateRanksLargeFileOnFullHDDOverflowsToNVME verifies that a
+// large file falls back to a faster tier when its preferred slower tiers are
+// above full_threshold. Size bias does not strand files when storage is full.
+func TestAssignCandidateRanksLargeFileOnFullHDDOverflowsToNVME(t *testing.T) {
+	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	// HDD above full_threshold; NVME has plenty of room.
+	caps := map[int]*tierCapacity{
+		1: {totalBytes: 10 << 30, usedBytes: 1 << 30, targetCap: 5 << 30, fullCap: (10 << 30) * 95 / 100},
+		2: {totalBytes: 10 << 30, usedBytes: (10 << 30) * 96 / 100, targetCap: 5 << 30, fullCap: (10 << 30) * 95 / 100},
+	}
+	cands := []candidate{
+		{curRank: 1, size: 1 << 30, pin: meta.PinNone}, // 1 GB, idealRank=HDD
+	}
+	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
+	if !assigned[0] {
+		t.Fatal("candidate was not assigned")
+	}
+	if assignments[0] != 1 {
+		t.Errorf("1 GB file with full HDD: assigned rank %d, want 1 (NVME overflow)", assignments[0])
 	}
 }
 
