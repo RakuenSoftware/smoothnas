@@ -180,8 +180,8 @@ func testRanked(in ...testRanking) []rankedPoolTarget {
 	return out
 }
 
-// TestAdmitFillsFastestFirst: empty fastest tier accepts small files until
-// it reaches target_fill_pct; larger files then spill to the lower tier.
+// TestAdmitFillsFastestFirst: empty fastest tier accepts files until it
+// reaches full_threshold_pct; files that no longer fit spill to the lower tier.
 func TestAdmitFillsFastestFirst(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
 	caps := map[int]*tierCapacity{
@@ -196,87 +196,73 @@ func TestAdmitFillsFastestFirst(t *testing.T) {
 	}
 }
 
-func TestAdmitSpillsPastTargetFill(t *testing.T) {
+// TestAdmitDoesNotSpillUntilFull: a tier above target_fill but below
+// full_threshold still accepts files. target_fill is not a spill threshold —
+// full% is. Spilling at target_fill would dump data on the slowest tier while
+// the fast tier still had usable headroom.
+func TestAdmitDoesNotSpillUntilFull(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	// Fastest tier is at target_fill but below full_threshold. Migration
-	// placement spills to the lower tier so the fast tier drains toward fill%.
+	// Fastest tier is well past target_fill (50%) but below full (95%).
 	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1 << 30, usedBytes: 1 << 29, targetCap: 1 << 29, fullCap: (1 << 30) * 95 / 100},
+		1: {totalBytes: 1 << 30, usedBytes: (1 << 30) * 60 / 100, targetCap: 1 << 29, fullCap: (1 << 30) * 95 / 100},
 		2: {totalBytes: 10 << 30, targetCap: 10 << 29, fullCap: (10 << 30) * 95 / 100},
 	}
-	if r := admitWithFallback(caps, ranked, 1, 100<<20); r != 2 {
-		t.Errorf("past-target-under-full fastest: got rank %d, want 2", r)
+	// 100 MB fits under full% on the fastest tier (60% + ~10% = 70% < 95%).
+	if r := admitWithFallback(caps, ranked, 1, 100<<20); r != 1 {
+		t.Errorf("above-target-below-full fastest: got rank %d, want 1 (no spill until full%%)", r)
 	}
 }
 
-func TestAdmitUsesTargetFill(t *testing.T) {
+// TestAdmitSpillsOnlyWhenFull: the fastest tier accepts until adding the file
+// would exceed full_threshold_pct, then spills to the next tier.
+func TestAdmitSpillsOnlyWhenFull(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	usedFast := int64(1<<30) * 60 / 100
 	caps := map[int]*tierCapacity{
-		1: {
-			totalBytes: 1 << 30,
-			usedBytes:  usedFast,
-			targetCap:  1 << 29,
-			fullCap:    (1 << 30) * 95 / 100,
-		},
-		2: {
-			totalBytes: 10 << 30,
-			targetCap:  10 << 29,
-			fullCap:    (10 << 30) * 95 / 100,
-		},
+		1: {totalBytes: 1000, usedBytes: 900, targetCap: 500, fullCap: 950}, // 100 below full
+		2: {totalBytes: 10000, targetCap: 5000, fullCap: 9500},
 	}
-	if r := admitWithFallback(caps, ranked, 1, 10<<20); r != 2 {
-		t.Errorf("target-fill fastest: got rank %d, want 2", r)
+	// 40 bytes fits under full (900+40=940 <= 950) → stays on fastest.
+	if r := admitWithFallback(caps, ranked, 1, 40); r != 1 {
+		t.Errorf("fits under full: got rank %d, want 1", r)
 	}
-
-	caps[1].usedBytes = int64(1<<30) * 49 / 100
-	if r := admitWithFallback(caps, ranked, 1, 5<<20); r != 1 {
-		t.Errorf("target-fill below target: got rank %d, want 1", r)
+	// Now at 940. 50 more would be 990 > 950 full → spills to tier 2.
+	if r := admitWithFallback(caps, ranked, 1, 50); r != 2 {
+		t.Errorf("would exceed full: got rank %d, want 2", r)
 	}
 }
 
-func TestAdmitDrainsWhenOverTargetFill(t *testing.T) {
-	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	used := int64(1<<30) * 80 / 100
-	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1 << 30, usedBytes: used, targetCap: 1 << 29, fullCap: (1 << 30) * 95 / 100},
-		2: {totalBytes: 10 << 30, targetCap: 10 << 29, fullCap: (10 << 30) * 95 / 100},
-	}
-	if r := admitWithFallback(caps, ranked, 1, 10<<20); r != 2 {
-		t.Errorf("fastest above target_fill: got rank %d, want 2", r)
-	}
-}
-
-func TestAdmitFullFallbackDrainsToSlowestEligibleTier(t *testing.T) {
+// TestAdmitSpillsToSlowerTierWhenFastestFull: a file lands on the next tier
+// down when the fastest is at full_threshold, and the slower tier accounts for
+// the added bytes.
+func TestAdmitSpillsToSlowerTierWhenFastestFull(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
 	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1000, usedBytes: 600, targetCap: 500, fullCap: 950},
+		1: {totalBytes: 1000, usedBytes: 900, targetCap: 500, fullCap: 950}, // only 50 free under full
 		2: {totalBytes: 1000, usedBytes: 500, targetCap: 500, fullCap: 950},
 	}
-
 	if r := admitWithFallback(caps, ranked, 1, 100); r != 2 {
-		t.Errorf("fallback above target_fill: got rank %d, want 2", r)
+		t.Errorf("fastest full: got rank %d, want 2", r)
 	}
-	if caps[1].usedBytes != 600 {
-		t.Errorf("upper tier usedBytes = %d, want 600", caps[1].usedBytes)
+	if caps[1].usedBytes != 900 {
+		t.Errorf("upper tier usedBytes = %d, want 900 (untouched)", caps[1].usedBytes)
 	}
 	if caps[2].usedBytes != 600 {
 		t.Errorf("bottom tier usedBytes = %d, want 600", caps[2].usedBytes)
 	}
 }
 
-// TestAssignCandidateRanksDrainsUpperTierTowardTargetFill verifies that hot
-// files stay on the fast tier as long as it has capacity, and spill to the
-// slower tier once the fast tier is full.
-func TestAssignCandidateRanksDrainsUpperTierTowardTargetFill(t *testing.T) {
+// TestAssignCandidateRanksFillsFastTierToFullThenSpills verifies that files
+// keep landing on the fast tier until it reaches full_threshold_pct, then
+// spill to the slower tier — they do NOT spill at target_fill_pct.
+func TestAssignCandidateRanksFillsFastTierToFullThenSpills(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	// NVME: total 1000, target_fill 500, full 950. Three 400-byte hot files.
 	caps := map[int]*tierCapacity{
 		1: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
-		2: {totalBytes: 1000, usedBytes: 500, targetCap: 500, fullCap: 950},
+		2: {totalBytes: 10000, usedBytes: 0, targetCap: 5000, fullCap: 9500},
 	}
-	// Two hot small files on NVME. heat=2 → idealRank=NVME for small files.
-	// First fits under NVME target_fill; second spills to HDD via Pass B.
 	cands := []candidate{
+		{curRank: 1, size: 400, heat: 2, pin: meta.PinNone},
 		{curRank: 1, size: 400, heat: 2, pin: meta.PinNone},
 		{curRank: 1, size: 400, heat: 2, pin: meta.PinNone},
 	}
@@ -287,14 +273,16 @@ func TestAssignCandidateRanksDrainsUpperTierTowardTargetFill(t *testing.T) {
 			t.Fatalf("candidate %d was not assigned", i)
 		}
 	}
-	if assignments[0] != 1 {
-		t.Fatalf("candidate 0 assignment = %d, want 1 (NVME has room)", assignments[0])
+	// 1st: 0→400 (≤950) NVME. 2nd: 400→800 (≤950) NVME — past target_fill 500
+	// but below full, so it stays. 3rd: 800→1200 (>950) spills to HDD.
+	if assignments[0] != 1 || assignments[1] != 1 {
+		t.Fatalf("first two assignments = %d,%d, want 1,1 (fill to full%%, not target)", assignments[0], assignments[1])
 	}
-	if assignments[1] != 2 {
-		t.Fatalf("candidate 1 assignment = %d, want 2 (NVME full, spills to HDD)", assignments[1])
+	if assignments[2] != 2 {
+		t.Fatalf("third assignment = %d, want 2 (NVME at full, spills)", assignments[2])
 	}
-	if caps[1].usedBytes != 400 {
-		t.Fatalf("upper tier usedBytes = %d, want 400", caps[1].usedBytes)
+	if caps[1].usedBytes != 800 {
+		t.Fatalf("upper tier usedBytes = %d, want 800", caps[1].usedBytes)
 	}
 }
 
@@ -322,11 +310,11 @@ func TestAssignCandidateRanksColdFilesFillNVMEBeforeSpillingToHDD(t *testing.T) 
 }
 
 // TestAssignCandidateRanksColdFilesSpillToHDDWhenNVMEFull verifies that cold
-// files drain to HDD once NVME is at target_fill.
+// files drain to HDD once NVME is at full_threshold_pct (not target_fill).
 func TestAssignCandidateRanksColdFilesSpillToHDDWhenNVMEFull(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
 	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1000, usedBytes: 500, targetCap: 500, fullCap: 950}, // NVME at target_fill
+		1: {totalBytes: 1000, usedBytes: 950, targetCap: 500, fullCap: 950}, // NVME at full
 		2: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
 	}
 	cands := []candidate{
@@ -364,18 +352,19 @@ func TestAssignCandidateRanksColdFilesUseNVMEWhenAvailable(t *testing.T) {
 
 // TestAssignCandidateRanksHotFilesDisplaceColdFilesToHDD verifies that hot
 // files displace cold files from NVME: hot files fill NVME first (sorted
-// ahead of cold), pushing cold files down to HDD.
+// ahead of cold), and once NVME reaches full_threshold the remaining cold
+// file spills to HDD.
 func TestAssignCandidateRanksHotFilesDisplaceColdFilesToHDD(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	// NVME can hold 500 bytes; HDD has plenty of room.
+	// NVME holds up to full=950; HDD has plenty of room.
 	caps := map[int]*tierCapacity{
 		1: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
 		2: {totalBytes: 10000, usedBytes: 0, targetCap: 5000, fullCap: 9500},
 	}
-	// Hot file (sorted first) takes the 500 bytes of NVME capacity.
-	// Cold file (sorted last) finds NVME full → spills to HDD.
+	// Hot file (sorted first) takes 950 bytes, filling NVME to full.
+	// Cold file (sorted last) finds NVME at full → spills to HDD.
 	cands := []candidate{
-		{curRank: 1, size: 500, heat: 4, pin: meta.PinNone}, // hot, fills NVME exactly
+		{curRank: 1, size: 950, heat: 4, pin: meta.PinNone}, // hot, fills NVME to full
 		{curRank: 1, size: 100, heat: 0, pin: meta.PinNone}, // cold, arrives after NVME is full
 	}
 	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
