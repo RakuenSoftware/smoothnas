@@ -684,10 +684,53 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir dest parent: %w", err)
 	}
-	if _, err := os.Lstat(dstPath); err == nil {
+	dstInfo, dstErr := os.Lstat(dstPath)
+	if dstErr == nil {
+		// Destination already exists. This is the expected state after a move
+		// that installed the destination but crashed or was interrupted before
+		// unlinking the source. If size and mtime match, the copy is complete:
+		// remove the stale source and update the meta record.
+		srcInfo2, srcErr := os.Stat(srcPath)
+		if srcErr == nil && dstInfo.Size() == srcInfo2.Size() && dstInfo.ModTime().Equal(srcInfo2.ModTime()) {
+			log.Printf("placement: completing stalled move for %s: destination already exists and matches source", rel)
+			store2 := a.metaStoreFor(ns.PoolName)
+			srcSt2, _ := srcInfo2.Sys().(*syscall.Stat_t)
+			var srcRec2 meta.Record
+			var hadSrcRec2 bool
+			if store2 != nil && srcSt2 != nil {
+				srcRec2, hadSrcRec2, _ = store2.Get(srcSt2.Ino, srcRank)
+			}
+			if err := os.Remove(srcPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("unlink stalled src: %w", err)
+			}
+			if store2 != nil {
+				dstStat, statErr := os.Stat(dstPath)
+				if statErr == nil {
+					if dstSt, ok := dstStat.Sys().(*syscall.Stat_t); ok {
+						rec := meta.Record{
+							Version:     meta.RecordVersion,
+							NamespaceID: meta.NamespaceID(ns.NamespaceID),
+							TierIdx:     uint8(destRank),
+							LastAccessNS: uint64(time.Now().UnixNano()),
+						}
+						if hadSrcRec2 {
+							rec.PinState = srcRec2.PinState
+							rec.HeatCounter = srcRec2.HeatCounter
+						}
+						store2.PutBlocking(dstSt.Ino, destRank, rec)
+					}
+				}
+				if srcSt2 != nil {
+					if err := store2.Delete(srcSt2.Ino, srcRank); err != nil {
+						log.Printf("placement: delete stalled src meta tier=%d inode=%d: %v", srcRank, srcSt2.Ino, err)
+					}
+				}
+			}
+			return nil
+		}
 		return fmt.Errorf("destination already exists: %s", dstPath)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("stat dest: %w", err)
+	} else if !errors.Is(dstErr, os.ErrNotExist) {
+		return fmt.Errorf("stat dest: %w", dstErr)
 	}
 
 	srcInfo, err := os.Stat(srcPath)

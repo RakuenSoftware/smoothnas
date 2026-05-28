@@ -1,9 +1,11 @@
 package mdadm
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tiering/meta"
@@ -525,6 +527,55 @@ func TestMoveForPlacementDoesNotOverwriteExistingDestination(t *testing.T) {
 	}
 	if string(gotDst) != "dest" {
 		t.Fatalf("dst contents = %q, want dest", gotDst)
+	}
+}
+
+func TestMoveForPlacementCompletesstalledMoveWhenDestMatchesSrc(t *testing.T) {
+	origMountReady := backingMountActive
+	backingMountActive = func(string) bool { return true }
+	t.Cleanup(func() { backingMountActive = origMountReady })
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	rel := "dir/file.txt"
+	mtime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	content := []byte("same content")
+
+	for _, dir := range []string{srcDir + "/dir", dstDir + "/dir"} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	for _, p := range []string{srcDir + "/" + rel, dstDir + "/" + rel} {
+		if err := writeFile(p, content, 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+		if err := os.Chtimes(p, mtime, mtime); err != nil {
+			t.Fatalf("chtimes %s: %v", p, err)
+		}
+	}
+
+	a := &Adapter{}
+	err := a.moveForPlacement(
+		db.MdadmManagedNamespaceRow{PoolName: "pool1", NamespaceID: "ns1"},
+		rel,
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "src", MountPath: srcDir},
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "dst", MountPath: dstDir},
+		1, 2,
+	)
+	if err != nil {
+		t.Fatalf("moveForPlacement stalled move: %v", err)
+	}
+	// Source should be gone; destination should still have the content.
+	if _, err := os.Stat(srcDir + "/" + rel); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("src should have been removed, got: %v", err)
+	}
+	got, err := readFile(dstDir + "/" + rel)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("dst contents = %q, want %q", got, content)
 	}
 }
 
