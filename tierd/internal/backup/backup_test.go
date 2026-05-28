@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -28,20 +29,14 @@ func TestParseRsyncWriteFailedPathMissing(t *testing.T) {
 	}
 }
 
-func TestRsyncArchiveArgsKeepInplaceForSmoothfsDestination(t *testing.T) {
-	if !containsArg(rsyncArchiveArgs("/mnt/media/storage"), "--inplace") {
-		t.Fatal("smoothfs destination should keep --inplace")
-	}
-}
-
-func TestRsyncArchiveArgsKeepInplaceForNormalDestination(t *testing.T) {
-	if !containsArg(rsyncArchiveArgs("/srv/backups"), "--inplace") {
-		t.Fatal("normal destination should keep --inplace")
+func TestRsyncArchiveArgsKeepInplace(t *testing.T) {
+	if !containsArg(rsyncArchiveArgs(60), "--inplace") {
+		t.Fatal("rsync args should keep --inplace")
 	}
 }
 
 func TestRsyncArchiveArgsSkipExpensiveOwnershipMetadata(t *testing.T) {
-	args := rsyncArchiveArgs("/mnt/media/storage")
+	args := rsyncArchiveArgs(60)
 	for _, want := range []string{"-rltW", "--links", "--no-perms", "--no-owner", "--no-group", "--omit-dir-times"} {
 		if !containsArg(args, want) {
 			t.Fatalf("rsync args missing %s: %v", want, args)
@@ -49,6 +44,26 @@ func TestRsyncArchiveArgsSkipExpensiveOwnershipMetadata(t *testing.T) {
 	}
 	if containsArg(args, "-aW") {
 		t.Fatalf("rsync args should not use archive owner/group/perms preservation: %v", args)
+	}
+}
+
+func TestRsyncMountArgsUsesLongerTimeoutForHDDSpinup(t *testing.T) {
+	// NFS-mounted backups need a longer timeout than SSH backups so that
+	// a sleeping source HDD has time to spin up before rsync declares a stall.
+	args := rsyncMountArgs("/mnt/dst")
+	for _, a := range args {
+		if a == "--timeout=60" {
+			t.Fatalf("rsyncMountArgs should not use --timeout=60; source HDDs may need > 60 s to spin up: %v", args)
+		}
+	}
+	hasTimeout := false
+	for _, a := range args {
+		if strings.HasPrefix(a, "--timeout=") {
+			hasTimeout = true
+		}
+	}
+	if !hasTimeout {
+		t.Fatalf("rsyncMountArgs missing --timeout flag: %v", args)
 	}
 }
 
@@ -115,6 +130,46 @@ func TestForceUmountOnCancelStopSuppressesCallback(t *testing.T) {
 	case got := <-called:
 		t.Fatalf("force umount unexpectedly called for %q", got)
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestMountNFSFailsFastWhenPortUnreachable(t *testing.T) {
+	orig := nfsDialFn
+	defer func() { nfsDialFn = orig }()
+
+	nfsDialFn = func(_ context.Context, addr string) error {
+		return fmt.Errorf("dial tcp %s: connect: connection refused", addr)
+	}
+
+	start := time.Now()
+	err := mount(Config{TargetType: "nfs", Host: "192.0.2.1", Share: "/share"}, t.TempDir())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error for unreachable NFS port")
+	}
+	if !strings.Contains(err.Error(), "port 2049 not reachable") {
+		t.Fatalf("expected port 2049 error, got: %v", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("mount took %v, expected near-instant failure", elapsed)
+	}
+}
+
+func TestMountNFSProceedsWhenPortReachable(t *testing.T) {
+	orig := nfsDialFn
+	defer func() { nfsDialFn = orig }()
+
+	// Dial succeeds; mount itself will fail because there's no real NFS server,
+	// but the important thing is we get past the port-check step.
+	nfsDialFn = func(_ context.Context, addr string) error { return nil }
+
+	err := mount(Config{TargetType: "nfs", Host: "192.0.2.1", Share: "/share"}, t.TempDir())
+	if err == nil {
+		t.Fatal("expected mount to fail (no real NFS server)")
+	}
+	if strings.Contains(err.Error(), "port 2049 not reachable") {
+		t.Fatalf("should not get port-check error when dial succeeds, got: %v", err)
 	}
 }
 

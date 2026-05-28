@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +29,14 @@ var (
 	statPath         = os.Stat
 	statfsBackupPath = unix.Statfs
 	forceUmountFn    = forceUmount
+	nfsDialFn        = func(ctx context.Context, addr string) error {
+		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+		if err != nil {
+			return err
+		}
+		conn.Close()
+		return nil
+	}
 )
 
 const (
@@ -79,6 +88,12 @@ const (
 	// server's prefetcher warm without risking memory pressure under load.
 	nfsReadAheadKB = 4096
 
+	// nfsPortCheckTimeout is how long the pre-mount TCP probe to port 2049
+	// waits before giving up. mount.nfs can silently retry a dead server for
+	// two minutes before returning an error; a short probe here replaces that
+	// silent hang with an immediate, actionable message.
+	nfsPortCheckTimeout = 5 * time.Second
+
 	// minDestFreeBytes is the lower bound on destination free space we
 	// require before starting a backup. Below this we refuse to start —
 	// the run would fail within seconds anyway and leave a confusing
@@ -103,12 +118,12 @@ func destFreeBytes(path string) (uint64, error) {
 	return uint64(st.Bavail) * uint64(st.Bsize), nil
 }
 
-func rsyncArchiveArgs(_ string) []string {
+func rsyncArchiveArgs(timeoutSecs int) []string {
 	// Keep the parts of archive mode that matter for NAS backups without
 	// paying the NFS/ZFS cost of replaying source uid/gid/mode metadata.
 	return []string{"-rltW", "--links", "--inplace",
 		"--omit-dir-times", "--no-perms", "--no-owner", "--no-group",
-		"--timeout=60",
+		fmt.Sprintf("--timeout=%d", timeoutSecs),
 		"--stats", "--no-human-readable", "--info=progress2",
 	}
 }
@@ -118,8 +133,13 @@ var rsyncSupportsOpenNoAtime = sync.OnceValue(func() bool {
 	return err == nil && bytes.Contains(out, []byte("--open-noatime"))
 })
 
-func rsyncMountArgs(dst string) []string {
-	args := rsyncArchiveArgs(dst)
+func rsyncMountArgs(_ string) []string {
+	// NFS-mounted backups use a longer timeout than SSH backups. When the
+	// source server has HDDs in standby, a single NFS read can stall for
+	// the duration of HDD spinup (commonly 15–45 s). 120 s gives enough
+	// headroom for the drive to wake, seek, and deliver the first block
+	// without triggering a false stall alarm.
+	args := rsyncArchiveArgs(120)
 	// Mounted-source backups run rsync locally as root. When supported, avoid
 	// updating source atime on every file open; on NFS that prevents a read-only
 	// backup from producing avoidable metadata RPC/writeback work on the source.
@@ -348,7 +368,7 @@ func rsyncSSH(ctx context.Context, cfg Config, progress func(msg string, done, t
 	// data flow, independent of SSH keepalives. A server under heavy I/O load
 	// may delay SSH protocol keepalive responses (causing false kills) but
 	// cannot delay actual rsync data without triggering this timeout.
-	args := rsyncArchiveArgs(dst)
+	args := rsyncArchiveArgs(60)
 	if cfg.Compress {
 		// rsync 3.2+ negotiates zstd; older rsync falls back to zlib. Either
 		// way this only helps when the wire is slower than available CPU —
@@ -930,11 +950,26 @@ func runCP(ctx context.Context, cfg Config, progress func(msg string, done, tota
 	return fmt.Sprintf("cp backup complete — %d files verified", count), nil
 }
 
+// checkNFSPort does a short TCP probe to port 2049 on host. mount.nfs can
+// hang for up to two minutes when the server is unreachable because it retries
+// the initial TCP connection; a probe here surfaces the real cause immediately.
+func checkNFSPort(host string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), nfsPortCheckTimeout)
+	defer cancel()
+	if err := nfsDialFn(ctx, net.JoinHostPort(host, "2049")); err != nil {
+		return fmt.Errorf("NFS server %s port 2049 not reachable: %w", host, err)
+	}
+	return nil
+}
+
 // mount mounts an NFS or SMB share at mountDir.
 func mount(cfg Config, mountDir string) error {
 	var cmd *exec.Cmd
 	switch cfg.TargetType {
 	case "nfs":
+		if err := checkNFSPort(cfg.Host); err != nil {
+			return err
+		}
 		cmd = exec.Command("mount", "-t", "nfs", "-o", nfsMountOpts,
 			fmt.Sprintf("%s:%s", cfg.Host, cfg.Share),
 			mountDir,
