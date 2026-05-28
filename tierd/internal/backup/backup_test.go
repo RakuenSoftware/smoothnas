@@ -173,6 +173,23 @@ func TestMountNFSProceedsWhenPortReachable(t *testing.T) {
 	}
 }
 
+func TestIoprioIdleCmdWrapsRsync(t *testing.T) {
+	cmd := ioprioIdleCmd(context.Background(), "rsync", "-rltW", "--inplace", "src/", "dst/")
+	// cmd.Args[0] is the program as passed to exec.Command; Path is the resolved binary.
+	if cmd.Args[0] != "ionice" {
+		t.Fatalf("expected ionice as program, got %q", cmd.Args[0])
+	}
+	want := []string{"ionice", "-c", "3", "rsync", "-rltW", "--inplace", "src/", "dst/"}
+	if len(cmd.Args) != len(want) {
+		t.Fatalf("args length %d != %d: %v", len(cmd.Args), len(want), cmd.Args)
+	}
+	for i, w := range want {
+		if cmd.Args[i] != w {
+			t.Errorf("args[%d] = %q, want %q", i, cmd.Args[i], w)
+		}
+	}
+}
+
 func containsArg(args []string, want string) bool {
 	for _, arg := range args {
 		if arg == want {

@@ -133,6 +133,16 @@ var rsyncSupportsOpenNoAtime = sync.OnceValue(func() bool {
 	return err == nil && bytes.Contains(out, []byte("--open-noatime"))
 })
 
+// ioprioIdleCmd returns a Cmd that runs name with the given args at idle
+// I/O scheduling class (ionice -c 3). Backup rsync at default priority
+// saturates the ZFS dirty-data watermark and triggers write throttling
+// that stalls all pool I/O — including active NFS/SMB clients — for
+// hundreds of milliseconds at a time. Idle class yields to any other I/O,
+// so the backup takes longer but active client transfers are unaffected.
+func ioprioIdleCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, "ionice", append([]string{"-c", "3", name}, args...)...)
+}
+
 func rsyncMountArgs(_ string) []string {
 	// NFS-mounted backups use a longer timeout than SSH backups. When the
 	// source server has HDDs in standby, a single NFS read can stall for
@@ -395,7 +405,7 @@ func rsyncSSH(ctx context.Context, cfg Config, progress func(msg string, done, t
 		go watchDestFree(runCtx, localPath, cancel, reasonCh)
 	}
 
-	cmd := exec.CommandContext(runCtx, "rsync", args...)
+	cmd := ioprioIdleCmd(runCtx, "rsync", args...)
 	if cfg.SSHPass != "" {
 		cmd.Env = append(os.Environ(), "SSHPASS="+cfg.SSHPass)
 	}
@@ -636,7 +646,7 @@ func rsyncMount(ctx context.Context, cfg Config, progress func(msg string, done,
 		args = append(args, "--delete")
 	}
 	args = append(args, src, dst)
-	cmd := exec.CommandContext(runCtx, "rsync", args...)
+	cmd := ioprioIdleCmd(runCtx, "rsync", args...)
 	// Mounted NFS/SMB backups copy between local paths. rsync cannot see kernel
 	// RPC wire bytes here, so progress reports logical payload throughput.
 	summary, err := runRsyncProcess(cmd, fmt.Sprintf("Running rsync over %s mount...", strings.ToUpper(cfg.TargetType)), cfg.Direction, false, progress)
@@ -743,7 +753,7 @@ func runParallelRsyncMount(ctx context.Context, src, dst string, parallelism int
 					}
 					args := append([]string{}, rsyncMountArgs(dst)...)
 					args = append(args, "--files-from="+listFile, src, dst)
-					cmd := exec.CommandContext(workerCtx, "rsync", args...)
+					cmd := ioprioIdleCmd(workerCtx, "rsync", args...)
 					out, err := cmd.CombinedOutput()
 					results <- result{err: err, rel: u.rel, out: string(out)}
 					if err != nil {
