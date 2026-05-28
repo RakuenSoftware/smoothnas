@@ -153,12 +153,13 @@ type tierCapacity struct {
 	target     db.MdadmManagedTargetRow
 }
 
-// admissionCap returns the effective cap this tier should enforce during
-// the current migration planning cycle. fullCap is the write/admission hard
-// cap, but migration drains back toward targetCap, using fullCap only as the
-// fallback when lower tiers cannot absorb a file at their own fill targets.
+// admissionCap returns the threshold at which this tier is considered full
+// and files must go to a slower tier. A file goes down only when placing it
+// here would exceed full_threshold_pct — not target_fill_pct. target_fill_pct
+// is the long-term equilibrium reached as files cool over many migration
+// cycles; it is not enforced per-cycle.
 func (c *tierCapacity) admissionCap() int64 {
-	return c.targetCap
+	return c.fullCap
 }
 
 type fullFallbackOrder int
@@ -187,10 +188,17 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 	// Pass 2: unpinned files, hottest-first then smallest-first.
 	//
 	// Admission always starts at the fastest rank and walks toward slower
-	// tiers. Ordering by heat descending ensures hot files claim fast-tier
-	// capacity first; cold files fall through to the slowest tier once
-	// NVME/SSD have reached their target_fill. This gives every tier above
-	// HDD its fill% with the hottest content before anything spills down.
+	// tiers. A file spills to a slower tier only when the faster tier would
+	// exceed full_threshold_pct (full%) — full% is the hard ceiling, the
+	// same "maximum write size" rule the smoothfs write path uses. A tier is
+	// not considered full at target_fill_pct; that is the migration target a
+	// tier drains toward over time as files cool, not a per-cycle spill cap.
+	//
+	// Ordering by heat descending ensures the hottest files claim fast-tier
+	// capacity first. As files cool (HeatCounter decays hourly) the coldest
+	// content sorts last and is the first to be demoted on later cycles, so
+	// a tier that a burst write pushed up to full% drains back toward fill%
+	// as that written data goes cold.
 	//
 	// Size is the secondary sort key: within equal heat, smaller files get
 	// preference for fast tiers so large files don't crowd out small ones.
@@ -543,26 +551,28 @@ func backingDevicesStandbyBlocked(devices []string) (bool, string) {
 	return false, ""
 }
 
-// admitWithFallback finds an eligible tier at or slower than preferredRank
-// whose remaining budget (cap - usedBytes) can absorb size. Two passes:
+// admitWithFallback places a file on the fastest tier at or slower than
+// preferredRank that can absorb size without exceeding full_threshold_pct
+// (full%). full% is the hard ceiling — the "maximum write size" rule shared
+// with the smoothfs write path. A file only descends to a slower tier when
+// every faster eligible tier is already at full%.
 //
-//	Pass A — each tier's target_fill_pct is honoured so migration drains
-//	  excess data down to slower tiers.
-//	Pass B — fall back to full_threshold_pct from the slowest eligible tier
-//	  upward. full_threshold_pct is a hard ceiling; target_fill_pct is the
-//	  migration target for every tier above the bottom tier.
+// target_fill_pct (fill%) is deliberately NOT consulted here. fill% is the
+// migration *equilibrium* a tier drains toward over many cycles as files
+// cool — not a per-placement spill threshold. Spilling at fill% would dump
+// data onto the slowest tier while faster tiers still had usable headroom.
 //
 // Returns the rank of the tier that accepted the file, or the preferred
-// rank if no admission succeeded (in which case the caller just leaves
-// the file where it is — assignments[] becomes a no-op compared to its
-// current rank).
+// rank if no tier had room (the caller then leaves the file where it is).
 func admitWithFallback(caps map[int]*tierCapacity, ranked []rankedPoolTarget, preferredRank int, size int64) int {
 	return admitWithFallbackOrder(caps, ranked, preferredRank, size, fullFallbackSlowestFirst)
 }
 
-func admitWithFallbackOrder(caps map[int]*tierCapacity, ranked []rankedPoolTarget, preferredRank int, size int64, order fullFallbackOrder) int {
-	// Pass A: honour each tier's fill target. "Preferred" is usually fastest,
-	// so the scan walks ranks ascending (fastest → slowest) from there.
+// admitWithFallbackOrder is admitWithFallback. The order parameter is retained
+// only for call-site readability at the pinned-hot/pinned-cold sites; both
+// orders now resolve to the same single fastest-fitting-under-full% scan,
+// since full% is the only admission ceiling.
+func admitWithFallbackOrder(caps map[int]*tierCapacity, ranked []rankedPoolTarget, preferredRank int, size int64, _ fullFallbackOrder) int {
 	for _, rt := range ranked {
 		if rt.rank < preferredRank {
 			continue
@@ -576,38 +586,7 @@ func admitWithFallbackOrder(caps map[int]*tierCapacity, ranked []rankedPoolTarge
 			return rt.rank
 		}
 	}
-	// Pass B: admission cap exceeded everywhere from preferred downward.
-	// Accept at full_threshold so we don't strand the file, but for normal
-	// migration try lower tiers first so upper tiers drain toward target_fill.
-	if order == fullFallbackFastestFirst {
-		for _, rt := range ranked {
-			if r, ok := admitAtFullCap(caps, rt, preferredRank, size); ok {
-				return r
-			}
-		}
-	} else {
-		for i := len(ranked) - 1; i >= 0; i-- {
-			if r, ok := admitAtFullCap(caps, ranked[i], preferredRank, size); ok {
-				return r
-			}
-		}
-	}
 	return preferredRank
-}
-
-func admitAtFullCap(caps map[int]*tierCapacity, rt rankedPoolTarget, preferredRank int, size int64) (int, bool) {
-	if rt.rank < preferredRank {
-		return 0, false
-	}
-	c := caps[rt.rank]
-	if c == nil {
-		return 0, false
-	}
-	if c.usedBytes+size <= c.fullCap {
-		c.usedBytes += size
-		return rt.rank, true
-	}
-	return 0, false
 }
 
 func max1(x, floor int) int {
