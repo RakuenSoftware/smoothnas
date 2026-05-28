@@ -844,8 +844,11 @@ func rsyncMount(ctx context.Context, cfg Config, progress func(msg string, done,
 //   - --delete is incompatible (handled by the caller before
 //     dispatching) — each worker only sees its current unit and would
 //     erroneously delete files outside it.
-//   - On error from any worker, the others are cancelled via shared
-//     context and the first error is returned.
+//   - Per-unit failures do NOT cancel other workers. The worker logs
+//     the error and picks up the next unit. A timeout on emulators/ROMs
+//     should never prevent video/Anime or music/Jazz from being synced.
+//     Hard stops (disk full, external cancel) still propagate through
+//     the shared context and stop every worker immediately.
 func runParallelRsyncMount(ctx context.Context, src, dst string, parallelism int, targetType string, progress func(msg string, done, total int)) (string, error) {
 	units, err := enumerateRsyncWorkUnits(src)
 	if err != nil {
@@ -906,9 +909,14 @@ func runParallelRsyncMount(ctx context.Context, src, dst string, parallelism int
 					cmd := exec.CommandContext(workerCtx, "rsync", args...)
 					out, err := cmd.CombinedOutput()
 					results <- result{err: err, rel: u.rel, out: string(out)}
-					if err != nil {
+					if workerCtx.Err() != nil {
+						// Hard stop (disk full or external cancel) —
+						// don't pick up more units.
 						return
 					}
+					// Soft per-unit failure (timeout, partial transfer):
+					// continue to the next unit so the rest of the tree
+					// is still synced this run.
 				}
 			}
 		}()
@@ -919,21 +927,21 @@ func runParallelRsyncMount(ctx context.Context, src, dst string, parallelism int
 		close(results)
 	}()
 
-	var firstErr error
+	var unitErrors []string
 	completed := 0
 	for r := range results {
 		if r.err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("parallel rsync unit %q: %w: %s",
-					r.rel, r.err, strings.TrimSpace(r.out))
-				cancelAll()
+			if !errors.Is(r.err, context.Canceled) {
+				unitErrors = append(unitErrors, fmt.Sprintf("unit %q: %s",
+					r.rel, strings.TrimSpace(r.out)))
 			}
 			continue
 		}
 		completed++
 	}
-	if firstErr != nil {
-		return "", firstErr
+	if len(unitErrors) > 0 {
+		return "", fmt.Errorf("parallel rsync: %d/%d units failed: %s",
+			len(unitErrors), len(units), strings.Join(unitErrors, "; "))
 	}
 	progress(fmt.Sprintf("rsync complete: %d work units across %d streams", completed, parallelism), -1, -1)
 	return fmt.Sprintf("[parallel] %d work units across %d streams\n", completed, parallelism), nil
