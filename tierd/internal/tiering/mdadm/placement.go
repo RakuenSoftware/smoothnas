@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"sort"
@@ -129,7 +130,7 @@ type rankedPoolTarget struct {
 }
 
 // candidate captures the planner's view of one file: where it currently
-// lives, how big it is, and what the user's pin state says.
+// lives, how big it is, how hot it is, and what the user's pin state says.
 type candidate struct {
 	rel     string
 	size    int64
@@ -137,6 +138,7 @@ type candidate struct {
 	curRank int
 	curTarg db.MdadmManagedTargetRow
 	pin     meta.PinState
+	heat    uint32 // HeatCounter from the meta record; 0 = cold
 }
 
 // tierCapacity tracks usage bookkeeping during the planning pass: current
@@ -198,15 +200,7 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 	sort.Slice(unpinned, func(i, j int) bool { return cands[unpinned[i]].size < cands[unpinned[j]].size })
 	for _, idx := range unpinned {
 		c := cands[idx]
-		// Use idealRank (size-based bias) as the starting preference:
-		//   - small files start at the fastest tier, spilling to slower
-		//     tiers if the fast tier is full (Pass A).
-		//   - large files start at the appropriate slower tier, spilling
-		//     to faster tiers only as a last resort when slower tiers are
-		//     genuinely full (Pass C via fullFallbackFasterTiersAsOverflow).
-		// Size rank is a bias, not a hard constraint. Capacity decides
-		// the final tier; idealRank only sets the search starting point.
-		preferred := idealRank(c.pin, c.size, fastestRank, slowestRank)
+		preferred := idealRank(c.pin, c.heat, c.size, fastestRank, slowestRank)
 		assignments[idx] = admitWithFallbackOrder(caps, ranked, preferred, c.size, fullFallbackFasterTiersAsOverflow)
 		assigned[idx] = true
 	}
@@ -335,6 +329,7 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 				curRank: rt.rank,
 				curTarg: rt.target,
 				pin:     rec.PinState,
+				heat:    rec.HeatCounter,
 			})
 			return nil
 		})
@@ -666,18 +661,64 @@ func sizeBucketRank(sizeBytes int64, fastestRank, slowestRank int) int {
 	return r
 }
 
-// idealRank is a pure size+pin view of where a file "wants" to live,
-// absent capacity pressure. The planner consults it to seed the sort
-// order and to display UI hints. Final placement comes from
-// admitWithFallback which considers target_fill and full_threshold.
-func idealRank(pin meta.PinState, sizeBytes int64, fastestRank, slowestRank int) int {
+// heatBucketRank maps a heat counter to a target tier rank using a log2
+// scale: each doubling of the counter moves the file one tier toward the
+// fastest tier. HeatCounter is halved each hour, so the mapping naturally
+// tracks recency — a file that was hot but has gone untouched for several
+// hours will cool tier-by-tier back toward the slowest tier.
+//
+//	heat == 0            → slowestRank  (cold: demote to slowest)
+//	heat == 1            → slowestRank-1 (any recent access: one tier up)
+//	heat in [2,3]        → slowestRank-2
+//	heat in [4,7]        → slowestRank-3
+//	...
+//	heat >= 2^(numTiers-2) → fastestRank
+func heatBucketRank(heatCounter uint32, fastestRank, slowestRank int) int {
+	if heatCounter == 0 {
+		return slowestRank
+	}
+	numTiers := slowestRank - fastestRank
+	if numTiers <= 0 {
+		return fastestRank
+	}
+	// floor(log2(heatCounter)); each doubling = one tier toward fastest.
+	steps := int(bits.Len32(heatCounter)) - 1
+	r := slowestRank - 1 - steps // heat=1 → one above slowest
+	if r < fastestRank {
+		r = fastestRank
+	}
+	return r
+}
+
+// idealRank returns where a file "wants" to live. Heat is the primary
+// driver: hot files target faster tiers, cold files target the slowest
+// tier. Size is a secondary bias: among files at the same heat level,
+// larger files are nudged one tier slower to give smaller files a slight
+// edge on fast storage.
+//
+// Pin overrides both:  PinHot → fastestRank, PinCold → slowestRank.
+func idealRank(pin meta.PinState, heatCounter uint32, sizeBytes int64, fastestRank, slowestRank int) int {
 	switch pin {
 	case meta.PinHot:
 		return fastestRank
 	case meta.PinCold:
 		return slowestRank
 	}
-	return sizeBucketRank(sizeBytes, fastestRank, slowestRank)
+	if heatCounter == 0 {
+		// Cold: demote to slowest regardless of size.
+		return slowestRank
+	}
+	// Heat is primary: map log2(heat) to a tier rank.
+	target := heatBucketRank(heatCounter, fastestRank, slowestRank)
+	// Size is secondary: if the size bucket would prefer a slower tier
+	// than heat demands, nudge one tier in that direction.
+	if sizeBucketRank(sizeBytes, fastestRank, slowestRank) > target {
+		target++
+		if target > slowestRank {
+			target = slowestRank
+		}
+	}
+	return target
 }
 
 // poolRankedTargets returns the pool's tier backings sorted by rank
