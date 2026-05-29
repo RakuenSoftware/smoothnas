@@ -6,9 +6,11 @@ package zfs
 import (
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -126,6 +128,9 @@ func CreatePool(name, vdevType string, dataDisks, slogDisks, l2arcDisks []string
 
 	args := []string{"create", "-f", name}
 
+	// Create with stable /dev/disk/by-id paths so the pool survives kernel
+	// device reordering across reboots (validation/zap above ran on the
+	// original device paths).
 	// Data vdev.
 	if vdevType != "" {
 		if err := ValidateVdevType(vdevType); err != nil {
@@ -133,7 +138,7 @@ func CreatePool(name, vdevType string, dataDisks, slogDisks, l2arcDisks []string
 		}
 		args = append(args, vdevType)
 	}
-	args = append(args, dataDisks...)
+	args = append(args, resolveByIDs(dataDisks)...)
 
 	// SLOG.
 	if len(slogDisks) > 0 {
@@ -141,13 +146,13 @@ func CreatePool(name, vdevType string, dataDisks, slogDisks, l2arcDisks []string
 		if len(slogDisks) > 1 {
 			args = append(args, "mirror")
 		}
-		args = append(args, slogDisks...)
+		args = append(args, resolveByIDs(slogDisks)...)
 	}
 
 	// L2ARC.
 	if len(l2arcDisks) > 0 {
 		args = append(args, "cache")
-		args = append(args, l2arcDisks...)
+		args = append(args, resolveByIDs(l2arcDisks)...)
 	}
 
 	cmd := exec.Command("zpool", args...)
@@ -173,6 +178,71 @@ const zpoolImportSearchDir = "/dev/disk/by-id"
 // to stable by-id device discovery.
 func importArgs(name string) []string {
 	return []string{"import", "-d", zpoolImportSearchDir, "-f", name}
+}
+
+// diskByIDDir holds the stable per-disk symlinks; overridable for tests.
+var diskByIDDir = zpoolImportSearchDir
+
+// byIDPreference ranks /dev/disk/by-id alias kinds (lower = preferred). Serial-
+// bearing aliases (ata-/nvme-/scsi-) are chosen over wwn- and other forms.
+func byIDPreference(name string) int {
+	switch {
+	case strings.HasPrefix(name, "ata-"), strings.HasPrefix(name, "nvme-"),
+		strings.HasPrefix(name, "scsi-"):
+		return 0
+	case strings.HasPrefix(name, "wwn-"):
+		return 1
+	default:
+		return 2
+	}
+}
+
+// resolveByID maps a whole-disk device path (e.g. /dev/sda) to its stable
+// /dev/disk/by-id alias so pools are created/extended with paths that survive
+// kernel device reordering across reboots (the cause of spurious FAULTED
+// members — see zpoolImportSearchDir). Returns the original path unchanged if
+// no by-id alias resolves to the device, so pool ops never fail on systems
+// without by-id symlinks; the next by-id import heals such pools anyway.
+func resolveByID(devPath string) string {
+	target, err := filepath.EvalSymlinks(devPath)
+	if err != nil {
+		return devPath
+	}
+	entries, err := os.ReadDir(diskByIDDir)
+	if err != nil {
+		return devPath
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names) // deterministic selection among equal-preference aliases
+	best, bestPref := "", 3
+	for _, name := range names {
+		if strings.Contains(name, "-part") {
+			continue // whole-disk aliases only
+		}
+		link := filepath.Join(diskByIDDir, name)
+		if resolved, err := filepath.EvalSymlinks(link); err != nil || resolved != target {
+			continue
+		}
+		if pref := byIDPreference(name); pref < bestPref {
+			best, bestPref = link, pref
+		}
+	}
+	if best == "" {
+		return devPath
+	}
+	return best
+}
+
+// resolveByIDs maps each device path to its stable by-id alias (see resolveByID).
+func resolveByIDs(paths []string) []string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = resolveByID(p)
+	}
+	return out
 }
 
 // ListImportablePools returns ZFS pools discoverable on local disks but not imported.
@@ -562,7 +632,8 @@ func AddVdev(poolName, vdevType string, disks []string) error {
 		}
 		args = append(args, vdevType)
 	}
-	args = append(args, disks...)
+	// Stable by-id paths (validation/zap above used the original device paths).
+	args = append(args, resolveByIDs(disks)...)
 
 	cmd := exec.Command("zpool", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -667,7 +738,9 @@ func ReplaceDisk(poolName, oldDisk, newDisk string) error {
 		return err
 	}
 
-	cmd := exec.Command("zpool", "replace", "-f", poolName, oldDisk, newDisk)
+	// The replacement device joins as a stable by-id path; oldDisk identifies
+	// the existing member (path or GUID) and is left as given.
+	cmd := exec.Command("zpool", "replace", "-f", poolName, oldDisk, resolveByID(newDisk))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("zpool replace: %s: %w", strings.TrimSpace(string(out)), err)
 	}
