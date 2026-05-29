@@ -129,7 +129,8 @@ type rankedPoolTarget struct {
 }
 
 // candidate captures the planner's view of one file: where it currently
-// lives, how big it is, and what the user's pin state says.
+// lives, how big it is, what the user's pin state says, and how hot the file
+// is based on its HeatCounter at scan time.
 type candidate struct {
 	rel     string
 	size    int64
@@ -137,6 +138,7 @@ type candidate struct {
 	curRank int
 	curTarg db.MdadmManagedTargetRow
 	pin     meta.PinState
+	heat    uint32 // HeatCounter from the meta store; higher = accessed more recently
 }
 
 // tierCapacity tracks usage bookkeeping during the planning pass: current
@@ -151,12 +153,14 @@ type tierCapacity struct {
 	target     db.MdadmManagedTargetRow
 }
 
-// admissionCap returns the effective cap this tier should enforce during
-// the current migration planning cycle. fullCap is the write/admission hard
-// cap, but migration drains back toward targetCap, using fullCap only as the
-// fallback when lower tiers cannot absorb a file at their own fill targets.
+// admissionCap returns the capacity ceiling this tier enforces during the
+// planning cycle. The design uses full_threshold_pct (fullCap) as the ceiling:
+// downward migration from a fast tier is only authorised when that tier is at
+// full%, and files pack into a tier up to full% before spilling to the next
+// slower tier. target_fill_pct is the equilibrium that a tier drains toward
+// when it is at full% — it is not a migration trigger.
 func (c *tierCapacity) admissionCap() int64 {
-	return c.targetCap
+	return c.fullCap
 }
 
 type fullFallbackOrder int
@@ -189,34 +193,46 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 			unpinned = append(unpinned, i)
 		}
 	}
-	sort.Slice(unpinned, func(i, j int) bool { return cands[unpinned[i]].size < cands[unpinned[j]].size })
+	// Primary sort: heat descending (hottest files compete first for the
+	// fastest tier). Secondary sort: size ascending (smaller files are
+	// preferred for fast tiers among files of equal heat). admitWithFallback
+	// starts every unpinned file at fastestRank and lets the sort order plus
+	// the full_threshold_pct ceiling determine final placement — hot/small
+	// files win NVME; cold/large files spill to HDD.
+	sort.Slice(unpinned, func(i, j int) bool {
+		ci, cj := cands[unpinned[i]], cands[unpinned[j]]
+		if ci.heat != cj.heat {
+			return ci.heat > cj.heat
+		}
+		return ci.size < cj.size
+	})
 	for _, idx := range unpinned {
-		c := cands[idx]
-		// Use idealRank (size-bucket preference) as the starting point so the
-		// bin-packer converges each file toward its natural tier regardless of
-		// where it currently lives. Small files prefer the fastest tier and can
-		// be promoted from HDD to NVME when NVME has capacity below
-		// target_fill_pct; large files prefer HDD and drain there when a faster
-		// tier is over its target. admitWithFallback respects the target and full
-		// thresholds, so no tier ever exceeds its configured caps.
-		assignments[idx] = admitWithFallback(caps, ranked, idealRank(c.pin, c.size, fastestRank, slowestRank), c.size)
+		assignments[idx] = admitWithFallback(caps, ranked, fastestRank, cands[idx].size)
 		assigned[idx] = true
 	}
 
 	return assignments, assigned
 }
 
-// planPoolPlacement gathers every file in a pool, runs a size-aware
-// bin-packing pass that fills each tier up to its target_fill_pct
-// before spilling to the next slower tier, and enqueues moves for any
-// file whose current tier differs from its packed destination.
+// planPoolPlacement gathers every file in a pool and runs a heat+size-aware
+// bin-packing pass that determines the ideal tier for each file, then executes
+// moves to converge the pool toward that distribution.
 //
-// Unpinned files are placed at their idealRank (size-bucket preference), so
-// the planner moves files both up and down: small files on slow tiers are
-// promoted to fast tiers when capacity allows, and large files on fast tiers
-// drain to slow tiers when the fast tier exceeds its target. Pinned files
-// force-place to fastest (PinHot) or slowest (PinCold).
-// If no eligible tier has room below target_fill, the packer falls through
+// Placement policy (canonical design):
+//   - Unpinned files are sorted hottest-first (HeatCounter DESC), then
+//     smallest-first among equal-heat files. The packer then assigns each file
+//     to the fastest tier with capacity below full_threshold_pct (full%),
+//     spilling to slower tiers as each fills. Hot files win fast-tier capacity;
+//     cold and large files naturally land on HDD.
+//   - UPWARD moves (slow→fast): always executed when the destination tier has
+//     room under full%.
+//   - DOWNWARD moves (fast→slow): only executed when the source tier was at or
+//     above full% at the start of the cycle. full% is the drain trigger;
+//     target_fill_pct (fill%) is the equilibrium the tier drains toward, not
+//     the trigger. A tier at fill% still has usable headroom; draining at fill%
+//     would evict data unnecessarily.
+//   - Pinned files force-place: PinHot → fastest tier, PinCold → slowest tier.
+// If no eligible tier has room below full_threshold, the packer falls through
 // to full_threshold as a hard cap from the bottom tier upward; files that
 // don't fit anywhere stay put.
 func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNamespaceRow) {
@@ -284,6 +300,14 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 		}
 	}
 
+	// Snapshot per-tier statfs usage before any candidate is subtracted. The
+	// downward-move guard uses this to determine whether each tier was at or
+	// above full_threshold_pct when the cycle started.
+	originalUsed := make(map[int]int64, len(caps))
+	for rank, c := range caps {
+		originalUsed[rank] = c.usedBytes
+	}
+
 	// Walk every tier and collect candidates. We'll sort+pack below.
 	now := time.Now()
 	var cands []candidate
@@ -329,6 +353,7 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 				curRank: rt.rank,
 				curTarg: rt.target,
 				pin:     rec.PinState,
+				heat:    rec.HeatCounter,
 			})
 			return nil
 		})
@@ -371,6 +396,16 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 			continue
 		}
 		want := assignments[idx]
+		// Downward moves (toward slower tiers) are only executed when the
+		// source tier was at or above full_threshold_pct at cycle start.
+		// full% is the drain trigger; target_fill_pct (fill%) is the
+		// equilibrium the tier drains toward, not the trigger itself.
+		// Draining at fill% would evict data from a tier that still has
+		// usable headroom between fill% and full%.
+		if want > c.curRank && originalUsed[c.curRank] < caps[c.curRank].fullCap {
+			skipped++
+			continue
+		}
 		planned++
 		dest := caps[want]
 		if dest == nil {
