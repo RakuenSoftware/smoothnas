@@ -97,12 +97,21 @@ func ensureDatasetProperties(ds string) error {
 	return nil
 }
 
+// zpoolImportSearchDir pins import device discovery to stable /dev/disk/by-id
+// symlinks. Kernel /dev/sdX names are assigned non-deterministically at boot,
+// so importing by sdX records vdev paths that break when disks are reordered
+// across a reboot — the pool comes back DEGRADED with "label missing or
+// invalid" members even though every disk is healthy and present. by-id paths
+// are stable per physical disk. This is the managed-tier import that runs on
+// every boot via resumeManagedSmoothfsPools.
+const zpoolImportSearchDir = "/dev/disk/by-id"
+
 func ensureZPoolImported(name string) error {
 	out, err := exec.Command("zpool", "list", "-H", "-o", "name", name).CombinedOutput()
 	if err == nil && strings.TrimSpace(string(out)) == name {
 		return nil
 	}
-	out, err = exec.Command("zpool", "import", "-f", name).CombinedOutput()
+	out, err = exec.Command("zpool", "import", "-d", zpoolImportSearchDir, "-f", name).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("zpool import %s: %s: %w", name, strings.TrimSpace(string(out)), err)
 	}

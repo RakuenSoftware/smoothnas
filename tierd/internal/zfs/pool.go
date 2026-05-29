@@ -161,9 +161,23 @@ func CreatePool(name, vdevType string, dataDisks, slogDisks, l2arcDisks []string
 	return nil
 }
 
+// zpoolImportSearchDir pins ZFS import device discovery to stable
+// /dev/disk/by-id symlinks instead of kernel /dev/sdX names. Kernel disk names
+// are assigned non-deterministically at boot, so importing by sdX records vdev
+// paths that point at the wrong disk after a reorder — surfacing as spurious
+// "label missing or invalid" FAULTED members on reboot. by-id paths are tied
+// to the physical disk and stable across reboots.
+const zpoolImportSearchDir = "/dev/disk/by-id"
+
+// importArgs builds the `zpool import` argument list for a named pool, pinned
+// to stable by-id device discovery.
+func importArgs(name string) []string {
+	return []string{"import", "-d", zpoolImportSearchDir, "-f", name}
+}
+
 // ListImportablePools returns ZFS pools discoverable on local disks but not imported.
 func ListImportablePools() ([]ImportablePool, error) {
-	out, err := exec.Command("zpool", "import").CombinedOutput()
+	out, err := exec.Command("zpool", "import", "-d", zpoolImportSearchDir).CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" || strings.Contains(msg, "no pools available") {
@@ -179,7 +193,7 @@ func ImportPool(name string) error {
 	if err := ValidatePoolName(name); err != nil {
 		return err
 	}
-	cmd := exec.Command("zpool", "import", "-f", name)
+	cmd := exec.Command("zpool", importArgs(name)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("zpool import %s: %s: %w", name, strings.TrimSpace(string(out)), err)
 	}
