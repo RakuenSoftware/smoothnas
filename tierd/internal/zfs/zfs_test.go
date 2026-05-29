@@ -1,6 +1,8 @@
 package zfs
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -628,6 +630,44 @@ func TestImportArgsPinsByID(t *testing.T) {
 	want := "import -d /dev/disk/by-id -f tank"
 	if got != want {
 		t.Fatalf("importArgs = %q, want %q (must pin by-id discovery)", got, want)
+	}
+}
+
+func TestResolveByIDPrefersStableAliasAndFallsBack(t *testing.T) {
+	idDir := t.TempDir()
+	devDir := t.TempDir()
+	sda := filepath.Join(devDir, "sda")
+	sda1 := filepath.Join(devDir, "sda1")
+	for _, p := range []string{sda, sda1} {
+		if err := os.WriteFile(p, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mksym := func(name, target string) {
+		if err := os.Symlink(target, filepath.Join(idDir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mksym("wwn-0x5000c500abcdef01", sda)
+	mksym("ata-ST18000NM000J_ZR50DM1K", sda)
+	mksym("ata-ST18000NM000J_ZR50DM1K-part1", sda1) // -part alias must be ignored
+
+	orig := diskByIDDir
+	diskByIDDir = idDir
+	t.Cleanup(func() { diskByIDDir = orig })
+
+	// Whole disk resolves to the serial-bearing ata- alias, not wwn-.
+	if got, want := resolveByID(sda), filepath.Join(idDir, "ata-ST18000NM000J_ZR50DM1K"); got != want {
+		t.Fatalf("resolveByID(sda) = %q, want %q", got, want)
+	}
+	// Only a -part alias exists for sda1 → excluded → original path returned.
+	if got := resolveByID(sda1); got != sda1 {
+		t.Fatalf("resolveByID(sda1) = %q, want original %q (part alias excluded)", got, sda1)
+	}
+	// Missing by-id dir → fall back to original, never fail.
+	diskByIDDir = filepath.Join(idDir, "does-not-exist")
+	if got := resolveByID(sda); got != sda {
+		t.Fatalf("resolveByID with missing dir = %q, want original %q", got, sda)
 	}
 }
 
