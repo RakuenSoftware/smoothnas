@@ -510,6 +510,33 @@ func ListBonds() ([]BondConfig, error) {
 	return ListBondsWithConfig(defaultNetworkDir)
 }
 
+// parseLinkNamesFromJSON decodes `ip -j link show ...` output and returns the
+// interface names, skipping empty entries.
+//
+// `ip -j link show type bond` (and `type vlan`) does not exclude non-matching
+// links on current iproute2 (observed on 6.15): instead of filtering, it emits
+// an empty object ({}) for every link that is not of the requested type. Those
+// decode to a zero-value entry with an empty Ifname. If we built a config for
+// each, the API would return phantom nameless bonds/VLANs — and the UI's
+// edit-IP flow would PUT to /api/network/bonds/ (empty name), which the router
+// treats as the collection endpoint and rejects with 405 Method Not Allowed.
+func parseLinkNamesFromJSON(out []byte) []string {
+	var raw []struct {
+		Ifname string `json:"ifname"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil
+	}
+	var names []string
+	for _, r := range raw {
+		if r.Ifname == "" {
+			continue
+		}
+		names = append(names, r.Ifname)
+	}
+	return names
+}
+
 // ListBondsWithConfig discovers bonds and overlays tierd-managed networkd settings.
 func ListBondsWithConfig(networkDir string) ([]BondConfig, error) {
 	out, err := exec.Command("ip", "-j", "link", "show", "type", "bond").Output()
@@ -517,19 +544,12 @@ func ListBondsWithConfig(networkDir string) ([]BondConfig, error) {
 		return nil, nil // No bonds or ip command doesn't support type filter.
 	}
 
-	var raw []struct {
-		Ifname string `json:"ifname"`
-	}
-	if err := json.Unmarshal(out, &raw); err != nil {
-		return nil, nil
-	}
-
 	var bonds []BondConfig
-	for _, r := range raw {
-		bond := BondConfig{Name: r.Ifname}
+	for _, name := range parseLinkNamesFromJSON(out) {
+		bond := BondConfig{Name: name}
 
 		// Get bond mode from sysfs.
-		modeOut, _ := exec.Command("cat", "/sys/class/net/"+r.Ifname+"/bonding/mode").Output()
+		modeOut, _ := exec.Command("cat", "/sys/class/net/"+name+"/bonding/mode").Output()
 		if mode := strings.TrimSpace(string(modeOut)); mode != "" {
 			// Mode is "balance-rr 0" format; take first field.
 			parts := strings.Fields(mode)
@@ -539,21 +559,21 @@ func ListBondsWithConfig(networkDir string) ([]BondConfig, error) {
 		}
 
 		// Get bond members from sysfs.
-		slavesOut, _ := exec.Command("cat", "/sys/class/net/"+r.Ifname+"/bonding/slaves").Output()
+		slavesOut, _ := exec.Command("cat", "/sys/class/net/"+name+"/bonding/slaves").Output()
 		if slaves := strings.TrimSpace(string(slavesOut)); slaves != "" {
 			bond.Members = strings.Fields(slaves)
 		}
 
 		// Get IP addresses.
-		ipv4, ipv6 := getAddresses(r.Ifname)
+		ipv4, ipv6 := getAddresses(name)
 		bond.IPv4Addrs = ipv4
 		bond.IPv6Addrs = ipv6
-		if settings, ok := readNetworkFileSettings(networkDir, r.Ifname); ok {
+		if settings, ok := readNetworkFileSettings(networkDir, name); ok {
 			bond.applySettings(settings)
 		}
 
 		// Get MTU.
-		mtuOut, _ := exec.Command("cat", "/sys/class/net/"+r.Ifname+"/mtu").Output()
+		mtuOut, _ := exec.Command("cat", "/sys/class/net/"+name+"/mtu").Output()
 		if mtu := strings.TrimSpace(string(mtuOut)); mtu != "" {
 			fmt.Sscanf(mtu, "%d", &bond.MTU)
 		}
@@ -610,6 +630,12 @@ func ListVLANsWithConfig(networkDir string) ([]VLANConfig, error) {
 
 	var vlans []VLANConfig
 	for _, r := range raw {
+		// See ListBondsWithConfig: `ip -j link show type vlan` emits an empty
+		// object for every non-VLAN link on current iproute2. Skip the empty
+		// ifnames so we don't return phantom nameless VLANs.
+		if r.Ifname == "" {
+			continue
+		}
 		vlan := VLANConfig{
 			Name:   r.Ifname,
 			Parent: r.Link,
