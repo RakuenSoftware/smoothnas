@@ -42,7 +42,7 @@ ZFS_ARTIFACT_DIR="${ZFS_ARTIFACT_DIR:-$SMOOTHKERNEL_DIR}"
 # initrd (which would bloat it past GRUB's heap limit).
 SMOOTHKERNEL_GITHUB_REPO="${SMOOTHKERNEL_GITHUB_REPO:-RakuenSoftware/smoothkernel}"
 SMOOTHFS_REPO_URL="${SMOOTHFS_REPO_URL:-git@github.com:RakuenSoftware/smoothfs.git}"
-SMOOTHFS_REPO_REF="${SMOOTHFS_REPO_REF:-82aa4365c56b0f79a525c2f0cf458d9a3c3311a0}"
+SMOOTHFS_REPO_REF="${SMOOTHFS_REPO_REF:-cfcc948d528bf693adbfbe2f3c360f7782b36ba0}"
 SMOOTHFS_SRC_DIR="${SMOOTHFS_SRC_DIR:-}"
 # Debian architecture for the produced ISO. SmoothKernel publishes per-arch
 # artifacts in a single GitHub release; pick the matching set here.
