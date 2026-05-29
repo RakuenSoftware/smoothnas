@@ -696,6 +696,13 @@ func formatRsyncError(waitErr error, stderr string) error {
 	return fmt.Errorf("rsync: %w: %s", waitErr, stderr)
 }
 
+// isStaleNFSErr reports whether err is a wrapped rsync failure due to an NFS
+// stale file handle on the source mount. The kernel ESTALE errno surfaces in
+// rsync stderr as the string "Stale file handle".
+func isStaleNFSErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Stale file handle")
+}
+
 func parseRsyncWriteFailedPath(stderr string) string {
 	const marker = "write failed on \""
 	idx := strings.Index(stderr, marker)
@@ -774,13 +781,6 @@ func rsyncMount(ctx context.Context, cfg Config, progress func(msg string, done,
 		return "", fmt.Errorf("destination %s has only %d MB free (< %d MB minimum); refusing to start", dst, free>>20, minDestFreeBytes>>20)
 	}
 
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	stopCancelUmount := forceUmountOnCancel(runCtx, mountDir)
-	defer stopCancelUmount()
-	reasonCh := make(chan string, 1)
-	go watchDestFree(runCtx, dst, cancel, reasonCh)
-
 	// Compression is intentionally ignored on the NFS/SMB mount path:
 	// rsync is copying between local paths, so it cannot compress kernel
 	// RPC traffic and can only add CPU overhead on LAN transfers.
@@ -794,37 +794,63 @@ func rsyncMount(ctx context.Context, cfg Config, progress func(msg string, done,
 		// in its --files-from set. Force single-stream when delete is on.
 		parallelism = 1
 	}
-	if parallelism > 1 {
-		summary, err := runParallelRsyncMount(runCtx, src, dst, parallelism, cfg.TargetType, progress)
-		if err != nil {
-			select {
-			case reason := <-reasonCh:
-				return "", fmt.Errorf("%s: %w", reason, err)
-			default:
-				return "", err
-			}
-		}
-		return summary, nil
-	}
 
-	args := rsyncMountArgs(dst)
-	if cfg.DeleteMode {
-		args = append(args, "--delete")
-	}
-	args = append(args, src, dst)
-	cmd := ioprioIdleCmd(runCtx, "rsync", args...)
-	// Mounted NFS/SMB backups copy between local paths. rsync cannot see kernel
-	// RPC wire bytes here, so progress reports logical payload throughput.
-	summary, err := runRsyncProcess(cmd, fmt.Sprintf("Running rsync over %s mount...", strings.ToUpper(cfg.TargetType)), cfg.Direction, false, progress)
-	if err != nil {
+	// rsyncMountAttempt runs one rsync pass. On NFS stale file handle the
+	// mount goes dead mid-transfer; we remount and retry once so a transient
+	// server hiccup (reboot, NFS re-export) doesn't abort an overnight backup.
+	const maxStaleRetries = 1
+	for attempt := 0; ; attempt++ {
+		runCtx, cancel := context.WithCancel(ctx)
+		stopCancelUmount := forceUmountOnCancel(runCtx, mountDir)
+		reasonCh := make(chan string, 1)
+		go watchDestFree(runCtx, dst, cancel, reasonCh)
+
+		var summary string
+		var rsyncErr error
+		if parallelism > 1 {
+			summary, rsyncErr = runParallelRsyncMount(runCtx, src, dst, parallelism, cfg.TargetType, progress)
+		} else {
+			args := rsyncMountArgs(dst)
+			if cfg.DeleteMode {
+				args = append(args, "--delete")
+			}
+			args = append(args, src, dst)
+			cmd := ioprioIdleCmd(runCtx, "rsync", args...)
+			// Mounted NFS/SMB backups copy between local paths. rsync cannot see
+			// kernel RPC wire bytes here, so progress reports logical throughput.
+			summary, rsyncErr = runRsyncProcess(cmd, fmt.Sprintf("Running rsync over %s mount...", strings.ToUpper(cfg.TargetType)), cfg.Direction, false, progress)
+		}
+
+		// Stop the force-umount hook before cancelling the context; normal
+		// completion must not trigger a forced unmount of the backing mount.
+		stopCancelUmount()
+		cancel()
+
+		if rsyncErr == nil {
+			return summary, nil
+		}
+
+		// Stale file handle means the NFS server lost our connection (reboot,
+		// re-export). Force-unmount the stale mount, remount, and retry once
+		// so a transient server event doesn't abort an overnight backup.
+		if attempt < maxStaleRetries && isStaleNFSErr(rsyncErr) {
+			log.Printf("backup: NFS source mount went stale (attempt %d/%d): forcing unmount and remounting %s:%s",
+				attempt+1, maxStaleRetries+1, cfg.Host, cfg.Share)
+			progress(fmt.Sprintf("NFS source went stale; remounting %s:%s and retrying...", cfg.Host, cfg.Share), -1, -1)
+			_ = forceUmountFn(mountDir)
+			if remountErr := mount(cfg, mountDir); remountErr != nil {
+				return "", fmt.Errorf("remount after stale NFS (%w): %w", rsyncErr, remountErr)
+			}
+			continue
+		}
+
 		select {
 		case reason := <-reasonCh:
-			return "", fmt.Errorf("%s: %w", reason, err)
+			return "", fmt.Errorf("%s: %w", reason, rsyncErr)
 		default:
-			return "", err
+			return "", rsyncErr
 		}
 	}
-	return summary, nil
 }
 
 // runParallelRsyncMount enumerates the source tree into rsync-friendly

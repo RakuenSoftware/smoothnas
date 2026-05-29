@@ -421,6 +421,27 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 	// Meta records always live on the same tier as their data file, so
 	// no separate meta-eviction step is needed; moveForPlacement updates
 	// the meta as part of every successful data move.
+
+	if moved > 0 {
+		// smoothfs (the stacked VFS layer) holds a path_get() reference to
+		// each lower-tier inode in its in-memory smoothfs_inode_info.lower_path.
+		// When moveForPlacement unlinks the source copy from the backing
+		// directory directly (bypassing smoothfs), the XFS directory entry is
+		// removed but the smoothfs VFS inode keeps the lower_path alive.
+		// smoothfs_evict_inode only runs when the inode's VFS refcount hits
+		// zero — which requires the kernel to drop it from the dentry/inode
+		// cache. On a NAS with ample RAM that cache pressure never happens
+		// organically, so unlinked NVME inodes accumulate indefinitely and
+		// the XFS filesystem reports phantom "used" space for the freed blocks.
+		//
+		// Writing 2 to drop_caches evicts all dentries and inodes from VFS
+		// cache (without dropping page cache data). Smoothfs evicts its
+		// in-memory inodes, path_put() releases each lower_path, and XFS
+		// finally frees the zombie blocks. The cost is a brief cold-cache
+		// warmup for the next metadata access; file data in page cache is
+		// unaffected.
+		dropVMCachesForInodes()
+	}
 }
 
 func placementExcludedDir(root, path, name string) bool {
@@ -870,6 +891,24 @@ func installPlacementCopy(tmpPath, dstPath string) error {
 
 // copyFileContents opens src for read and dst for exclusive create-write,
 // streams the bytes, and closes both.
+// dropVMCachesForInodes writes 2 to /proc/sys/vm/drop_caches, which evicts
+// all dentries and inodes from the VFS cache without touching page cache data.
+// This triggers smoothfs_evict_inode() on any smoothfs VFS inodes that are no
+// longer referenced, which in turn calls path_put(&si->lower_path) to release
+// the lower (NVME/SSD XFS) inode references that smoothfs holds.
+//
+// Without this call, the lower XFS inodes for files that tierd has migrated
+// remain "alive" in the VFS because smoothfs holds a path_get() reference to
+// them even after their directory entry has been unlinked. On systems with
+// ample RAM where the VFS cache never comes under memory pressure, these zombie
+// inodes accumulate and the XFS filesystem reports their blocks as "used",
+// which makes the tier appear full and blocks new writes to the fast tier.
+var dropVMCachesForInodes = func() {
+	if err := os.WriteFile("/proc/sys/vm/drop_caches", []byte("2"), 0); err != nil {
+		log.Printf("placement: drop_caches for inode eviction: %v", err)
+	}
+}
+
 func copyFileContents(src, dst string, mode os.FileMode) error {
 	sf, err := os.Open(src)
 	if err != nil {
