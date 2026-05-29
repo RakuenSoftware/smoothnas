@@ -7,7 +7,6 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"math/bits"
 	"os"
 	"path/filepath"
 	"sort"
@@ -130,7 +129,7 @@ type rankedPoolTarget struct {
 }
 
 // candidate captures the planner's view of one file: where it currently
-// lives, how big it is, how hot it is, and what the user's pin state says.
+// lives, how big it is, and what the user's pin state says.
 type candidate struct {
 	rel     string
 	size    int64
@@ -138,7 +137,6 @@ type candidate struct {
 	curRank int
 	curTarg db.MdadmManagedTargetRow
 	pin     meta.PinState
-	heat    uint32 // HeatCounter from the meta record; 0 = cold
 }
 
 // tierCapacity tracks usage bookkeeping during the planning pass: current
@@ -153,13 +151,12 @@ type tierCapacity struct {
 	target     db.MdadmManagedTargetRow
 }
 
-// admissionCap returns the threshold at which this tier is considered full
-// and files must go to a slower tier. A file goes down only when placing it
-// here would exceed full_threshold_pct — not target_fill_pct. target_fill_pct
-// is the long-term equilibrium reached as files cool over many migration
-// cycles; it is not enforced per-cycle.
+// admissionCap returns the effective cap this tier should enforce during
+// the current migration planning cycle. fullCap is the write/admission hard
+// cap, but migration drains back toward targetCap, using fullCap only as the
+// fallback when lower tiers cannot absorb a file at their own fill targets.
 func (c *tierCapacity) admissionCap() int64 {
-	return c.fullCap
+	return c.targetCap
 }
 
 type fullFallbackOrder int
@@ -185,39 +182,24 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 		}
 	}
 
-	// Pass 2: unpinned files, hottest-first then smallest-first.
-	//
-	// Admission always starts at the fastest rank and walks toward slower
-	// tiers. A file spills to a slower tier only when the faster tier would
-	// exceed full_threshold_pct (full%) — full% is the hard ceiling, the
-	// same "maximum write size" rule the smoothfs write path uses. A tier is
-	// not considered full at target_fill_pct; that is the migration target a
-	// tier drains toward over time as files cool, not a per-cycle spill cap.
-	//
-	// Ordering by heat descending ensures the hottest files claim fast-tier
-	// capacity first. As files cool (HeatCounter decays hourly) the coldest
-	// content sorts last and is the first to be demoted on later cycles, so
-	// a tier that a burst write pushed up to full% drains back toward fill%
-	// as that written data goes cold.
-	//
-	// Size is the secondary sort key: within equal heat, smaller files get
-	// preference for fast tiers so large files don't crowd out small ones.
+	// Pass 2: unpinned, smallest-first fills from the top.
 	var unpinned []int
 	for i, c := range cands {
 		if c.pin == meta.PinNone && !assigned[i] {
 			unpinned = append(unpinned, i)
 		}
 	}
-	sort.SliceStable(unpinned, func(i, j int) bool {
-		ci, cj := cands[unpinned[i]], cands[unpinned[j]]
-		if ci.heat != cj.heat {
-			return ci.heat > cj.heat // hottest first
-		}
-		return ci.size < cj.size // smallest within equal heat
-	})
+	sort.Slice(unpinned, func(i, j int) bool { return cands[unpinned[i]].size < cands[unpinned[j]].size })
 	for _, idx := range unpinned {
 		c := cands[idx]
-		assignments[idx] = admitWithFallback(caps, ranked, fastestRank, c.size)
+		// Use idealRank (size-bucket preference) as the starting point so the
+		// bin-packer converges each file toward its natural tier regardless of
+		// where it currently lives. Small files prefer the fastest tier and can
+		// be promoted from HDD to NVME when NVME has capacity below
+		// target_fill_pct; large files prefer HDD and drain there when a faster
+		// tier is over its target. admitWithFallback respects the target and full
+		// thresholds, so no tier ever exceeds its configured caps.
+		assignments[idx] = admitWithFallback(caps, ranked, idealRank(c.pin, c.size, fastestRank, slowestRank), c.size)
 		assigned[idx] = true
 	}
 
@@ -229,9 +211,11 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 // before spilling to the next slower tier, and enqueues moves for any
 // file whose current tier differs from its packed destination.
 //
-// Unpinned files use their current tier as the preferred starting point,
-// so they can only drain to slower tiers — never be promoted to faster
-// ones. Pinned files force-place to fastest (PinHot) or slowest (PinCold).
+// Unpinned files are placed at their idealRank (size-bucket preference), so
+// the planner moves files both up and down: small files on slow tiers are
+// promoted to fast tiers when capacity allows, and large files on fast tiers
+// drain to slow tiers when the fast tier exceeds its target. Pinned files
+// force-place to fastest (PinHot) or slowest (PinCold).
 // If no eligible tier has room below target_fill, the packer falls through
 // to full_threshold as a hard cap from the bottom tier upward; files that
 // don't fit anywhere stay put.
@@ -345,7 +329,6 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 				curRank: rt.rank,
 				curTarg: rt.target,
 				pin:     rec.PinState,
-				heat:    rec.HeatCounter,
 			})
 			return nil
 		})
@@ -572,28 +555,26 @@ func backingDevicesStandbyBlocked(devices []string) (bool, string) {
 	return false, ""
 }
 
-// admitWithFallback places a file on the fastest tier at or slower than
-// preferredRank that can absorb size without exceeding full_threshold_pct
-// (full%). full% is the hard ceiling — the "maximum write size" rule shared
-// with the smoothfs write path. A file only descends to a slower tier when
-// every faster eligible tier is already at full%.
+// admitWithFallback finds an eligible tier at or slower than preferredRank
+// whose remaining budget (cap - usedBytes) can absorb size. Two passes:
 //
-// target_fill_pct (fill%) is deliberately NOT consulted here. fill% is the
-// migration *equilibrium* a tier drains toward over many cycles as files
-// cool — not a per-placement spill threshold. Spilling at fill% would dump
-// data onto the slowest tier while faster tiers still had usable headroom.
+//	Pass A — each tier's target_fill_pct is honoured so migration drains
+//	  excess data down to slower tiers.
+//	Pass B — fall back to full_threshold_pct from the slowest eligible tier
+//	  upward. full_threshold_pct is a hard ceiling; target_fill_pct is the
+//	  migration target for every tier above the bottom tier.
 //
 // Returns the rank of the tier that accepted the file, or the preferred
-// rank if no tier had room (the caller then leaves the file where it is).
+// rank if no admission succeeded (in which case the caller just leaves
+// the file where it is — assignments[] becomes a no-op compared to its
+// current rank).
 func admitWithFallback(caps map[int]*tierCapacity, ranked []rankedPoolTarget, preferredRank int, size int64) int {
 	return admitWithFallbackOrder(caps, ranked, preferredRank, size, fullFallbackSlowestFirst)
 }
 
-// admitWithFallbackOrder is admitWithFallback. The order parameter is retained
-// only for call-site readability at the pinned-hot/pinned-cold sites; both
-// orders now resolve to the same single fastest-fitting-under-full% scan,
-// since full% is the only admission ceiling.
-func admitWithFallbackOrder(caps map[int]*tierCapacity, ranked []rankedPoolTarget, preferredRank int, size int64, _ fullFallbackOrder) int {
+func admitWithFallbackOrder(caps map[int]*tierCapacity, ranked []rankedPoolTarget, preferredRank int, size int64, order fullFallbackOrder) int {
+	// Pass A: honour each tier's fill target. "Preferred" is usually fastest,
+	// so the scan walks ranks ascending (fastest → slowest) from there.
 	for _, rt := range ranked {
 		if rt.rank < preferredRank {
 			continue
@@ -607,7 +588,38 @@ func admitWithFallbackOrder(caps map[int]*tierCapacity, ranked []rankedPoolTarge
 			return rt.rank
 		}
 	}
+	// Pass B: admission cap exceeded everywhere from preferred downward.
+	// Accept at full_threshold so we don't strand the file, but for normal
+	// migration try lower tiers first so upper tiers drain toward target_fill.
+	if order == fullFallbackFastestFirst {
+		for _, rt := range ranked {
+			if r, ok := admitAtFullCap(caps, rt, preferredRank, size); ok {
+				return r
+			}
+		}
+	} else {
+		for i := len(ranked) - 1; i >= 0; i-- {
+			if r, ok := admitAtFullCap(caps, ranked[i], preferredRank, size); ok {
+				return r
+			}
+		}
+	}
 	return preferredRank
+}
+
+func admitAtFullCap(caps map[int]*tierCapacity, rt rankedPoolTarget, preferredRank int, size int64) (int, bool) {
+	if rt.rank < preferredRank {
+		return 0, false
+	}
+	c := caps[rt.rank]
+	if c == nil {
+		return 0, false
+	}
+	if c.usedBytes+size <= c.fullCap {
+		c.usedBytes += size
+		return rt.rank, true
+	}
+	return 0, false
 }
 
 func max1(x, floor int) int {
@@ -651,66 +663,18 @@ func sizeBucketRank(sizeBytes int64, fastestRank, slowestRank int) int {
 	return r
 }
 
-// heatBucketRank maps a heat counter to a target tier rank using a log2
-// scale: each doubling of the counter moves the file one tier toward the
-// fastest tier. HeatCounter is halved each hour, so the mapping naturally
-// tracks recency — a file that was hot but has gone untouched for several
-// hours will cool tier-by-tier back toward the slowest tier.
-//
-//	heat == 0            → slowestRank  (cold: demote to slowest)
-//	heat == 1            → slowestRank-1 (any recent access: one tier up)
-//	heat in [2,3]        → slowestRank-2
-//	heat in [4,7]        → slowestRank-3
-//	...
-//	heat >= 2^(numTiers-2) → fastestRank
-func heatBucketRank(heatCounter uint32, fastestRank, slowestRank int) int {
-	if heatCounter == 0 {
-		return slowestRank
-	}
-	numTiers := slowestRank - fastestRank
-	if numTiers <= 0 {
-		return fastestRank
-	}
-	// floor(log2(heatCounter)); each doubling = one tier toward fastest.
-	steps := int(bits.Len32(heatCounter)) - 1
-	r := slowestRank - 1 - steps // heat=1 → one above slowest
-	if r < fastestRank {
-		r = fastestRank
-	}
-	return r
-}
-
-// idealRank returns the tier a file "ideally" wants to live on, for use
-// in UI hints and telemetry. It is NOT used in the placement admission
-// path — admission always starts from the fastest rank and the candidate
-// sort order (hottest first, smallest-within-heat) determines what ends
-// up on each tier.
-//
-// Heat is primary: hot files target faster tiers, cold files target the
-// slowest. Size nudges one tier slower for larger files within the same
-// heat level. Pin overrides both: PinHot → fastestRank, PinCold → slowestRank.
-func idealRank(pin meta.PinState, heatCounter uint32, sizeBytes int64, fastestRank, slowestRank int) int {
+// idealRank is a pure size+pin view of where a file "wants" to live,
+// absent capacity pressure. The planner consults it to seed the sort
+// order and to display UI hints. Final placement comes from
+// admitWithFallback which considers target_fill and full_threshold.
+func idealRank(pin meta.PinState, sizeBytes int64, fastestRank, slowestRank int) int {
 	switch pin {
 	case meta.PinHot:
 		return fastestRank
 	case meta.PinCold:
 		return slowestRank
 	}
-	if heatCounter == 0 {
-		// Cold: demote to slowest regardless of size.
-		return slowestRank
-	}
-	// Heat is primary: map log2(heat) to a tier rank.
-	target := heatBucketRank(heatCounter, fastestRank, slowestRank)
-	// Size is secondary: if the size bucket would prefer a slower tier
-	// than heat demands, nudge one tier in that direction.
-	if sizeBucketRank(sizeBytes, fastestRank, slowestRank) > target {
-		target++
-		if target > slowestRank {
-			target = slowestRank
-		}
-	}
-	return target
+	return sizeBucketRank(sizeBytes, fastestRank, slowestRank)
 }
 
 // poolRankedTargets returns the pool's tier backings sorted by rank
@@ -815,6 +779,12 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 	if err != nil {
 		return fmt.Errorf("stat src: %w", err)
 	}
+
+	// Remove any temp file left by an interrupted previous move. copyFileContents
+	// uses O_EXCL so it will fail with EEXIST if the temp already exists; the
+	// stale file is worthless (the copy never completed) so just clear it now
+	// rather than waiting for the next cycle's error-path removal.
+	_ = os.Remove(tmpPath)
 	srcSt, _ := srcInfo.Sys().(*syscall.Stat_t)
 
 	// Read the source-tier meta record now (before any disk mutation) so
