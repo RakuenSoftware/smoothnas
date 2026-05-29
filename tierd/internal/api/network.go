@@ -363,7 +363,13 @@ func (h *NetworkHandler) breakBond(w http.ResponseWriter, _ *http.Request, name 
 	}
 
 	err = h.safeApply.Apply("Break bond "+name, func() error {
-		return network.BreakBond(h.networkDir, name, members)
+		if err := network.BreakBond(h.networkDir, name, members); err != nil {
+			return err
+		}
+		// Removing the .netdev config does not delete the in-kernel bond
+		// device; without this the empty bond lingers and the UI keeps
+		// showing it, so Break Bond appears to do nothing.
+		return network.DeleteRuntimeBond(name)
 	})
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusConflict)
@@ -508,7 +514,9 @@ func (h *NetworkHandler) deleteBond(w http.ResponseWriter, r *http.Request, name
 		// Remove the bond's .netdev and .network files.
 		network.RemoveConfigFiles(h.networkDir, "05-"+name+".")
 		network.RemoveConfigFiles(h.networkDir, "10-"+name+".")
-		return nil
+		// Config removal alone leaves the in-kernel bond device behind;
+		// delete it so the bond actually disappears.
+		return network.DeleteRuntimeBond(name)
 	})
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusConflict)
