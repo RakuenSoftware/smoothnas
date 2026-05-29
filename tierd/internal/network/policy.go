@@ -11,7 +11,7 @@ import (
 // Default-bond policy (Phase 8 of the multi-NIC proposal).
 //
 // On a fresh install with no recorded network config, tierd materialises
-// a bond0 across every physical Ethernet NIC in balance-alb mode, DHCPed.
+// a bond0 across every physical Ethernet NIC in active-backup mode, DHCPed.
 // The bond's catch-all member file uses a wildcard [Match] so a
 // previously-unconnected NIC plugged in later joins the bond
 // automatically (one miimon cycle).
@@ -26,9 +26,18 @@ const (
 	DefaultBondName = "bond0"
 
 	// DefaultBondMode is the bond mode used for the default policy.
-	// balance-alb gives one shared IP, per-peer ARP load balancing
-	// across NICs, no switch config required.
-	DefaultBondMode = "balance-alb"
+	//
+	// active-backup: exactly one member carries traffic at a time, the
+	// rest are hot standby. No switch configuration required, and—unlike
+	// balance-alb—reachability does not depend on every member having
+	// carrier. balance-alb (mode 6) does per-peer receive-load-balancing by
+	// handing different peers the MAC of different slaves via ARP; when only
+	// one member has link (common on an appliance where not all NICs are
+	// cabled), peers assigned a down member's MAC cannot reach the box at
+	// all. active-backup fails over to whichever single member is up and is
+	// reachable from every peer, which is the right default for hardware we
+	// don't control the cabling of.
+	DefaultBondMode = "active-backup"
 
 	// NetworkBootstrapCompleteKey is the config-store key used to
 	// mark that the default-bond policy has been applied. The value
@@ -131,7 +140,7 @@ func EnumeratePhysicalEthernet(sysRoot string) ([]string, error) {
 }
 
 // DefaultBondPolicy returns the canonical default bond config: bond0
-// over the given members in balance-alb mode, DHCPed for IPv4. The
+// over the given members in active-backup mode, DHCPed for IPv4. The
 // members list is purely informational at this layer — the
 // systemd-networkd member file uses a wildcard match so future NICs
 // auto-join the bond without an operator action.
@@ -368,7 +377,7 @@ func stripCIDR(cidr string) string {
 }
 
 // RecreateDefaultBond rebuilds the appliance default: a single
-// `bond0` over every physical Ethernet NIC in `balance-alb` mode,
+// `bond0` over every physical Ethernet NIC in `active-backup` mode,
 // DHCPed. Drops every per-NIC `.network` file the operator might
 // have set after Break Bond (we can't tell operator-set from
 // auto-generated, so the explicit Re-create gesture is destructive

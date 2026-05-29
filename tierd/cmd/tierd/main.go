@@ -115,7 +115,7 @@ func main() {
 	}
 
 	// First-boot default-bond policy: a fresh appliance gets bond0
-	// over every physical Ethernet NIC in balance-alb mode, DHCPed.
+	// over every physical Ethernet NIC in active-backup mode, DHCPed.
 	// Once the bootstrap marker is set, this is a no-op so an
 	// operator's Break Bond / static-IP intent survives restarts.
 	if err := network.ApplyDefaultBondPolicy(store, defaultNetworkDir, defaultSysClassNet); err != nil {
