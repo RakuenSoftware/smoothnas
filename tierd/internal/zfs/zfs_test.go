@@ -621,6 +621,16 @@ func assertArgs(t *testing.T, got, expected []string) {
 	}
 }
 
+// TestImportArgsPinsByID guards the root-cause fix: imports must search
+// /dev/disk/by-id so reboots can't fault healthy members via /dev/sdX reorder.
+func TestImportArgsPinsByID(t *testing.T) {
+	got := strings.Join(importArgs("tank"), " ")
+	want := "import -d /dev/disk/by-id -f tank"
+	if got != want {
+		t.Fatalf("importArgs = %q, want %q (must pin by-id discovery)", got, want)
+	}
+}
+
 func containsStr(s, substr string) bool {
 	return len(s) >= len(substr) && searchStr(s, substr)
 }
