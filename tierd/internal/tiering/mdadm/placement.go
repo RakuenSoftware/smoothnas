@@ -153,14 +153,17 @@ type tierCapacity struct {
 	target     db.MdadmManagedTargetRow
 }
 
-// admissionCap returns the capacity ceiling this tier enforces during the
-// planning cycle. The design uses full_threshold_pct (fullCap) as the ceiling:
-// downward migration from a fast tier is only authorised when that tier is at
-// full%, and files pack into a tier up to full% before spilling to the next
-// slower tier. target_fill_pct is the equilibrium that a tier drains toward
-// when it is at full% — it is not a migration trigger.
+// admissionCap returns the capacity ceiling the migration planner packs each
+// tier to. The planner's target is target_fill_pct (fill%): it packs files
+// into a tier up to fill%, assigning anything beyond to a slower tier, so every
+// tier converges toward fill% as files shift both up and down.
+//
+// full_threshold_pct (full%) is NOT used here. full% is the smoothfs write cap:
+// the write path admits new writes to a tier until it reaches full%, then
+// spills to the next tier. That is a separate mechanism in the smoothfs kernel
+// module — the migration planner only ever targets fill%.
 func (c *tierCapacity) admissionCap() int64 {
-	return c.fullCap
+	return c.targetCap
 }
 
 type fullFallbackOrder int
@@ -196,9 +199,9 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 	// Primary sort: heat descending (hottest files compete first for the
 	// fastest tier). Secondary sort: size ascending (smaller files are
 	// preferred for fast tiers among files of equal heat). admitWithFallback
-	// starts every unpinned file at fastestRank and lets the sort order plus
-	// the full_threshold_pct ceiling determine final placement — hot/small
-	// files win NVME; cold/large files spill to HDD.
+	// starts every unpinned file at fastestRank and packs each tier to its
+	// target_fill_pct (fill%) ceiling — hot/small files win NVME; once a tier
+	// reaches fill%, colder/larger files spill to the next slower tier.
 	sort.Slice(unpinned, func(i, j int) bool {
 		ci, cj := cands[unpinned[i]], cands[unpinned[j]]
 		if ci.heat != cj.heat {
@@ -220,19 +223,18 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 //
 // Placement policy (canonical design):
 //   - Unpinned files are sorted hottest-first (HeatCounter DESC), then
-//     smallest-first among equal-heat files. The packer then assigns each file
-//     to the fastest tier with capacity below full_threshold_pct (full%),
-//     spilling to slower tiers as each fills. Hot files win fast-tier capacity;
-//     cold and large files naturally land on HDD.
-//   - UPWARD moves (slow→fast): always executed when the destination tier has
-//     room under full%.
-//   - DOWNWARD moves (fast→slow): only executed when the source tier was at or
-//     above full% at the start of the cycle. full% is the drain trigger;
-//     target_fill_pct (fill%) is the equilibrium the tier drains toward, not
-//     the trigger. A tier at fill% still has usable headroom; draining at fill%
-//     would evict data unnecessarily.
+//     smallest-first among equal-heat files. The packer assigns each file to
+//     the fastest tier with capacity below target_fill_pct (fill%), spilling
+//     to slower tiers as each fills. Hot files win fast-tier capacity first;
+//     cold/large files naturally fall to HDD.
+//   - fill% (target_fill_pct) is the migration target in both directions.
+//     A tier over fill% drains cold/large files toward slower tiers; a tier
+//     below fill% pulls hot files up from slower tiers. The bottom tier is the
+//     exception — it has nowhere slower to drain to, so it absorbs whatever
+//     does not fit above it (filling past fill% via the Pass B full% fallback).
+//     full% itself is not a planner concept; it is the smoothfs write cap.
 //   - Pinned files force-place: PinHot → fastest tier, PinCold → slowest tier.
-// If no eligible tier has room below full_threshold, the packer falls through
+// If no eligible tier has room below target_fill, the packer falls through
 // to full_threshold as a hard cap from the bottom tier upward; files that
 // don't fit anywhere stay put.
 func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNamespaceRow) {
@@ -298,14 +300,6 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 			fullCap:    total * int64(max1(rt.fullThresholdPct, 95)) / 100,
 			target:     rt.target,
 		}
-	}
-
-	// Snapshot per-tier statfs usage before any candidate is subtracted. The
-	// downward-move guard uses this to determine whether each tier was at or
-	// above full_threshold_pct when the cycle started.
-	originalUsed := make(map[int]int64, len(caps))
-	for rank, c := range caps {
-		originalUsed[rank] = c.usedBytes
 	}
 
 	// Walk every tier and collect candidates. We'll sort+pack below.
@@ -396,16 +390,6 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 			continue
 		}
 		want := assignments[idx]
-		// Downward moves (toward slower tiers) are only executed when the
-		// source tier was at or above full_threshold_pct at cycle start.
-		// full% is the drain trigger; target_fill_pct (fill%) is the
-		// equilibrium the tier drains toward, not the trigger itself.
-		// Draining at fill% would evict data from a tier that still has
-		// usable headroom between fill% and full%.
-		if want > c.curRank && originalUsed[c.curRank] < caps[c.curRank].fullCap {
-			skipped++
-			continue
-		}
 		planned++
 		dest := caps[want]
 		if dest == nil {
