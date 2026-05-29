@@ -40,9 +40,8 @@ type Options struct {
 
 var shareNameRegex = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,63}$`)
 
-const smbConfigPath = "/etc/samba/smb.conf"
-
 var (
+	smbConfigPath       = "/etc/samba/smb.conf"
 	smbdMountDropInPath = "/etc/systemd/system/smbd.service.d/10-smoothnas-shares.conf"
 	smbSystemctl        = func(args ...string) error {
 		cmd := exec.Command("systemctl", args...)
@@ -51,6 +50,17 @@ var (
 			return fmt.Errorf("systemctl %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 		}
 		return nil
+	}
+	smbControl = func(args ...string) error {
+		cmd := exec.Command("smbcontrol", args...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("smbcontrol %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
+		}
+		return nil
+	}
+	smbIsEnabled = func() bool {
+		return exec.Command("systemctl", "is-active", "--quiet", "smbd").Run() == nil
 	}
 )
 
@@ -260,6 +270,7 @@ func WriteConfigWithOptions(shares []Share, hostname string, opts Options) error
 		return fmt.Errorf("read smb.conf: %w", err)
 	}
 	sharesToClose := sharesRequiringDisconnect(string(oldConfig), config)
+	rebind := globalInterfaceBinding(string(oldConfig)) != globalInterfaceBinding(config)
 
 	if err := os.MkdirAll(filepath.Dir(smbConfigPath), 0755); err != nil {
 		return fmt.Errorf("create samba dir: %w", err)
@@ -275,6 +286,17 @@ func WriteConfigWithOptions(shares []Share, hostname string, opts Options) error
 	if !IsEnabled() {
 		return nil
 	}
+	// smbd only opens its listening sockets at startup. When the
+	// `interfaces`/`bind interfaces only` binding changes — e.g. the bond's
+	// IP moved and ListActiveIPv4() now reports a different address — a
+	// `smbcontrol reload-config` re-reads shares and parameters but does NOT
+	// rebind the sockets, leaving smbd listening on the stale address and
+	// unreachable from the network. A full restart is the only way to rebind.
+	if rebind {
+		// The restart drops every existing connection and re-opens sockets on
+		// the new address set, so the per-share disconnect below is moot.
+		return Restart()
+	}
 	if err := Reload(); err != nil {
 		return err
 	}
@@ -286,22 +308,28 @@ func WriteConfigWithOptions(shares []Share, hostname string, opts Options) error
 	return nil
 }
 
-// Reload tells Samba to re-read its configuration.
+// Reload tells Samba to re-read its configuration. Note this re-reads shares
+// and parameters but does NOT rebind smbd's listening sockets; a change to the
+// `interfaces` binding requires Restart instead.
 func Reload() error {
-	cmd := exec.Command("smbcontrol", "all", "reload-config")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("smbcontrol reload: %s: %w", strings.TrimSpace(string(out)), err)
+	return smbControl("all", "reload-config")
+}
+
+// Restart fully restarts smbd and nmbd. Required (over Reload) whenever the
+// socket binding changes — smbd opens its listening sockets only at startup,
+// so a stale `interfaces` address is only corrected by a restart.
+func Restart() error {
+	for _, svc := range []string{"smbd", "nmbd"} {
+		if err := smbSystemctl("restart", svc); err != nil {
+			return fmt.Errorf("restart %s: %w", svc, err)
+		}
 	}
 	return nil
 }
 
 // CloseShare forcibly disconnects active clients from a single Samba share.
 func CloseShare(name string) error {
-	cmd := exec.Command("smbcontrol", "smbd", "close-share", name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("smbcontrol close-share %s: %s: %w", name, strings.TrimSpace(string(out)), err)
-	}
-	return nil
+	return smbControl("smbd", "close-share", name)
 }
 
 func sharesRequiringDisconnect(oldConfig, newConfig string) []string {
@@ -394,5 +422,39 @@ func DisableService() error {
 
 // IsEnabled checks if smbd is active.
 func IsEnabled() bool {
-	return exec.Command("systemctl", "is-active", "--quiet", "smbd").Run() == nil
+	return smbIsEnabled()
+}
+
+// globalInterfaceBinding extracts the socket-binding directives (`interfaces`
+// and `bind interfaces only`) from a config's [global] section, normalized for
+// comparison. A change here means smbd must be restarted rather than reloaded,
+// because reload-config does not rebind listening sockets.
+func globalInterfaceBinding(config string) string {
+	section := ""
+	var parts []string
+	for _, line := range strings.Split(config, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			if end := strings.Index(line, "]"); end > 0 {
+				section = strings.TrimSpace(line[1:end])
+			}
+			continue
+		}
+		if !strings.EqualFold(section, "global") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "interfaces", "bind interfaces only":
+			parts = append(parts, strings.ToLower(strings.TrimSpace(key))+"="+strings.Join(strings.Fields(value), " "))
+		}
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ";")
 }
