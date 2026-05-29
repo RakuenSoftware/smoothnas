@@ -190,6 +190,28 @@ func TestIoprioIdleCmdWrapsRsync(t *testing.T) {
 	}
 }
 
+func TestIsStaleNFSErrDetectsRealESTALE(t *testing.T) {
+	// Matches the exact error string from the production failure log.
+	realErr := fmt.Errorf(`rsync: exit status 23: rsync: [sender] readlink_stat("/tmp/smoothnas-backup-2656157107/music/Song.flac") failed: Stale file handle (116)`)
+	if !isStaleNFSErr(realErr) {
+		t.Errorf("expected stale NFS detection for: %v", realErr)
+	}
+}
+
+func TestIsStaleNFSErrIgnoresOtherErrors(t *testing.T) {
+	cases := []error{
+		nil,
+		fmt.Errorf("rsync: exit status 1"),
+		fmt.Errorf("connection refused"),
+		fmt.Errorf("No space left on device"),
+	}
+	for _, err := range cases {
+		if isStaleNFSErr(err) {
+			t.Errorf("false positive stale NFS detection for: %v", err)
+		}
+	}
+}
+
 func containsArg(args []string, want string) bool {
 	for _, arg := range args {
 		if arg == want {
