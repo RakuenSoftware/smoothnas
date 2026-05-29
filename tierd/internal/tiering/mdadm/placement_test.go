@@ -54,83 +54,21 @@ func TestSizeBucketRank(t *testing.T) {
 	}
 }
 
-func TestIdealRankPinOverridesHeatAndSize(t *testing.T) {
-	// PinHot → fastest regardless of heat or size.
-	if got := idealRank(meta.PinHot, 0, 10<<30, 1, 3); got != 1 {
-		t.Errorf("PinHot cold 10GB: got %d, want 1", got)
+func TestIdealRank_PinOverridesSize(t *testing.T) {
+	// Large file (would otherwise go to slowest tier) pinned hot → fastest.
+	got := idealRank(meta.PinHot, 10<<30, 1, 3)
+	if got != 1 {
+		t.Errorf("PinHot on 10GB file: got rank %d, want 1 (fastest)", got)
 	}
-	if got := idealRank(meta.PinHot, 100, 1024, 1, 3); got != 1 {
-		t.Errorf("PinHot hot 1KB: got %d, want 1", got)
+	// Tiny file (would otherwise go to fastest) pinned cold → slowest.
+	got = idealRank(meta.PinCold, 1024, 1, 3)
+	if got != 3 {
+		t.Errorf("PinCold on 1KB file: got rank %d, want 3 (slowest)", got)
 	}
-	// PinCold → slowest regardless of heat or size.
-	if got := idealRank(meta.PinCold, 0, 1024, 1, 3); got != 3 {
-		t.Errorf("PinCold cold 1KB: got %d, want 3", got)
-	}
-	if got := idealRank(meta.PinCold, 100, 10<<30, 1, 3); got != 3 {
-		t.Errorf("PinCold hot 10GB: got %d, want 3", got)
-	}
-}
-
-func TestIdealRankHeatIsPrimary(t *testing.T) {
-	// heat=0: cold, goes to slowest regardless of size.
-	if got := idealRank(meta.PinNone, 0, 1024, 1, 3); got != 3 {
-		t.Errorf("cold 1KB: got %d, want 3 (HDD)", got)
-	}
-	if got := idealRank(meta.PinNone, 0, 1<<30, 1, 3); got != 3 {
-		t.Errorf("cold 1GB: got %d, want 3 (HDD)", got)
-	}
-
-	// heat=1: one tier above slowest regardless of size.
-	// heatBucketRank(1,1,3): steps=0, r=3-1-0=2 (SSD).
-	if got := idealRank(meta.PinNone, 1, 1024, 1, 3); got != 2 {
-		t.Errorf("warm(1) 1KB: got %d, want 2 (SSD)", got)
-	}
-	// Large file with heat=1: size nudges one tier slower → HDD.
-	if got := idealRank(meta.PinNone, 1, 1<<30, 1, 3); got != 3 {
-		t.Errorf("warm(1) 1GB: got %d, want 3 (HDD; size nudge)", got)
-	}
-
-	// heat=2: two tiers above slowest (fastestRank for 3-tier).
-	// heatBucketRank(2,1,3): steps=1, r=3-1-1=1 (NVME).
-	if got := idealRank(meta.PinNone, 2, 1024, 1, 3); got != 1 {
-		t.Errorf("hot(2) 1KB: got %d, want 1 (NVME)", got)
-	}
-	// Large file with heat=2: size nudges one slower → SSD.
-	if got := idealRank(meta.PinNone, 2, 1<<30, 1, 3); got != 2 {
-		t.Errorf("hot(2) 1GB: got %d, want 2 (SSD; size nudge)", got)
-	}
-}
-
-func TestHeatBucketRank(t *testing.T) {
-	tests := []struct {
-		heat    uint32
-		fastest int
-		slowest int
-		want    int
-	}{
-		{0, 1, 3, 3}, // cold → HDD
-		{1, 1, 3, 2}, // any access → SSD
-		{2, 1, 3, 1}, // double → NVME
-		{3, 1, 3, 1},
-		{4, 1, 3, 1},
-		{100, 1, 3, 1},
-		// 2-tier: any heat → fastest
-		{0, 1, 2, 2},
-		{1, 1, 2, 1},
-		{100, 1, 2, 1},
-		// 4-tier
-		{0, 1, 4, 4},
-		{1, 1, 4, 3},
-		{2, 1, 4, 2},
-		{4, 1, 4, 1},
-		{8, 1, 4, 1},
-	}
-	for _, tt := range tests {
-		got := heatBucketRank(tt.heat, tt.fastest, tt.slowest)
-		if got != tt.want {
-			t.Errorf("heatBucketRank(%d,%d,%d)=%d, want %d",
-				tt.heat, tt.fastest, tt.slowest, got, tt.want)
-		}
+	// Unpinned medium file: size bucket wins.
+	got = idealRank(meta.PinNone, 100<<20, 1, 3)
+	if got != 2 {
+		t.Errorf("PinNone on 100MB file: got rank %d, want 2", got)
 	}
 }
 
@@ -180,8 +118,8 @@ func testRanked(in ...testRanking) []rankedPoolTarget {
 	return out
 }
 
-// TestAdmitFillsFastestFirst: empty fastest tier accepts files until it
-// reaches full_threshold_pct; files that no longer fit spill to the lower tier.
+// TestAdmitFillsFastestFirst: empty fastest tier accepts small files until
+// it reaches target_fill_pct; larger files then spill to the lower tier.
 func TestAdmitFillsFastestFirst(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
 	caps := map[int]*tierCapacity{
@@ -196,75 +134,84 @@ func TestAdmitFillsFastestFirst(t *testing.T) {
 	}
 }
 
-// TestAdmitDoesNotSpillUntilFull: a tier above target_fill but below
-// full_threshold still accepts files. target_fill is not a spill threshold —
-// full% is. Spilling at target_fill would dump data on the slowest tier while
-// the fast tier still had usable headroom.
-func TestAdmitDoesNotSpillUntilFull(t *testing.T) {
+func TestAdmitSpillsPastTargetFill(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	// Fastest tier is well past target_fill (50%) but below full (95%).
+	// Fastest tier is at target_fill but below full_threshold. Migration
+	// placement spills to the lower tier so the fast tier drains toward fill%.
 	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1 << 30, usedBytes: (1 << 30) * 60 / 100, targetCap: 1 << 29, fullCap: (1 << 30) * 95 / 100},
+		1: {totalBytes: 1 << 30, usedBytes: 1 << 29, targetCap: 1 << 29, fullCap: (1 << 30) * 95 / 100},
 		2: {totalBytes: 10 << 30, targetCap: 10 << 29, fullCap: (10 << 30) * 95 / 100},
 	}
-	// 100 MB fits under full% on the fastest tier (60% + ~10% = 70% < 95%).
-	if r := admitWithFallback(caps, ranked, 1, 100<<20); r != 1 {
-		t.Errorf("above-target-below-full fastest: got rank %d, want 1 (no spill until full%%)", r)
+	if r := admitWithFallback(caps, ranked, 1, 100<<20); r != 2 {
+		t.Errorf("past-target-under-full fastest: got rank %d, want 2", r)
 	}
 }
 
-// TestAdmitSpillsOnlyWhenFull: the fastest tier accepts until adding the file
-// would exceed full_threshold_pct, then spills to the next tier.
-func TestAdmitSpillsOnlyWhenFull(t *testing.T) {
+func TestAdmitUsesTargetFill(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	usedFast := int64(1<<30) * 60 / 100
 	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1000, usedBytes: 900, targetCap: 500, fullCap: 950}, // 100 below full
-		2: {totalBytes: 10000, targetCap: 5000, fullCap: 9500},
+		1: {
+			totalBytes: 1 << 30,
+			usedBytes:  usedFast,
+			targetCap:  1 << 29,
+			fullCap:    (1 << 30) * 95 / 100,
+		},
+		2: {
+			totalBytes: 10 << 30,
+			targetCap:  10 << 29,
+			fullCap:    (10 << 30) * 95 / 100,
+		},
 	}
-	// 40 bytes fits under full (900+40=940 <= 950) → stays on fastest.
-	if r := admitWithFallback(caps, ranked, 1, 40); r != 1 {
-		t.Errorf("fits under full: got rank %d, want 1", r)
+	if r := admitWithFallback(caps, ranked, 1, 10<<20); r != 2 {
+		t.Errorf("target-fill fastest: got rank %d, want 2", r)
 	}
-	// Now at 940. 50 more would be 990 > 950 full → spills to tier 2.
-	if r := admitWithFallback(caps, ranked, 1, 50); r != 2 {
-		t.Errorf("would exceed full: got rank %d, want 2", r)
+
+	caps[1].usedBytes = int64(1<<30) * 49 / 100
+	if r := admitWithFallback(caps, ranked, 1, 5<<20); r != 1 {
+		t.Errorf("target-fill below target: got rank %d, want 1", r)
 	}
 }
 
-// TestAdmitSpillsToSlowerTierWhenFastestFull: a file lands on the next tier
-// down when the fastest is at full_threshold, and the slower tier accounts for
-// the added bytes.
-func TestAdmitSpillsToSlowerTierWhenFastestFull(t *testing.T) {
+func TestAdmitDrainsWhenOverTargetFill(t *testing.T) {
+	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
+	used := int64(1<<30) * 80 / 100
+	caps := map[int]*tierCapacity{
+		1: {totalBytes: 1 << 30, usedBytes: used, targetCap: 1 << 29, fullCap: (1 << 30) * 95 / 100},
+		2: {totalBytes: 10 << 30, targetCap: 10 << 29, fullCap: (10 << 30) * 95 / 100},
+	}
+	if r := admitWithFallback(caps, ranked, 1, 10<<20); r != 2 {
+		t.Errorf("fastest above target_fill: got rank %d, want 2", r)
+	}
+}
+
+func TestAdmitFullFallbackDrainsToSlowestEligibleTier(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
 	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1000, usedBytes: 900, targetCap: 500, fullCap: 950}, // only 50 free under full
+		1: {totalBytes: 1000, usedBytes: 600, targetCap: 500, fullCap: 950},
 		2: {totalBytes: 1000, usedBytes: 500, targetCap: 500, fullCap: 950},
 	}
+
 	if r := admitWithFallback(caps, ranked, 1, 100); r != 2 {
-		t.Errorf("fastest full: got rank %d, want 2", r)
+		t.Errorf("fallback above target_fill: got rank %d, want 2", r)
 	}
-	if caps[1].usedBytes != 900 {
-		t.Errorf("upper tier usedBytes = %d, want 900 (untouched)", caps[1].usedBytes)
+	if caps[1].usedBytes != 600 {
+		t.Errorf("upper tier usedBytes = %d, want 600", caps[1].usedBytes)
 	}
 	if caps[2].usedBytes != 600 {
 		t.Errorf("bottom tier usedBytes = %d, want 600", caps[2].usedBytes)
 	}
 }
 
-// TestAssignCandidateRanksFillsFastTierToFullThenSpills verifies that files
-// keep landing on the fast tier until it reaches full_threshold_pct, then
-// spill to the slower tier — they do NOT spill at target_fill_pct.
-func TestAssignCandidateRanksFillsFastTierToFullThenSpills(t *testing.T) {
+func TestAssignCandidateRanksDrainsUpperTierTowardTargetFill(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	// NVME: total 1000, target_fill 500, full 950. Three 400-byte hot files.
 	caps := map[int]*tierCapacity{
 		1: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
-		2: {totalBytes: 10000, usedBytes: 0, targetCap: 5000, fullCap: 9500},
+		2: {totalBytes: 1000, usedBytes: 500, targetCap: 500, fullCap: 950},
 	}
 	cands := []candidate{
-		{curRank: 1, size: 400, heat: 2, pin: meta.PinNone},
-		{curRank: 1, size: 400, heat: 2, pin: meta.PinNone},
-		{curRank: 1, size: 400, heat: 2, pin: meta.PinNone},
+		{curRank: 1, size: 400, pin: meta.PinNone},
+		{curRank: 1, size: 400, pin: meta.PinNone},
 	}
 
 	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
@@ -273,167 +220,54 @@ func TestAssignCandidateRanksFillsFastTierToFullThenSpills(t *testing.T) {
 			t.Fatalf("candidate %d was not assigned", i)
 		}
 	}
-	// 1st: 0→400 (≤950) NVME. 2nd: 400→800 (≤950) NVME — past target_fill 500
-	// but below full, so it stays. 3rd: 800→1200 (>950) spills to HDD.
-	if assignments[0] != 1 || assignments[1] != 1 {
-		t.Fatalf("first two assignments = %d,%d, want 1,1 (fill to full%%, not target)", assignments[0], assignments[1])
-	}
-	if assignments[2] != 2 {
-		t.Fatalf("third assignment = %d, want 2 (NVME at full, spills)", assignments[2])
-	}
-	if caps[1].usedBytes != 800 {
-		t.Fatalf("upper tier usedBytes = %d, want 800", caps[1].usedBytes)
-	}
-}
-
-// TestAssignCandidateRanksColdFilesFillNVMEBeforeSpillingToHDD verifies that
-// cold files use available NVME capacity (fill-before-spill) rather than
-// bypassing NVME and going directly to HDD when NVME has headroom.
-func TestAssignCandidateRanksColdFilesFillNVMEBeforeSpillingToHDD(t *testing.T) {
-	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
-		2: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
-	}
-	cands := []candidate{
-		{curRank: 1, size: 100, heat: 0, pin: meta.PinNone}, // cold on NVME, NVME has room
-	}
-	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
-	if !assigned[0] {
-		t.Fatal("candidate was not assigned")
-	}
-	// Cold file uses NVME capacity (fill-before-spill). It only drains to HDD
-	// once NVME is full.
 	if assignments[0] != 1 {
-		t.Errorf("cold file with NVME headroom: assigned rank %d, want 1 (NVME)", assignments[0])
-	}
-}
-
-// TestAssignCandidateRanksColdFilesSpillToHDDWhenNVMEFull verifies that cold
-// files drain to HDD once NVME is at full_threshold_pct (not target_fill).
-func TestAssignCandidateRanksColdFilesSpillToHDDWhenNVMEFull(t *testing.T) {
-	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1000, usedBytes: 950, targetCap: 500, fullCap: 950}, // NVME at full
-		2: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
-	}
-	cands := []candidate{
-		{curRank: 1, size: 100, heat: 0, pin: meta.PinNone},
-	}
-	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
-	if !assigned[0] {
-		t.Fatal("candidate was not assigned")
-	}
-	if assignments[0] != 2 {
-		t.Errorf("cold file with full NVME: assigned rank %d, want 2 (HDD)", assignments[0])
-	}
-}
-
-// TestAssignCandidateRanksColdFilesUseNVMEWhenAvailable verifies that a cold
-// large file stays on NVME while NVME has headroom. Backups land on NVME first
-// (smoothfs write path); the planner leaves them there until NVME fills up.
-func TestAssignCandidateRanksColdFilesUseNVMEWhenAvailable(t *testing.T) {
-	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	caps := map[int]*tierCapacity{
-		1: {totalBytes: 10 << 30, usedBytes: 0, targetCap: 5 << 30, fullCap: (10 << 30) * 95 / 100},
-		2: {totalBytes: 100 << 30, usedBytes: 0, targetCap: 50 << 30, fullCap: (100 << 30) * 95 / 100},
-	}
-	cands := []candidate{
-		{curRank: 1, size: 1 << 30, heat: 0, pin: meta.PinNone}, // cold 1 GB on NVME
-	}
-	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
-	if !assigned[0] {
-		t.Fatal("candidate was not assigned")
-	}
-	if assignments[0] != 1 {
-		t.Errorf("cold large file with NVME headroom: assigned rank %d, want 1 (NVME; fill-before-spill)", assignments[0])
-	}
-}
-
-// TestAssignCandidateRanksHotFilesDisplaceColdFilesToHDD verifies that hot
-// files displace cold files from NVME: hot files fill NVME first (sorted
-// ahead of cold), and once NVME reaches full_threshold the remaining cold
-// file spills to HDD.
-func TestAssignCandidateRanksHotFilesDisplaceColdFilesToHDD(t *testing.T) {
-	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	// NVME holds up to full=950; HDD has plenty of room.
-	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
-		2: {totalBytes: 10000, usedBytes: 0, targetCap: 5000, fullCap: 9500},
-	}
-	// Hot file (sorted first) takes 950 bytes, filling NVME to full.
-	// Cold file (sorted last) finds NVME at full → spills to HDD.
-	cands := []candidate{
-		{curRank: 1, size: 950, heat: 4, pin: meta.PinNone}, // hot, fills NVME to full
-		{curRank: 1, size: 100, heat: 0, pin: meta.PinNone}, // cold, arrives after NVME is full
-	}
-	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
-	for i := range cands {
-		if !assigned[i] {
-			t.Fatalf("candidate %d was not assigned", i)
-		}
-	}
-	if assignments[0] != 1 {
-		t.Errorf("hot file: assigned rank %d, want 1 (NVME)", assignments[0])
+		t.Fatalf("candidate 0 assignment = %d, want 1", assignments[0])
 	}
 	if assignments[1] != 2 {
-		t.Errorf("cold file: assigned rank %d, want 2 (HDD; displaced by hot file)", assignments[1])
+		t.Fatalf("candidate 1 assignment = %d, want 2", assignments[1])
+	}
+	if caps[1].usedBytes != 400 {
+		t.Fatalf("upper tier usedBytes = %d, want 400", caps[1].usedBytes)
 	}
 }
 
-// TestAssignCandidateRanksHotSmallFilePromotedToNVME verifies that a warm/hot
-// small file on HDD is promoted to NVME. Heat drives promotion; size confirms
-// the fast tier is appropriate for small files.
-func TestAssignCandidateRanksHotSmallFilePromotedToNVME(t *testing.T) {
+// TestAssignCandidateRanksPromotesSmallFileFromHDDWhenFastTierHasRoom verifies
+// that a small unpinned file on the slow tier is promoted to the fast tier when
+// the fast tier has capacity below its target_fill. The planner uses idealRank
+// (size-bucket preference) so files converge toward their natural tier in both
+// directions.
+func TestAssignCandidateRanksPromotesSmallFileFromHDDWhenFastTierHasRoom(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
 	caps := map[int]*tierCapacity{
 		1: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
 		2: {totalBytes: 2000, usedBytes: 0, targetCap: 1000, fullCap: 1900},
 	}
-	// heat=2 → heatBucketRank=1 (NVME for 2-tier); small size → no size nudge.
+	// Small file (100 bytes < sizeBucketBaseBytes) on tier 2 (HDD). Its idealRank
+	// is 1 (fastest), and tier 1 has room under targetCap — it should be promoted.
 	cands := []candidate{
-		{curRank: 2, size: 100, heat: 2, pin: meta.PinNone},
+		{curRank: 2, size: 100, pin: meta.PinNone},
 	}
 	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
 	if !assigned[0] {
 		t.Fatal("candidate was not assigned")
 	}
 	if assignments[0] != 1 {
-		t.Errorf("hot small file on HDD: assigned rank %d, want 1 (NVME)", assignments[0])
+		t.Errorf("small HDD file assigned to rank %d, want 1 (promoted to fast tier)", assignments[0])
+	}
+	if caps[1].usedBytes != 100 {
+		t.Errorf("tier 1 usedBytes = %d, want 100", caps[1].usedBytes)
 	}
 }
 
-// TestAssignCandidateRanksColdSmallFileMovesToNVMEWhenAvailable verifies that
-// a cold small file on HDD is assigned to NVME when NVME has headroom.
-// Fill-before-spill: all tiers above HDD should be utilized before data
-// accumulates on HDD.
-func TestAssignCandidateRanksColdSmallFileMovesToNVMEWhenAvailable(t *testing.T) {
+// TestAssignCandidateRanksDoesNotPromoteWhenFastTierFull verifies that a small
+// file on the slow tier stays there when the fast tier is at or above target_fill.
+func TestAssignCandidateRanksDoesNotPromoteWhenFastTierFull(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
 	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
+		1: {totalBytes: 1000, usedBytes: 500, targetCap: 500, fullCap: 950},
 		2: {totalBytes: 2000, usedBytes: 0, targetCap: 1000, fullCap: 1900},
 	}
-	cands := []candidate{
-		{curRank: 2, size: 100, heat: 0, pin: meta.PinNone},
-	}
-	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
-	if !assigned[0] {
-		t.Fatal("candidate was not assigned")
-	}
-	if assignments[0] != 1 {
-		t.Errorf("cold small file: assigned rank %d, want 1 (NVME has headroom)", assignments[0])
-	}
-}
-
-// TestAssignCandidateRanksSmallFileStaysOnHDDWhenFasterTierFull verifies that
-// a small file on HDD stays there when the ideal faster tier is full — size
-// bias is a preference, capacity decides the actual tier.
-func TestAssignCandidateRanksSmallFileStaysOnHDDWhenFasterTierFull(t *testing.T) {
-	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1000, usedBytes: 960, targetCap: 500, fullCap: 950}, // NVME above full_threshold
-		2: {totalBytes: 2000, usedBytes: 0, targetCap: 1000, fullCap: 1900},
-	}
+	// Small file on tier 2. Tier 1 is at targetCap (500/500) — no room to promote.
 	cands := []candidate{
 		{curRank: 2, size: 100, pin: meta.PinNone},
 	}
@@ -442,29 +276,7 @@ func TestAssignCandidateRanksSmallFileStaysOnHDDWhenFasterTierFull(t *testing.T)
 		t.Fatal("candidate was not assigned")
 	}
 	if assignments[0] != 2 {
-		t.Errorf("small file with full NVME: assigned rank %d, want 2 (HDD spill)", assignments[0])
-	}
-}
-
-// TestAssignCandidateRanksLargeFileOnFullHDDOverflowsToNVME verifies that a
-// large file falls back to a faster tier when its preferred slower tiers are
-// above full_threshold. Size bias does not strand files when storage is full.
-func TestAssignCandidateRanksLargeFileOnFullHDDOverflowsToNVME(t *testing.T) {
-	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	// HDD above full_threshold; NVME has plenty of room.
-	caps := map[int]*tierCapacity{
-		1: {totalBytes: 10 << 30, usedBytes: 1 << 30, targetCap: 5 << 30, fullCap: (10 << 30) * 95 / 100},
-		2: {totalBytes: 10 << 30, usedBytes: (10 << 30) * 96 / 100, targetCap: 5 << 30, fullCap: (10 << 30) * 95 / 100},
-	}
-	cands := []candidate{
-		{curRank: 1, size: 1 << 30, pin: meta.PinNone}, // 1 GB, idealRank=HDD
-	}
-	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
-	if !assigned[0] {
-		t.Fatal("candidate was not assigned")
-	}
-	if assignments[0] != 1 {
-		t.Errorf("1 GB file with full HDD: assigned rank %d, want 1 (NVME overflow)", assignments[0])
+		t.Errorf("file promoted to rank %d despite full fast tier, want 2", assignments[0])
 	}
 }
 
@@ -534,11 +346,9 @@ func TestAssignCandidateRanksKeepsDuplicateInodesIndependent(t *testing.T) {
 		1: {totalBytes: 1000, targetCap: 500, fullCap: 950},
 		2: {totalBytes: 2000, targetCap: 1000, fullCap: 1900},
 	}
-	// Same inode on two tiers (duplicate): hot on NVME, cold on HDD.
-	// Each is placed independently by heat+size — not by curRank.
 	cands := []candidate{
-		{inode: 42, curRank: 1, size: 400, heat: 2, pin: meta.PinNone}, // hot → NVME
-		{inode: 42, curRank: 2, size: 700, heat: 0, pin: meta.PinNone}, // cold → HDD
+		{inode: 42, curRank: 1, size: 400, pin: meta.PinNone},
+		{inode: 42, curRank: 2, size: 700, pin: meta.PinNone},
 	}
 
 	assignments, assigned := assignCandidateRanks(cands, caps, ranked, 1, 2)
@@ -548,10 +358,10 @@ func TestAssignCandidateRanksKeepsDuplicateInodesIndependent(t *testing.T) {
 		}
 	}
 	if assignments[0] != 1 {
-		t.Fatalf("candidate 0 (hot) assignment = %d, want 1 (NVME)", assignments[0])
+		t.Fatalf("candidate 0 assignment = %d, want 1", assignments[0])
 	}
 	if assignments[1] != 2 {
-		t.Fatalf("candidate 1 (cold) assignment = %d, want 2 (HDD)", assignments[1])
+		t.Fatalf("candidate 1 assignment = %d, want 2", assignments[1])
 	}
 }
 
