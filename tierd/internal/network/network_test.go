@@ -803,3 +803,35 @@ func TestReloadNetworkdSkipsReconfigureWithoutManagedLinks(t *testing.T) {
 		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
 	}
 }
+
+// TestParseLinkNamesFromJSONSkipsEmptyObjects verifies the iproute2 workaround:
+// `ip -j link show type bond` emits an empty {} object per non-matching link on
+// current iproute2 (6.15) rather than filtering them out. Those must be skipped
+// so the bond/VLAN APIs don't return phantom nameless entries (which made the
+// UI PUT to /api/network/bonds/ and get 405 Method Not Allowed).
+func TestParseLinkNamesFromJSONSkipsEmptyObjects(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"all empty (no real bond, 6 links)", `[{},{},{},{},{},{}]`, nil},
+		{"one real bond among empties", `[{},{"ifname":"bond0"},{},{}]`, []string{"bond0"}},
+		{"two real bonds", `[{"ifname":"bond0"},{"ifname":"bond1"}]`, []string{"bond0", "bond1"}},
+		{"empty array", `[]`, nil},
+		{"malformed json", `not json`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseLinkNamesFromJSON([]byte(tc.in))
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("index %d: got %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
