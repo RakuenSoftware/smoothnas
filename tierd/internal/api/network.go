@@ -269,6 +269,14 @@ func (h *NetworkHandler) createBond(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// A bond with no members can never gain carrier — it comes up DOWN and
+	// strands whatever IP config was written to it. Reject it loudly instead
+	// of writing a dead bond. (Empty members reached here e.g. when the UI
+	// edits a bond whose membership it couldn't enumerate.)
+	if len(bond.Members) == 0 {
+		jsonErrorCoded(w, "a bond must have at least one member interface", http.StatusBadRequest, "network.bond_no_members")
+		return
+	}
 
 	err := h.safeApply.Apply("Create bond "+bond.Name, func() error {
 		if err := network.RemoveLegacyCatchAllDHCP(h.networkDir); err != nil {
@@ -453,6 +461,15 @@ func (h *NetworkHandler) updateBond(w http.ResponseWriter, r *http.Request, name
 	}
 	if err := validateIPConfig(bond.IPv4Addrs, bond.IPv6Addrs, bond.Gateway4, bond.Gateway6, bond.MTU, bond.DNS); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// A bond with no members can never gain carrier — it comes up DOWN and
+	// strands whatever IP config was written to it. Reject it loudly instead
+	// of writing a dead bond. This is the failure that broke bond0 on a real
+	// appliance: an edit-IP request arrived with an empty member list, so the
+	// static IP was written to a memberless bond that never came up.
+	if len(bond.Members) == 0 {
+		jsonErrorCoded(w, "a bond must have at least one member interface", http.StatusBadRequest, "network.bond_no_members")
 		return
 	}
 
