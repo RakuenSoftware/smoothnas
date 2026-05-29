@@ -537,6 +537,32 @@ func parseLinkNamesFromJSON(out []byte) []string {
 	return names
 }
 
+// DeleteRuntimeBond removes the in-kernel bond interface if it exists.
+//
+// systemd-networkd does NOT tear down a bond netdev when its .netdev config
+// file is removed — the device lingers in the kernel (DOWN, no slaves) and
+// keeps appearing in `ip link` and the bonds API. That is why "Break Bond"
+// looked like it did nothing: BreakBond removed the config and released the
+// members, but the empty bond device stayed, so the UI kept listing it.
+// Deleting the device makes the break actually take effect. A missing device
+// is treated as success so the call is idempotent.
+func DeleteRuntimeBond(name string) error {
+	if err := ValidateBondName(name); err != nil {
+		return err
+	}
+	// Best-effort down first; ignore errors (already down or gone).
+	_ = exec.Command("ip", "link", "set", name, "down").Run()
+	out, err := exec.Command("ip", "link", "delete", name, "type", "bond").CombinedOutput()
+	if err != nil {
+		msg := strings.ToLower(string(out))
+		if strings.Contains(msg, "cannot find device") || strings.Contains(msg, "does not exist") {
+			return nil // already gone
+		}
+		return fmt.Errorf("delete bond device %s: %s: %w", name, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // ListBondsWithConfig discovers bonds and overlays tierd-managed networkd settings.
 func ListBondsWithConfig(networkDir string) ([]BondConfig, error) {
 	out, err := exec.Command("ip", "-j", "link", "show", "type", "bond").Output()

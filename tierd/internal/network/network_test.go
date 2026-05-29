@@ -835,3 +835,12 @@ func TestParseLinkNamesFromJSONSkipsEmptyObjects(t *testing.T) {
 		})
 	}
 }
+
+// TestDeleteRuntimeBondRejectsBadName ensures DeleteRuntimeBond validates the
+// bond name before shelling out to `ip link delete`, so a malformed name can
+// never reach the command layer.
+func TestDeleteRuntimeBondRejectsBadName(t *testing.T) {
+	if err := DeleteRuntimeBond("not a bond name"); err == nil {
+		t.Fatal("expected error for invalid bond name, got nil")
+	}
+}
