@@ -311,6 +311,97 @@ func TestSharePathsParsesShareSections(t *testing.T) {
 	}
 }
 
+func TestGlobalInterfaceBindingNormalizesAndIgnoresShares(t *testing.T) {
+	a := "[global]\n   interfaces = 192.168.1.10   192.168.1.11\n   bind interfaces only = yes\n[storage]\n   path = /mnt/x\n"
+	// Same binding, different whitespace and a different share path.
+	b := "[global]\n   bind interfaces only = yes\n   interfaces = 192.168.1.10 192.168.1.11\n[storage]\n   path = /mnt/y\n"
+	if got, want := globalInterfaceBinding(a), globalInterfaceBinding(b); got != want {
+		t.Fatalf("binding should be whitespace/order/ share-path insensitive: %q != %q", got, want)
+	}
+
+	// A different address set must produce a different binding.
+	c := "[global]\n   interfaces = 192.168.0.84\n   bind interfaces only = yes\n"
+	if globalInterfaceBinding(a) == globalInterfaceBinding(c) {
+		t.Fatalf("different interface address must change the binding")
+	}
+
+	// No binding directives at all -> empty, and distinct from a pinned set.
+	none := "[global]\n   server multi channel support = yes\n"
+	if globalInterfaceBinding(none) != "" {
+		t.Fatalf("config without interfaces= should have empty binding, got %q", globalInterfaceBinding(none))
+	}
+	if globalInterfaceBinding(none) == globalInterfaceBinding(a) {
+		t.Fatalf("unpinned vs pinned binding must differ")
+	}
+}
+
+func TestWriteConfigRestartsWhenBindingChanges(t *testing.T) {
+	dir := t.TempDir()
+	origConfig := smbConfigPath
+	origDropIn := smbdMountDropInPath
+	origSystemctl := smbSystemctl
+	origControl := smbControl
+	origEnabled := smbIsEnabled
+	smbConfigPath = filepath.Join(dir, "smb.conf")
+	smbdMountDropInPath = filepath.Join(dir, "smbd.service.d", "10-smoothnas-shares.conf")
+	smbIsEnabled = func() bool { return true }
+	t.Cleanup(func() {
+		smbConfigPath = origConfig
+		smbdMountDropInPath = origDropIn
+		smbSystemctl = origSystemctl
+		smbControl = origControl
+		smbIsEnabled = origEnabled
+	})
+
+	record := func() (*[]string, *[]string) {
+		var systemctlCalls, controlCalls []string
+		smbSystemctl = func(args ...string) error {
+			systemctlCalls = append(systemctlCalls, strings.Join(args, " "))
+			return nil
+		}
+		smbControl = func(args ...string) error {
+			controlCalls = append(controlCalls, strings.Join(args, " "))
+			return nil
+		}
+		return &systemctlCalls, &controlCalls
+	}
+
+	// First write pins interfaces -> binding changes from empty, so restart.
+	sc, cc := record()
+	if err := WriteConfigWithOptions(nil, "nas", Options{Interfaces: []string{"192.168.1.10"}}); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if !slices.Contains(*sc, "restart smbd") || !slices.Contains(*sc, "restart nmbd") {
+		t.Fatalf("binding change must restart smbd and nmbd, systemctl=%#v", *sc)
+	}
+	if slices.Contains(*cc, "all reload-config") {
+		t.Fatalf("binding change must not rely on reload-config, smbcontrol=%#v", *cc)
+	}
+
+	// Second write, same binding -> reload, never restart.
+	sc, cc = record()
+	if err := WriteConfigWithOptions(nil, "nas", Options{Interfaces: []string{"192.168.1.10"}}); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	if !slices.Contains(*cc, "all reload-config") {
+		t.Fatalf("unchanged binding should reload, smbcontrol=%#v", *cc)
+	}
+	for _, c := range *sc {
+		if strings.HasPrefix(c, "restart ") {
+			t.Fatalf("unchanged binding must not restart smbd, systemctl=%#v", *sc)
+		}
+	}
+
+	// Third write moves the IP -> restart again (the bug scenario).
+	sc, _ = record()
+	if err := WriteConfigWithOptions(nil, "nas", Options{Interfaces: []string{"192.168.1.254"}}); err != nil {
+		t.Fatalf("third write: %v", err)
+	}
+	if !slices.Contains(*sc, "restart smbd") {
+		t.Fatalf("moved IP must trigger restart, systemctl=%#v", *sc)
+	}
+}
+
 func TestSharesRequiringDisconnect(t *testing.T) {
 	oldConfig := `
 [global]
