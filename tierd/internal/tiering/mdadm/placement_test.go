@@ -134,31 +134,29 @@ func TestAdmitFillsFastestFirst(t *testing.T) {
 	}
 }
 
-func TestAdmitSpillsPastFullCap(t *testing.T) {
+func TestAdmitSpillsPastTargetFill(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	// Fastest tier is at full_threshold_pct — the admission ceiling — so the
-	// file spills to the next slower tier. Being at target_fill_pct alone (50%)
-	// does not trigger a spill; the trigger is full_threshold_pct (95%).
-	fullCap1 := (int64(1) << 30) * 95 / 100
+	// Fastest tier is at target_fill_pct — the admission ceiling — so the file
+	// spills to the next slower tier. fill% is the migration trigger; full% is
+	// only the smoothfs write-admission ceiling (not the planner's trigger).
 	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1 << 30, usedBytes: fullCap1, targetCap: 1 << 29, fullCap: fullCap1},
+		1: {totalBytes: 1 << 30, usedBytes: 1 << 29, targetCap: 1 << 29, fullCap: (1 << 30) * 95 / 100},
 		2: {totalBytes: 10 << 30, targetCap: 10 << 29, fullCap: (10 << 30) * 95 / 100},
 	}
 	if r := admitWithFallback(caps, ranked, 1, 100<<20); r != 2 {
-		t.Errorf("at-full-cap fastest: got rank %d, want 2", r)
+		t.Errorf("at-target-fill fastest: got rank %d, want 2", r)
 	}
 }
 
-func TestAdmitUsesFullCap(t *testing.T) {
+func TestAdmitUsesTargetFill(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	fullCap1 := (int64(1) << 30) * 95 / 100
-	// At 96% — above fullCap — file spills to slower tier.
+	// At 60% — above targetCap (50%) — file spills to slower tier.
 	caps := map[int]*tierCapacity{
 		1: {
 			totalBytes: 1 << 30,
-			usedBytes:  int64(1<<30) * 96 / 100,
+			usedBytes:  int64(1<<30) * 60 / 100,
 			targetCap:  1 << 29,
-			fullCap:    fullCap1,
+			fullCap:    (1 << 30) * 95 / 100,
 		},
 		2: {
 			totalBytes: 10 << 30,
@@ -167,54 +165,54 @@ func TestAdmitUsesFullCap(t *testing.T) {
 		},
 	}
 	if r := admitWithFallback(caps, ranked, 1, 10<<20); r != 2 {
-		t.Errorf("above full-cap fastest: got rank %d, want 2", r)
+		t.Errorf("above target-fill fastest: got rank %d, want 2", r)
 	}
 
-	// At 80% — below fullCap — file fits on the fast tier.
-	caps[1].usedBytes = int64(1<<30) * 80 / 100
+	// At 49% — below targetCap — file fits on the fast tier.
+	caps[1].usedBytes = int64(1<<30) * 49 / 100
 	if r := admitWithFallback(caps, ranked, 1, 5<<20); r != 1 {
-		t.Errorf("below full-cap: got rank %d, want 1", r)
+		t.Errorf("below target-fill: got rank %d, want 1", r)
 	}
 }
 
-func TestAdmitDrainsWhenOverFullCap(t *testing.T) {
+func TestAdmitDrainsWhenOverTargetFill(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	// 96% > fullCap (95%) → file must spill to slower tier.
-	used := int64(1<<30) * 96 / 100
+	// 80% > targetCap (50%) → file must spill to slower tier.
+	used := int64(1<<30) * 80 / 100
 	caps := map[int]*tierCapacity{
 		1: {totalBytes: 1 << 30, usedBytes: used, targetCap: 1 << 29, fullCap: (1 << 30) * 95 / 100},
 		2: {totalBytes: 10 << 30, targetCap: 10 << 29, fullCap: (10 << 30) * 95 / 100},
 	}
 	if r := admitWithFallback(caps, ranked, 1, 10<<20); r != 2 {
-		t.Errorf("fastest above full_cap: got rank %d, want 2", r)
+		t.Errorf("fastest above target_fill: got rank %d, want 2", r)
 	}
 }
 
-func TestAdmitSpillsToNextEligibleTierWhenFastAtFullCap(t *testing.T) {
+func TestAdmitFullFallbackDrainsToSlowestEligibleTier(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	// Tier 1 is at fullCap; tier 2 has headroom under its fullCap.
+	// Tier 1 is above targetCap; tier 2 has headroom.
 	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1000, usedBytes: 950, targetCap: 500, fullCap: 950},
+		1: {totalBytes: 1000, usedBytes: 600, targetCap: 500, fullCap: 950},
 		2: {totalBytes: 1000, usedBytes: 500, targetCap: 500, fullCap: 950},
 	}
 
 	if r := admitWithFallback(caps, ranked, 1, 100); r != 2 {
-		t.Errorf("fast-at-full-cap: got rank %d, want 2", r)
+		t.Errorf("above target_fill: got rank %d, want 2", r)
 	}
-	if caps[1].usedBytes != 950 {
-		t.Errorf("upper tier usedBytes = %d, want 950 (unchanged)", caps[1].usedBytes)
+	if caps[1].usedBytes != 600 {
+		t.Errorf("upper tier usedBytes = %d, want 600 (unchanged)", caps[1].usedBytes)
 	}
 	if caps[2].usedBytes != 600 {
 		t.Errorf("bottom tier usedBytes = %d, want 600", caps[2].usedBytes)
 	}
 }
 
-func TestAssignCandidateRanksDrainsUpperTierWhenAtFullCap(t *testing.T) {
+func TestAssignCandidateRanksDrainsUpperTierTowardTargetFill(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	// fullCap for tier 1 is 600, so the second 400-byte file exceeds it and
-	// must be assigned to tier 2.
+	// targetCap for tier 1 is 500, so the second 400-byte file pushes past it
+	// and must be assigned to tier 2.
 	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 600},
+		1: {totalBytes: 1000, usedBytes: 0, targetCap: 500, fullCap: 950},
 		2: {totalBytes: 2000, usedBytes: 0, targetCap: 1000, fullCap: 1900},
 	}
 	cands := []candidate{
@@ -232,7 +230,7 @@ func TestAssignCandidateRanksDrainsUpperTierWhenAtFullCap(t *testing.T) {
 		t.Fatalf("candidate 0 assignment = %d, want 1", assignments[0])
 	}
 	if assignments[1] != 2 {
-		t.Fatalf("candidate 1 assignment = %d, want 2 (tier 1 fullCap exceeded)", assignments[1])
+		t.Fatalf("candidate 1 assignment = %d, want 2 (tier 1 targetCap exceeded)", assignments[1])
 	}
 	if caps[1].usedBytes != 400 {
 		t.Fatalf("upper tier usedBytes = %d, want 400", caps[1].usedBytes)
@@ -265,16 +263,16 @@ func TestAssignCandidateRanksPromotesFileFromHDDWhenFastTierHasRoom(t *testing.T
 	}
 }
 
-// TestAssignCandidateRanksDoesNotPromoteWhenFastTierAtFullCap verifies that a
+// TestAssignCandidateRanksDoesNotPromoteWhenFastTierAtTargetFill verifies that a
 // file on the slow tier stays there when the fast tier is at or above
-// full_threshold_pct. The admission ceiling is fullCap, not targetCap.
-func TestAssignCandidateRanksDoesNotPromoteWhenFastTierAtFullCap(t *testing.T) {
+// target_fill_pct. fill% is the admission ceiling for the planner.
+func TestAssignCandidateRanksDoesNotPromoteWhenFastTierAtTargetFill(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
 	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1000, usedBytes: 950, targetCap: 500, fullCap: 950},
+		1: {totalBytes: 1000, usedBytes: 500, targetCap: 500, fullCap: 950},
 		2: {totalBytes: 2000, usedBytes: 0, targetCap: 1000, fullCap: 1900},
 	}
-	// Tier 1 is at fullCap (950/950) — no room to promote; file stays on tier 2.
+	// Tier 1 is at targetCap (500/500) — no room to promote; file stays on tier 2.
 	cands := []candidate{
 		{curRank: 2, size: 100, pin: meta.PinNone},
 	}
@@ -283,7 +281,7 @@ func TestAssignCandidateRanksDoesNotPromoteWhenFastTierAtFullCap(t *testing.T) {
 		t.Fatal("candidate was not assigned")
 	}
 	if assignments[0] != 2 {
-		t.Errorf("file promoted to rank %d despite full fast tier, want 2", assignments[0])
+		t.Errorf("file promoted to rank %d despite tier at target fill, want 2", assignments[0])
 	}
 }
 
@@ -292,9 +290,9 @@ func TestAssignCandidateRanksDoesNotPromoteWhenFastTierAtFullCap(t *testing.T) {
 // is secondary and only breaks ties among files with equal heat.
 func TestAssignCandidateRanksHeatTrumpsSize(t *testing.T) {
 	ranked := testRanked(testRanking{1, 50, 95}, testRanking{2, 50, 95})
-	// Tier 1 fullCap = 400 bytes — exactly fits the hot file but not both.
+	// Tier 1 targetCap = 400 bytes — exactly fits the hot file but not both together.
 	caps := map[int]*tierCapacity{
-		1: {totalBytes: 1000, usedBytes: 0, targetCap: 200, fullCap: 400},
+		1: {totalBytes: 1000, usedBytes: 0, targetCap: 400, fullCap: 950},
 		2: {totalBytes: 2000, usedBytes: 0, targetCap: 1000, fullCap: 1900},
 	}
 	// cold small file (size 50) vs hot large file (size 400, heat 10).
