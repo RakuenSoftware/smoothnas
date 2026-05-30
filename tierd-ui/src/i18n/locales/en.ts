@@ -852,6 +852,7 @@ const en: LanguageTranslations = {
   'tiers.col.usedFree': 'Used / Free',
   'tiers.col.fillPct': 'Fill%',
   'tiers.col.fullPct': 'Full%',
+  'tiers.lowestNoFill': 'The lowest tier has no fill target — it fills up to Full%.',
   'tiers.row.mountPoint': 'Mount Point',
   'tiers.row.spindown': 'Spindown',
   'tiers.row.storage': 'Storage',
