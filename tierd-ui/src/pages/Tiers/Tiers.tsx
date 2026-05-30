@@ -614,10 +614,19 @@ export default function Tiers() {
                       <div style={{ fontSize: 12, display: 'grid', gridTemplateColumns: '80px 1fr 1fr 56px 56px 60px', gap: 4, color: '#999', marginBottom: 4 }}>
                         <span>{t('tiers.col.level')}</span><span>{t('tiers.col.capacity')}</span><span>{t('tiers.col.usedFree')}</span><span>{t('tiers.col.fillPct')}</span><span>{t('tiers.col.fullPct')}</span><span></span>
                       </div>
-                      {(tier.tiers || []).map((level: any) => {
+                      {(() => {
+                        const levels = tier.tiers || [];
+                        // The lowest (slowest) tier is the catch-all bottom: the migration
+                        // planner has nowhere slower to drain to, so fill% does not apply —
+                        // it fills up to full% (the hard cap). Hide fill% for it.
+                        const lowestRank = levels.length
+                          ? Math.max(...levels.map((l: any) => l.rank ?? 0))
+                          : null;
+                        return levels.map((level: any) => {
                         const lkey = `${tier.name}:${level.name}`;
                         const editing = editingLevel[lkey];
                         const saving = savingLevel[lkey];
+                        const isLowestTier = lowestRank != null && (level.rank ?? 0) === lowestRank;
                         const arr = level.array_id != null ? arrayById(level.array_id) : null;
                         // Display precedence: legacy pv_device (mdadm), then mdadm array path/name,
                         // then the generic backing_ref (zfs/btrfs/bcachefs).
@@ -655,9 +664,13 @@ export default function Tiers() {
                             </span>
                             {editing ? (
                               <>
-                                <input className="level-fill-input" type="number" min={0} max={100}
-                                  value={editing.targetFill}
-                                  onChange={e => setEditingLevel(p => ({ ...p, [lkey]: { ...p[lkey], targetFill: e.target.value } }))} />
+                                {isLowestTier ? (
+                                  <span style={{ color: '#aaa' }} title={t('tiers.lowestNoFill')}>{t('common.na')}</span>
+                                ) : (
+                                  <input className="level-fill-input" type="number" min={0} max={100}
+                                    value={editing.targetFill}
+                                    onChange={e => setEditingLevel(p => ({ ...p, [lkey]: { ...p[lkey], targetFill: e.target.value } }))} />
+                                )}
                                 <input className="level-fill-input" type="number" min={0} max={100}
                                   value={editing.fullThreshold}
                                   onChange={e => setEditingLevel(p => ({ ...p, [lkey]: { ...p[lkey], fullThreshold: e.target.value } }))} />
@@ -668,7 +681,11 @@ export default function Tiers() {
                               </>
                             ) : (
                               <>
-                                <span>{level.target_fill_pct ?? '—'}%</span>
+                                {isLowestTier ? (
+                                  <span style={{ color: '#aaa' }} title={t('tiers.lowestNoFill')}>{t('common.na')}</span>
+                                ) : (
+                                  <span>{level.target_fill_pct ?? '—'}%</span>
+                                )}
                                 <span>{level.full_threshold_pct ?? '—'}%</span>
                                 <button style={{ fontSize: 11, padding: '2px 6px' }} onClick={() => startEditLevel(tier.name, level)}>{t('common.edit')}</button>
                               </>
@@ -699,7 +716,8 @@ export default function Tiers() {
                             </div>
                           </div>
                         );
-                      })}
+                        });
+                      })()}
                     </div>
                   )}
 
