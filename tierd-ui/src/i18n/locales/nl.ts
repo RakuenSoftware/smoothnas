@@ -872,6 +872,7 @@ const nl: LanguageTranslations = {
   'tiers.col.usedFree': 'Gebruikt / Vrij',
   'tiers.col.fillPct': 'Vul%',
   'tiers.col.fullPct': 'Vol%',
+  'tiers.lowestNoFill': 'De laagste laag heeft geen vuldoel — die vult tot Vol%.',
   'tiers.row.mountPoint': 'Mount-punt',
   'tiers.row.spindown': 'Spindown',
   'tiers.row.storage': 'Opslag',
