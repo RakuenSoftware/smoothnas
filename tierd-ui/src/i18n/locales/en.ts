@@ -872,6 +872,7 @@ const en: LanguageTranslations = {
   'tiers.spindown.notAtTarget': 'not at target',
   'tiers.spindown.disableTooltip': 'Disable pool spindown policy',
   'tiers.spindown.enableTooltip': 'Enable pool spindown policy',
+  'tiers.spindown.idleMinutesTooltip': 'Idle minutes before HDDs spin down',
   'tiers.spindown.working': 'Working...',
   'tiers.spindown.nightly': 'Nightly',
   'tiers.spindown.nightlyTooltip': 'Run maintenance during the daily 01:00-06:00 active window',

@@ -55,6 +55,8 @@ func newTestHandler(t *testing.T) *ArraysHandler {
 	origListDisksForSpindown := listDisksForSpindown
 	origQueryPowerStateForSpindown := queryPowerStateForSpindown
 	origZFSMemberDevicesForSpindown := zfsMemberDevicesForSpindown
+	origSetSpindownTimer := setSpindownTimer
+	origDisableDiskAPM := disableDiskAPM
 	createPoolVG = func(string) error { return nil }
 	removePoolVG = func(string) error { return nil }
 	removePoolVGPlaceholder = func(string) error { return nil }
@@ -79,6 +81,8 @@ func newTestHandler(t *testing.T) *ArraysHandler {
 	listDisksForSpindown = func() ([]disk.Disk, error) { return nil, nil }
 	queryPowerStateForSpindown = func(string) (string, error) { return "active", nil }
 	zfsMemberDevicesForSpindown = func(string) []string { return nil }
+	setSpindownTimer = func(string, int) error { return nil }
+	disableDiskAPM = func(string) error { return nil }
 	t.Cleanup(func() {
 		createPoolVG = origCreatePoolVG
 		removePoolVG = origRemovePoolVG
@@ -104,6 +108,8 @@ func newTestHandler(t *testing.T) *ArraysHandler {
 		listDisksForSpindown = origListDisksForSpindown
 		queryPowerStateForSpindown = origQueryPowerStateForSpindown
 		zfsMemberDevicesForSpindown = origZFSMemberDevicesForSpindown
+		setSpindownTimer = origSetSpindownTimer
+		disableDiskAPM = origDisableDiskAPM
 	})
 	return h
 }
@@ -197,7 +203,7 @@ func TestPoolSpindownEnableRemountsNoatimeAndPersists(t *testing.T) {
 	}
 }
 
-func TestPoolSpindownRequiresConfirmedSSDTiersAtTargetFill(t *testing.T) {
+func TestPoolSpindownReportsSSDBelowTargetFillWithoutBlocking(t *testing.T) {
 	h := newTestHandler(t)
 	if err := h.store.CreateTierPoolWithOptions("media", "xfs", []db.TierDefinition{
 		{Name: "NVME", Rank: 1},
@@ -244,8 +250,11 @@ func TestPoolSpindownRequiresConfirmedSSDTiersAtTargetFill(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.Eligible {
-		t.Fatalf("expected SSD below target fill to block spindown: %+v", got)
+	// Warm-fill below target is reported but must NOT block eligibility: the
+	// rebalance that would satisfy it only runs once spindown is enabled, so
+	// gating on it would deadlock.
+	if !got.Eligible {
+		t.Fatalf("warm-fill below target must not block spindown eligibility: %+v", got)
 	}
 	if !got.SSDTargetFill.Required || got.SSDTargetFill.Satisfied {
 		t.Fatalf("unexpected SSD warm-fill status: %+v", got.SSDTargetFill)
@@ -257,12 +266,12 @@ func TestPoolSpindownRequiresConfirmedSSDTiersAtTargetFill(t *testing.T) {
 	if tierStatus.Reason != "below target_fill_pct" || tierStatus.Direction != "promote_to_ssd" || tierStatus.DeltaBytes != 30 {
 		t.Fatalf("unexpected below-target tier status: %+v", tierStatus)
 	}
-	if !strings.Contains(strings.Join(got.Reasons, "; "), "target_fill_pct") {
-		t.Fatalf("expected target_fill_pct reason, got %+v", got.Reasons)
+	if strings.Contains(strings.Join(got.Reasons, "; "), "target_fill_pct") {
+		t.Fatalf("warm-fill must not appear as an eligibility blocker, got %+v", got.Reasons)
 	}
 }
 
-func TestPoolSpindownBlocksConfirmedSSDTiersAboveTargetFill(t *testing.T) {
+func TestPoolSpindownReportsSSDAboveTargetFillWithoutBlocking(t *testing.T) {
 	h := newTestHandler(t)
 	if err := h.store.CreateTierPoolWithOptions("media", "xfs", []db.TierDefinition{
 		{Name: "NVME", Rank: 1},
@@ -309,8 +318,9 @@ func TestPoolSpindownBlocksConfirmedSSDTiersAboveTargetFill(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.Eligible {
-		t.Fatalf("expected SSD above target fill to block spindown: %+v", got)
+	// Above-target warm-fill is reported but must not block eligibility either.
+	if !got.Eligible {
+		t.Fatalf("warm-fill above target must not block spindown eligibility: %+v", got)
 	}
 	if !got.SSDTargetFill.Required || got.SSDTargetFill.Satisfied {
 		t.Fatalf("unexpected SSD target-balance status: %+v", got.SSDTargetFill)
@@ -322,8 +332,8 @@ func TestPoolSpindownBlocksConfirmedSSDTiersAboveTargetFill(t *testing.T) {
 	if tierStatus.Reason != "above target_fill_pct" || tierStatus.Direction != "demote_from_ssd" || tierStatus.DeltaBytes != -10 {
 		t.Fatalf("unexpected above-target tier status: %+v", tierStatus)
 	}
-	if !strings.Contains(strings.Join(got.Reasons, "; "), "not at target_fill_pct") {
-		t.Fatalf("expected not-at-target reason, got %+v", got.Reasons)
+	if strings.Contains(strings.Join(got.Reasons, "; "), "target_fill_pct") {
+		t.Fatalf("warm-fill must not appear as an eligibility blocker, got %+v", got.Reasons)
 	}
 }
 
@@ -385,7 +395,7 @@ func TestPoolSpindownAllowsConfirmedSSDTiersAtTargetFill(t *testing.T) {
 	}
 }
 
-func TestPoolSpindownBlocksWhileTargetBalanceMovementActive(t *testing.T) {
+func TestPoolSpindownReportsActiveTargetBalanceWithoutBlocking(t *testing.T) {
 	h := newTestHandler(t)
 	if err := h.store.CreateTierPoolWithOptions("media", "xfs", []db.TierDefinition{
 		{Name: "NVME", Rank: 1},
@@ -442,17 +452,19 @@ func TestPoolSpindownBlocksWhileTargetBalanceMovementActive(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.Eligible {
-		t.Fatalf("expected active target-balance movement to block spindown: %+v", got)
+	// An in-flight target-balance movement is reported for display but must not
+	// block eligibility.
+	if !got.Eligible {
+		t.Fatalf("active target-balance movement must not block spindown eligibility: %+v", got)
 	}
 	if !got.SSDTargetFill.Satisfied {
-		t.Fatalf("target fill should be satisfied; movement alone should block: %+v", got.SSDTargetFill)
+		t.Fatalf("target fill should be satisfied: %+v", got.SSDTargetFill)
 	}
 	if !got.SSDTargetFill.Movement.Active || got.SSDTargetFill.Movement.PendingMoves != 3 {
 		t.Fatalf("unexpected movement status: %+v", got.SSDTargetFill.Movement)
 	}
-	if !strings.Contains(strings.Join(got.Reasons, "; "), "target-balance placement running") {
-		t.Fatalf("expected movement reason, got %+v", got.Reasons)
+	if strings.Contains(strings.Join(got.Reasons, "; "), "target-balance placement running") {
+		t.Fatalf("movement must not appear as an eligibility blocker, got %+v", got.Reasons)
 	}
 }
 
@@ -1617,3 +1629,124 @@ type staticErr struct{ msg string }
 func (e *staticErr) Error() string { return e.msg }
 
 func stringBody(s string) *strings.Reader { return strings.NewReader(s) }
+
+// TestPoolSpindownEnableAppliesStandbyTimers verifies that enabling pool
+// spindown applies an hdparm standby timer to the pool's rotational backing
+// disks (and only those), persists it per disk, and that disabling clears it.
+func TestPoolSpindownEnableAppliesStandbyTimers(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.store.CreateTierPoolWithOptions("media", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 2},
+	}, true); err != nil {
+		t.Fatalf("create tier pool: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "NVME", "md0"); err != nil {
+		t.Fatalf("assign NVME tier: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "HDD", "md1"); err != nil {
+		t.Fatalf("assign HDD tier: %v", err)
+	}
+	listMDADMArrays = func() ([]mdadm.Array, error) {
+		return []mdadm.Array{
+			{Path: "/dev/md0", MemberDisks: []string{"/dev/nvme0n1"}},
+			{Path: "/dev/md1", MemberDisks: []string{"/dev/sda", "/dev/sdb"}},
+		}, nil
+	}
+	listDisksForSpindown = func() ([]disk.Disk, error) {
+		return []disk.Disk{
+			{Path: "/dev/nvme0n1", Rotational: false},
+			{Path: "/dev/sda", Rotational: true},
+			{Path: "/dev/sdb", Rotational: true},
+		}, nil
+	}
+	timers := map[string]int{}
+	setSpindownTimer = func(path string, minutes int) error {
+		timers[path] = minutes
+		return nil
+	}
+
+	// Enable with an explicit idle timer.
+	w := postJSON(h, http.MethodPut, "/api/tiers/media/spindown", map[string]any{"enabled": true, "idle_minutes": 15})
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT enable: status %d body %s", w.Code, w.Body.String())
+	}
+	if timers["/dev/sda"] != 15 || timers["/dev/sdb"] != 15 {
+		t.Fatalf("expected 15-minute timer on both HDDs, got %#v", timers)
+	}
+	if _, ok := timers["/dev/nvme0n1"]; ok {
+		t.Fatalf("standby timer must not be applied to non-rotational disks: %#v", timers)
+	}
+	for _, name := range []string{"sda", "sdb"} {
+		if got, err := h.store.GetConfig(spindownConfigKey(name)); err != nil || got != "15" {
+			t.Fatalf("expected persisted 15 minutes for %s, got %q err=%v", name, got, err)
+		}
+	}
+
+	// Disable clears the timer on the rotational members.
+	w = postJSON(h, http.MethodPut, "/api/tiers/media/spindown", map[string]any{"enabled": false})
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT disable: status %d body %s", w.Code, w.Body.String())
+	}
+	if timers["/dev/sda"] != 0 || timers["/dev/sdb"] != 0 {
+		t.Fatalf("expected timers cleared on disable, got %#v", timers)
+	}
+}
+
+// TestPoolSpindownEnableDefaultsIdleMinutes verifies the default standby timer
+// is applied when idle_minutes is omitted.
+func TestPoolSpindownEnableDefaultsIdleMinutes(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.store.CreateTierPoolWithOptions("media", "xfs", []db.TierDefinition{
+		{Name: "NVME", Rank: 1},
+		{Name: "HDD", Rank: 2},
+	}, true); err != nil {
+		t.Fatalf("create tier pool: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", "HDD", "md1"); err != nil {
+		t.Fatalf("assign HDD tier: %v", err)
+	}
+	listMDADMArrays = func() ([]mdadm.Array, error) {
+		return []mdadm.Array{{Path: "/dev/md1", MemberDisks: []string{"/dev/sda"}}}, nil
+	}
+	listDisksForSpindown = func() ([]disk.Disk, error) {
+		return []disk.Disk{{Path: "/dev/sda", Rotational: true}}, nil
+	}
+	var applied int
+	setSpindownTimer = func(_ string, minutes int) error { applied = minutes; return nil }
+
+	w := postJSON(h, http.MethodPut, "/api/tiers/media/spindown", map[string]any{"enabled": true})
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT enable: status %d body %s", w.Code, w.Body.String())
+	}
+	if applied != defaultSpindownIdleMinutes {
+		t.Fatalf("expected default %d minutes, got %d", defaultSpindownIdleMinutes, applied)
+	}
+}
+
+// TestReconcileSpindownTimers verifies persisted per-disk timers are re-applied
+// at boot and that zero/absent timers are skipped.
+func TestReconcileSpindownTimers(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.store.SetConfig(spindownConfigKey("sda"), "20"); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+	if err := h.store.SetConfig(spindownConfigKey("sdb"), "0"); err != nil { // disabled
+		t.Fatalf("set config: %v", err)
+	}
+	listDisksForSpindown = func() ([]disk.Disk, error) { return nil, nil } // unused path
+	timers := map[string]int{}
+	setSpindownTimer = func(path string, minutes int) error {
+		timers[path] = minutes
+		return nil
+	}
+
+	ReconcileSpindownTimers(h.store)
+
+	if timers["/dev/sda"] != 20 {
+		t.Fatalf("expected sda re-applied at 20 minutes, got %#v", timers)
+	}
+	if _, ok := timers["/dev/sdb"]; ok {
+		t.Fatalf("disabled (0) timer must not be re-applied, got %#v", timers)
+	}
+}

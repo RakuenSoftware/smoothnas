@@ -105,10 +105,11 @@ export const api = {
   // --- Tiers (heat engine) ---
   getTier: (name: string) => apiFetch<any>('GET', `/tiers/${name}`),
   getTierSpindown: (name: string) => apiFetch<any>('GET', `/tiers/${name}/spindown`),
-  setTierSpindown: (name: string, enabled: boolean, activeWindows?: any[]) =>
+  setTierSpindown: (name: string, enabled: boolean, activeWindows?: any[], idleMinutes?: number) =>
     apiFetch<any>('PUT', `/tiers/${name}/spindown`, {
       enabled,
       ...(activeWindows ? { active_windows: activeWindows } : {}),
+      ...(idleMinutes && idleMinutes > 0 ? { idle_minutes: idleMinutes } : {}),
     }),
   addTierLevel: (poolName: string, data: any) => apiFetch('POST', `/tiers/${poolName}/levels`, data),
   updateTierLevel: (poolName: string, levelName: string, data: any) => apiFetch('PUT', `/tiers/${poolName}/levels/${levelName}`, data),
@@ -131,10 +132,11 @@ export const api = {
   removeL2arc: (pool: string, disks: string[]) => apiFetch('DELETE', `/pools/${pool}/l2arc`, { disks }),
   scrubPool: (pool: string) => apiFetch('POST', `/pools/${pool}/scrub`, {}),
   getPoolSpindown: (pool: string) => apiFetch<any>('GET', `/pools/${pool}/spindown`),
-  setPoolSpindown: (pool: string, enabled: boolean, activeWindows?: any[]) =>
+  setPoolSpindown: (pool: string, enabled: boolean, activeWindows?: any[], idleMinutes?: number) =>
     apiFetch<any>('PUT', `/pools/${pool}/spindown`, {
       enabled,
       ...(activeWindows ? { active_windows: activeWindows } : {}),
+      ...(idleMinutes && idleMinutes > 0 ? { idle_minutes: idleMinutes } : {}),
     }),
   replacePoolDisk: (pool: string, oldDisk: string, newDisk: string) =>
     apiFetch('POST', `/pools/${pool}/disks/${oldDisk}/replace`, { new_disk: newDisk }),

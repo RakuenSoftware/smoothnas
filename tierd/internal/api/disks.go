@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -550,6 +551,53 @@ func (h *DisksHandler) configuredSpindownMinutes(diskName string) int {
 
 func spindownConfigKey(diskName string) string {
 	return diskSpindownConfigPrefix + diskName + ".idle_minutes"
+}
+
+// ReconcileSpindownTimers re-applies persisted per-disk standby timers to the
+// hardware. hdparm settings are volatile and lost on reboot, so without this
+// any configured spindown timer (set per-disk or via pool spindown) stops
+// working after a restart. Intended to be called once at startup. Best-effort:
+// missing disks and per-disk failures are logged and skipped.
+func ReconcileSpindownTimers(store *db.Store) {
+	if store == nil {
+		return
+	}
+	entries, err := store.ListConfigByPrefix(diskSpindownConfigPrefix)
+	if err != nil {
+		log.Printf("spindown reconcile: list config: %v", err)
+		return
+	}
+	if len(entries) == 0 {
+		return
+	}
+	present := make(map[string]bool)
+	if disks, err := listDisksForSpindown(); err == nil {
+		for _, d := range disks {
+			present[strings.TrimPrefix(disk.BaseDiskPath(d.Path), "/dev/")] = true
+		}
+	}
+	for key, val := range entries {
+		name := strings.TrimSuffix(strings.TrimPrefix(key, diskSpindownConfigPrefix), ".idle_minutes")
+		if name == "" || name == key {
+			continue
+		}
+		minutes, err := strconv.Atoi(val)
+		if err != nil || minutes <= 0 {
+			continue // unset/disabled timers need no action
+		}
+		if len(present) > 0 && !present[name] {
+			continue // disk no longer attached
+		}
+		devicePath := "/dev/" + name
+		if err := disableDiskAPM(devicePath); err != nil {
+			log.Printf("spindown reconcile: disable APM on %s: %v", devicePath, err)
+		}
+		if err := setSpindownTimer(devicePath, minutes); err != nil {
+			log.Printf("spindown reconcile: set standby timer on %s: %v", devicePath, err)
+			continue
+		}
+		log.Printf("spindown reconcile: re-applied %d-minute standby timer to %s", minutes, devicePath)
+	}
 }
 
 func (h *DisksHandler) routeAlarms(w http.ResponseWriter, r *http.Request) {
