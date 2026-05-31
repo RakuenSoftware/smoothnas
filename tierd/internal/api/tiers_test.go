@@ -194,8 +194,16 @@ func TestPoolSpindownEnableRemountsNoatimeAndPersists(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("PUT spindown: status %d body %s", w.Code, w.Body.String())
 	}
-	if len(remounted) != 3 {
-		t.Fatalf("expected three noatime remounts, got %#v", remounted)
+	// The smoothfs pool overlay (/mnt/media) must be skipped — it can't be
+	// remounted noatime ("Unknown parameter 'fsid'"). Only the two backing tier
+	// mounts get remounted.
+	if len(remounted) != 2 {
+		t.Fatalf("expected two backing noatime remounts (smoothfs overlay skipped), got %#v", remounted)
+	}
+	for _, p := range remounted {
+		if p == "/mnt/media" {
+			t.Fatalf("smoothfs overlay /mnt/media must not be remounted: %#v", remounted)
+		}
 	}
 	enabled, err := h.store.GetBoolConfig(poolSpindownConfigKey("media"), false)
 	if err != nil || !enabled {

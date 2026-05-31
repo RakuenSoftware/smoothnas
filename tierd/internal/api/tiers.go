@@ -762,6 +762,15 @@ func applyNoatimeToPoolMounts(pool db.TierInstance, slots []db.TierSlot) error {
 		if !mount.Mounted {
 			continue
 		}
+		// The smoothfs pool overlay (and other FUSE/virtual mounts) cannot be
+		// remounted with noatime — it rejects its own replayed mount params
+		// ("Unknown parameter 'fsid'"). It is also pointless: atime on the
+		// overlay is irrelevant to HDD spindown, which is governed by the
+		// backing tier mounts. Skip pseudo filesystems and only remount the
+		// real backing filesystems.
+		if fstype := mountFSType(mount.Path); fstype == "smoothfs" || strings.HasPrefix(fstype, "fuse") {
+			continue
+		}
 		if err := remountNoatime(mount.Path); err != nil {
 			return err
 		}
@@ -778,6 +787,30 @@ func remountPathNoatime(path string) error {
 		return fmt.Errorf("remount noatime %s: %s: %w", path, strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+// mountFSType returns the filesystem type for a mount point from
+// /proc/self/mountinfo, or "" if the path is not mounted. The fstype is the
+// first token after the " - " separator in each mountinfo line.
+func mountFSType(path string) string {
+	data, err := readMountInfo()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		sep := strings.Index(line, " - ")
+		if sep < 0 {
+			continue
+		}
+		left := strings.Fields(line[:sep])
+		if len(left) < 5 || left[4] != path {
+			continue
+		}
+		if right := strings.Fields(line[sep+3:]); len(right) >= 1 {
+			return right[0]
+		}
+	}
+	return ""
 }
 
 func mountHasOption(path, option string) (bool, bool) {
