@@ -29,6 +29,7 @@ export default function Tiers() {
   const [namespaces, setNamespaces] = useState<any[]>([]);
   const [spindownByPool, setSpindownByPool] = useState<Record<string, any>>({});
   const [spindownBusy, setSpindownBusy] = useState<Record<string, boolean>>({});
+  const [spindownIdleByPool, setSpindownIdleByPool] = useState<Record<string, number>>({});
   const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({});
   const [createName, setCreateName] = useState('');
   const [creating, setCreating] = useState(false);
@@ -134,7 +135,8 @@ export default function Tiers() {
 
   function setPoolSpindown(poolName: string, enabled: boolean) {
     setSpindownBusy(prev => ({ ...prev, [poolName]: true }));
-    api.setTierSpindown(poolName, enabled)
+    const idleMinutes = enabled ? (spindownIdleByPool[poolName] || 20) : undefined;
+    api.setTierSpindown(poolName, enabled, undefined, idleMinutes)
       .then((policy: any) => {
         setSpindownByPool(prev => ({ ...prev, [poolName]: policy }));
         toast.success(enabled ? t('tiers.toast.spindownEnabled') : t('tiers.toast.spindownDisabled'));
@@ -544,6 +546,17 @@ export default function Tiers() {
                             <span style={{ fontSize: 12, color: '#777', maxWidth: 240, textAlign: 'right' }}>
                               {policy.reasons.join('; ')}
                             </span>
+                          )}
+                          {!policy.enabled && (
+                            <input
+                              type="number"
+                              min={1}
+                              max={330}
+                              style={{ width: 52, fontSize: 11 }}
+                              title={t('tiers.spindown.idleMinutesTooltip')}
+                              value={spindownIdleByPool[tier.name] ?? 20}
+                              onChange={e => setSpindownIdleByPool(prev => ({ ...prev, [tier.name]: Number(e.target.value) }))}
+                            />
                           )}
                           <button
                             className="btn secondary"

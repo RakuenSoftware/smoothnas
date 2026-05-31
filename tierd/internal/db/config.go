@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 // GetConfig returns a persisted appliance config value.
@@ -64,4 +65,30 @@ func (s *Store) DeleteConfig(key string) error {
 		return fmt.Errorf("delete config %q: %w", key, err)
 	}
 	return nil
+}
+
+// ListConfigByPrefix returns all config key/value pairs whose key starts with
+// the given prefix. Used to enumerate per-disk settings (e.g. spindown timers)
+// for boot-time reconciliation.
+func (s *Store) ListConfigByPrefix(prefix string) (map[string]string, error) {
+	rows, err := s.db.Query(`SELECT key, value FROM config WHERE key LIKE ? ESCAPE '\'`, escapeLike(prefix)+"%")
+	if err != nil {
+		return nil, fmt.Errorf("list config by prefix %q: %w", prefix, err)
+	}
+	defer rows.Close()
+	result := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, fmt.Errorf("scan config row: %w", err)
+		}
+		result[k] = v
+	}
+	return result, rows.Err()
+}
+
+// escapeLike escapes LIKE wildcards so a literal prefix is matched verbatim.
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }
