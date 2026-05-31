@@ -21,6 +21,8 @@ var spindownNow = time.Now
 var listDisksForSpindown = disk.List
 var queryPowerStateForSpindown = disk.QueryPowerState
 var zfsMemberDevicesForSpindown = zfs.MemberDevices
+var setSpindownTimer = disk.SetSpindownTimer
+var disableDiskAPM = disk.DisableAPM
 
 func poolMaintenanceDecision(store *db.Store, poolName string, now time.Time) (spindown.Decision, error) {
 	devices, err := poolBackingDevices(store, poolName)

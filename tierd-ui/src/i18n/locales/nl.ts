@@ -892,6 +892,7 @@ const nl: LanguageTranslations = {
   'tiers.spindown.notAtTarget': 'niet op doel',
   'tiers.spindown.disableTooltip': 'Pool-spindown-beleid uitschakelen',
   'tiers.spindown.enableTooltip': 'Pool-spindown-beleid inschakelen',
+  'tiers.spindown.idleMinutesTooltip': 'Inactieve minuten voordat HDDs uitschakelen',
   'tiers.spindown.working': 'Bezig...',
   'tiers.spindown.nightly': 'Nachtelijk',
   'tiers.spindown.nightlyTooltip': 'Onderhoud uitvoeren tijdens het dagelijkse 01:00–06:00 actieve venster',

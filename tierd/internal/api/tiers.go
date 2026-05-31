@@ -165,7 +165,15 @@ type poolSpindownPolicyResponse struct {
 type updatePoolSpindownRequest struct {
 	Enabled       bool                     `json:"enabled"`
 	ActiveWindows *[]spindown.ActiveWindow `json:"active_windows,omitempty"`
+	// IdleMinutes is the hdparm standby timer applied to the pool's rotational
+	// backing disks when spindown is enabled. Defaults to defaultSpindownIdleMinutes
+	// when nil or non-positive.
+	IdleMinutes *int `json:"idle_minutes,omitempty"`
 }
+
+// defaultSpindownIdleMinutes is the standby timer applied to a pool's HDDs when
+// pool spindown is enabled without an explicit idle_minutes value.
+const defaultSpindownIdleMinutes = 20
 
 var (
 	createPoolVG            = lvm.VGCreateEmpty
@@ -456,6 +464,14 @@ func (h *ArraysHandler) updatePoolSpindown(w http.ResponseWriter, r *http.Reques
 			serverError(w, err)
 			return
 		}
+		idleMinutes := defaultSpindownIdleMinutes
+		if req.IdleMinutes != nil && *req.IdleMinutes > 0 {
+			idleMinutes = *req.IdleMinutes
+		}
+		applyPoolSpindownTimers(h.store, poolName, idleMinutes)
+	} else {
+		// Disabling: clear the standby timer on every rotational backing disk.
+		applyPoolSpindownTimers(h.store, poolName, 0)
 	}
 	if req.ActiveWindows != nil {
 		if _, err := spindown.StoreWindows(h.store, spindown.PoolWindowsKey(poolName), *req.ActiveWindows); err != nil {
@@ -521,6 +537,56 @@ func poolSpindownConfigKey(poolName string) string {
 	return spindown.PoolEnabledKey(poolName)
 }
 
+// applyPoolSpindownTimers enumerates a pool's rotational backing disks and
+// applies the hdparm standby timer to each, persisting the value per disk under
+// the same key the Disks page uses (disk.spindown.<name>.idle_minutes) so the
+// boot-time reconcile re-applies it after a reboot. idleMinutes == 0 disables
+// the timer. Per-disk failures are logged and skipped (best-effort) so a mixed
+// or unsupported drive does not block the pool policy. Returns the base disk
+// paths that were processed.
+func applyPoolSpindownTimers(store *db.Store, poolName string, idleMinutes int) []string {
+	devices, err := poolBackingDevices(store, poolName)
+	if err != nil {
+		log.Printf("pool spindown %s: enumerate backing devices: %v", poolName, err)
+		return nil
+	}
+	disks, err := listDisksForSpindown()
+	if err != nil {
+		log.Printf("pool spindown %s: list disks: %v", poolName, err)
+		return nil
+	}
+	rotational := make(map[string]bool, len(disks))
+	for _, d := range disks {
+		rotational[disk.BaseDiskPath(d.Path)] = d.Rotational
+	}
+	seen := make(map[string]bool)
+	var processed []string
+	for _, dev := range devices {
+		base := disk.BaseDiskPath(dev)
+		if seen[base] || !rotational[base] {
+			continue
+		}
+		seen[base] = true
+		if idleMinutes > 0 {
+			if err := disableDiskAPM(base); err != nil {
+				log.Printf("pool spindown %s: disable APM on %s: %v", poolName, base, err)
+			}
+		}
+		if err := setSpindownTimer(base, idleMinutes); err != nil {
+			log.Printf("pool spindown %s: set standby timer on %s: %v", poolName, base, err)
+			continue
+		}
+		if store != nil {
+			name := strings.TrimPrefix(base, "/dev/")
+			if err := store.SetConfig(spindownConfigKey(name), strconv.Itoa(idleMinutes)); err != nil {
+				log.Printf("pool spindown %s: persist timer for %s: %v", poolName, name, err)
+			}
+		}
+		processed = append(processed, base)
+	}
+	return processed
+}
+
 func poolSpindownIneligibleReasons(pool db.TierInstance, slots []db.TierSlot, warmFill poolSpindownWarmFillResponse) []string {
 	var reasons []string
 	assigned := assignedTierSlots(slots)
@@ -530,24 +596,18 @@ func poolSpindownIneligibleReasons(pool db.TierInstance, slots []db.TierSlot, wa
 	if !pool.MetaOnFastest {
 		reasons = append(reasons, "pool metadata is not pinned to the fastest tier")
 	}
-	if warmFill.Required && !warmFill.Satisfied && !warmFill.Movement.CandidateExhausted {
-		reasons = append(reasons, warmFill.Reason)
-	}
-	if warmFill.Movement.Active || warmFill.Movement.PendingMoves > 0 {
-		reasons = append(reasons, poolSpindownTargetBalanceMovementReason(warmFill.Movement))
-	}
+	// Warm-fill (SSD/NVMe target_fill_pct) is a read-performance optimisation,
+	// not a precondition for enabling spindown. Gating eligibility on it created
+	// an unsatisfiable deadlock: the target-balance rebalance that sets
+	// CandidateExhausted only runs while spindown is already active (and only on
+	// the mdadm adapter — ZFS pools never run it at all), so the SSD could never
+	// reach target before enablement. Parking HDDs before the SSD is warmed is
+	// safe — a cold read simply spins a disk back up. Warm-fill state is still
+	// reported in poolSpindownPolicyResponse.SSDTargetFill for display.
+	_ = warmFill
 	return reasons
 }
 
-func poolSpindownTargetBalanceMovementReason(status spindown.TargetBalanceStatus) string {
-	if status.Reason != "" {
-		return status.Reason
-	}
-	if status.Active {
-		return "SSD target-balance placement is still running"
-	}
-	return "SSD target-balance placement has pending moves"
-}
 
 func poolSpindownSSDTargetFill(pool db.TierInstance, slots []db.TierSlot) poolSpindownWarmFillResponse {
 	resp := poolSpindownWarmFillResponse{

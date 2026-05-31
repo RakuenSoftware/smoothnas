@@ -27,6 +27,7 @@ export default function Zfs() {
   const [confirmMessage, setConfirmMessage] = useState('');
   const [spindownByPool, setSpindownByPool] = useState<Record<string, any>>({});
   const [spindownBusy, setSpindownBusy] = useState<Record<string, boolean>>({});
+  const [spindownIdleByPool, setSpindownIdleByPool] = useState<Record<string, number>>({});
   const confirmAction = useRef<(() => void) | null>(null);
   const stopPollRef = useRef<(() => void) | null>(null);
 
@@ -122,7 +123,8 @@ export default function Zfs() {
 
   function setRawPoolSpindown(poolName: string, enabled: boolean, activeWindows?: any[]) {
     setSpindownBusy(prev => ({ ...prev, [poolName]: true }));
-    api.setPoolSpindown(poolName, enabled, activeWindows)
+    const idleMinutes = enabled ? (spindownIdleByPool[poolName] || 20) : undefined;
+    api.setPoolSpindown(poolName, enabled, activeWindows, idleMinutes)
       .then((policy: any) => {
         setSpindownByPool(prev => ({ ...prev, [poolName]: policy }));
         toast.success(enabled ? 'Pool spindown enabled' : 'Pool spindown disabled');
@@ -239,6 +241,11 @@ export default function Zfs() {
                             {!policy.eligible && policy.reasons?.length > 0 && (
                               <span style={{ fontSize: 12, color: '#777' }}>{policy.reasons.join('; ')}</span>
                             )}
+                            {policy.ssd_target_fill?.required && !policy.ssd_target_fill?.satisfied && (
+                              <span className="badge" title="Hot data is still being staged onto SSD/NVMe. Spindown can be enabled now; HDDs will park and reads may briefly wake them until warm-fill completes.">
+                                SSD warm-fill pending
+                              </span>
+                            )}
                           </div>
                         )}
                       </td>
@@ -251,6 +258,18 @@ export default function Zfs() {
                         {' '}
                         {policy && (
                           <>
+                            {!policy.enabled && (
+                              <input
+                                type="number"
+                                min={1}
+                                max={330}
+                                title="Idle minutes before HDDs spin down"
+                                style={{ width: 56 }}
+                                value={spindownIdleByPool[pool.name] ?? 20}
+                                onChange={e => setSpindownIdleByPool(prev => ({ ...prev, [pool.name]: Number(e.target.value) }))}
+                              />
+                            )}
+                            {' '}
                             <button
                               className="btn secondary"
                               disabled={busy || (!policy.enabled && !policy.eligible)}

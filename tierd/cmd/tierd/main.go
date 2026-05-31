@@ -155,6 +155,11 @@ func main() {
 
 	go tierManager.Reconcile()
 
+	// Re-apply persisted disk standby timers — hdparm settings are volatile and
+	// lost on reboot, so configured spindown would otherwise stop working after
+	// a restart. Best-effort, runs in the background.
+	go api.ReconcileSpindownTimers(store)
+
 	mdadmRunDir := os.Getenv("TIERD_MDADM_RUN_DIR")
 	if mdadmRunDir == "" {
 		mdadmRunDir = "/run/tierd/mdadm"
