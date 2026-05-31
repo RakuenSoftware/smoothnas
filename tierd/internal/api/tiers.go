@@ -515,6 +515,14 @@ func (h *ArraysHandler) poolSpindownPolicy(poolName string) (*poolSpindownPolicy
 		return nil, err
 	}
 	warmFill.Movement = movement
+	// When the target-balance rebalance has exhausted candidates, the SSD/NVMe
+	// tiers are as full as the available data allows — warm-fill is complete
+	// (best effort), even if the exact target_fill_pct is a hair out of reach.
+	// Replace the "keep HDDs active until warm-fill completes" wording so the UI
+	// and API don't imply the disks are being held awake.
+	if warmFill.Required && !warmFill.Satisfied && movement.CandidateExhausted {
+		warmFill.Reason = "SSD/NVMe tiers are as full as the available data allows; warm-fill is complete (best effort)"
+	}
 	reasons := poolSpindownIneligibleReasons(*pool, slots, warmFill)
 	resp := &poolSpindownPolicyResponse{
 		Enabled:       enabled,
