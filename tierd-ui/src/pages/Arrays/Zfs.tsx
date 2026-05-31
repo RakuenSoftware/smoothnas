@@ -241,9 +241,9 @@ export default function Zfs() {
                             {!policy.eligible && policy.reasons?.length > 0 && (
                               <span style={{ fontSize: 12, color: '#777' }}>{policy.reasons.join('; ')}</span>
                             )}
-                            {policy.ssd_target_fill?.required && !policy.ssd_target_fill?.satisfied && (
+                            {policy.ssd_target_fill?.required && !policy.ssd_target_fill?.satisfied && !policy.ssd_target_fill?.movement?.candidate_exhausted && (
                               <span className="badge" title="Hot data is still being staged onto SSD/NVMe. Spindown can be enabled now; HDDs will park and reads may briefly wake them until warm-fill completes.">
-                                SSD warm-fill pending
+                                SSD warm-fill in progress
                               </span>
                             )}
                           </div>
