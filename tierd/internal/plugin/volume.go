@@ -32,10 +32,15 @@ type TierAssignments struct {
 	Default   string
 }
 
-// Resolve returns the tier name chosen for volumeName, or "" if
-// neither PerVolume[volumeName] nor Default is set.
-func (a TierAssignments) Resolve(volumeName string) string {
+// Resolve returns the tier name chosen for a (service, volume) pair, or
+// "" if no assignment applies. A "service/volume" composite key wins
+// over a bare "volume" key (which keeps single-service callers working),
+// and both win over Default.
+func (a TierAssignments) Resolve(service, volumeName string) string {
 	if a.PerVolume != nil {
+		if name, ok := a.PerVolume[service+"/"+volumeName]; ok && name != "" {
+			return name
+		}
 		if name, ok := a.PerVolume[volumeName]; ok && name != "" {
 			return name
 		}
@@ -47,8 +52,9 @@ func (a TierAssignments) Resolve(volumeName string) string {
 // tier + path for one volume. Errors and warnings are per-volume so
 // the UI can render them next to the picker that produced them.
 type VolumePlacement struct {
+	Service  string
 	Volume   string
-	Pool     string   // empty when Errors is non-empty and pool couldn't be resolved
+	Pool     string // empty when Errors is non-empty and pool couldn't be resolved
 	Slot     string
 	HostPath string   // empty when Errors is non-empty
 	Errors   []string // any error blocks install
@@ -63,11 +69,24 @@ type PreflightResult struct {
 }
 
 // ResolveTierBoundHostPath is the canonical path computation for a
-// plugin's tier-bound volume. The leading "." in ".plugins/" keeps
-// plugin data out of casual SMB/NFS browsing of the share root,
-// while sharing the tier's failure domain + performance profile.
-func ResolveTierBoundHostPath(mountPoint, pluginName, volumeName string) string {
-	return filepath.Join(mountPoint, ".plugins", pluginName, volumeName)
+// plugin service's tier-bound volume. The leading "." in ".plugins/"
+// keeps plugin data out of casual SMB/NFS browsing of the share root,
+// while sharing the tier's failure domain + performance profile. A
+// service segment is inserted only for extra services (service != plugin
+// name), keeping single-container plugins on the original layout.
+func ResolveTierBoundHostPath(mountPoint, pluginName, service, volumeName string) string {
+	return filepath.Join(mountPoint, ".plugins", pluginName, servicePathSegment(pluginName, service), volumeName)
+}
+
+// servicePathSegment returns the per-service path segment: empty for the
+// plugin-named service (so single-container plugins keep their original
+// "<plugin>/<volume>" layout), the service name otherwise. filepath.Join
+// drops empty segments, so callers can splice it in unconditionally.
+func servicePathSegment(pluginName, service string) string {
+	if service == pluginName {
+		return ""
+	}
+	return service
 }
 
 // PreflightTierAssignments runs every install-time gate against the
@@ -79,14 +98,14 @@ func ResolveTierBoundHostPath(mountPoint, pluginName, volumeName string) string 
 //
 //  1. Tier exists                — GetTierInstance returns a row
 //  2. Slot exists                — slot is one of the seeded defaults
-//                                  (NVME/SSD/HDD) or appears in ListTierSlots
+//     (NVME/SSD/HDD) or appears in ListTierSlots
 //  3. Tier mounted               — pool.State is healthy or degraded
-//                                  (a degraded pool is still writable)
+//     (a degraded pool is still writable)
 //  4. Free space                 — statfs(mountpoint).avail ≥ minSize
-//                                  (warn-only; some plugins legitimately
-//                                  ignore minSize)
+//     (warn-only; some plugins legitimately
+//     ignore minSize)
 //  5. No path conflict           — the would-be host path does not yet
-//                                  exist (a leftover from a prior install)
+//     exist (a leftover from a prior install)
 //
 // Flat-mode volumes are reported as a single Placement with the
 // flat host path filled in and zero errors — they bypass the gates
@@ -100,80 +119,84 @@ func PreflightTierAssignments(tp TierProvider, statfs Statfser, m *Manifest, ass
 	}
 
 	out := &PreflightResult{OK: true}
-	for _, vol := range m.Volumes {
-		p := VolumePlacement{
-			Volume: vol.Name,
-			Slot:   vol.Slot,
-		}
+	for si := range m.Services {
+		svc := &m.Services[si]
+		for _, vol := range svc.Volumes {
+			p := VolumePlacement{
+				Service: svc.Name,
+				Volume:  vol.Name,
+				Slot:    vol.Slot,
+			}
 
-		switch vol.Mode {
-		case VolumeModeFlat:
-			// Flat volumes always live under DefaultPluginsRoot.
-			// pluginsRoot lets tests override.
-			p.HostPath = filepath.Join(pluginsRoot, m.Metadata.Name, vol.Name)
-			out.Placements = append(out.Placements, p)
-			continue
-
-		case VolumeModeTierBound:
-			poolName := assignments.Resolve(vol.Name)
-			if poolName == "" {
-				p.Errors = append(p.Errors,
-					fmt.Sprintf("no tier assignment for volume %q (set --tier or pass tier_assignments)", vol.Name))
-				out.OK = false
+			switch vol.Mode {
+			case VolumeModeFlat:
+				// Flat volumes always live under DefaultPluginsRoot.
+				// pluginsRoot lets tests override.
+				p.HostPath = filepath.Join(pluginsRoot, m.Metadata.Name, servicePathSegment(m.Metadata.Name, svc.Name), vol.Name)
 				out.Placements = append(out.Placements, p)
 				continue
-			}
-			p.Pool = poolName
 
-			pool, err := tp.GetTierInstance(poolName)
-			if err != nil {
-				if errors.Is(err, db.ErrNotFound) {
-					p.Errors = append(p.Errors, fmt.Sprintf("tier %q does not exist", poolName))
-				} else {
-					return nil, fmt.Errorf("get tier %s: %w", poolName, err)
+			case VolumeModeTierBound:
+				poolName := assignments.Resolve(svc.Name, vol.Name)
+				if poolName == "" {
+					p.Errors = append(p.Errors,
+						fmt.Sprintf("no tier assignment for volume %q/%q (set --tier or pass tier_assignments)", svc.Name, vol.Name))
+					out.OK = false
+					out.Placements = append(out.Placements, p)
+					continue
 				}
-				out.OK = false
+				p.Pool = poolName
+
+				pool, err := tp.GetTierInstance(poolName)
+				if err != nil {
+					if errors.Is(err, db.ErrNotFound) {
+						p.Errors = append(p.Errors, fmt.Sprintf("tier %q does not exist", poolName))
+					} else {
+						return nil, fmt.Errorf("get tier %s: %w", poolName, err)
+					}
+					out.OK = false
+					out.Placements = append(out.Placements, p)
+					continue
+				}
+
+				if !slotExists(tp, poolName, vol.Slot) {
+					p.Errors = append(p.Errors,
+						fmt.Sprintf("slot %q does not exist on tier %q", vol.Slot, poolName))
+					out.OK = false
+				}
+
+				if !poolReady(pool) {
+					p.Errors = append(p.Errors,
+						fmt.Sprintf("tier %q is in state %q; install requires healthy or degraded",
+							poolName, pool.State))
+					out.OK = false
+				}
+
+				hostPath := ResolveTierBoundHostPath(pool.MountPoint, m.Metadata.Name, svc.Name, vol.Name)
+				p.HostPath = hostPath
+
+				if _, err := os.Stat(hostPath); err == nil {
+					p.Errors = append(p.Errors,
+						fmt.Sprintf("path %s already exists; remove it or pick a different plugin name", hostPath))
+					out.OK = false
+				}
+
+				// Free-space check is warn-only — some plugins legitimately
+				// declare a large minSize as a hint, not a hard requirement.
+				if minBytes, parsed := parseSize(vol.MinSize); parsed && pool.MountPoint != "" {
+					avail, err := statfs(pool.MountPoint)
+					if err == nil && avail < minBytes {
+						p.Warnings = append(p.Warnings,
+							fmt.Sprintf("tier %q has %s available; volume requests at least %s",
+								poolName, formatBytes(avail), vol.MinSize))
+					}
+				}
+
 				out.Placements = append(out.Placements, p)
-				continue
+
+			default:
+				return nil, fmt.Errorf("preflight: unknown volume mode %q for %q/%q", vol.Mode, svc.Name, vol.Name)
 			}
-
-			if !slotExists(tp, poolName, vol.Slot) {
-				p.Errors = append(p.Errors,
-					fmt.Sprintf("slot %q does not exist on tier %q", vol.Slot, poolName))
-				out.OK = false
-			}
-
-			if !poolReady(pool) {
-				p.Errors = append(p.Errors,
-					fmt.Sprintf("tier %q is in state %q; install requires healthy or degraded",
-						poolName, pool.State))
-				out.OK = false
-			}
-
-			hostPath := ResolveTierBoundHostPath(pool.MountPoint, m.Metadata.Name, vol.Name)
-			p.HostPath = hostPath
-
-			if _, err := os.Stat(hostPath); err == nil {
-				p.Errors = append(p.Errors,
-					fmt.Sprintf("path %s already exists; remove it or pick a different plugin name", hostPath))
-				out.OK = false
-			}
-
-			// Free-space check is warn-only — some plugins legitimately
-			// declare a large minSize as a hint, not a hard requirement.
-			if minBytes, parsed := parseSize(vol.MinSize); parsed && pool.MountPoint != "" {
-				avail, err := statfs(pool.MountPoint)
-				if err == nil && avail < minBytes {
-					p.Warnings = append(p.Warnings,
-						fmt.Sprintf("tier %q has %s available; volume requests at least %s",
-							poolName, formatBytes(avail), vol.MinSize))
-				}
-			}
-
-			out.Placements = append(out.Placements, p)
-
-		default:
-			return nil, fmt.Errorf("preflight: unknown volume mode %q for %q", vol.Mode, vol.Name)
 		}
 	}
 	return out, nil

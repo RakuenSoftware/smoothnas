@@ -502,7 +502,7 @@ func TestStore_SetResolvedProfilesPersists(t *testing.T) {
 	m := mustParse(t, "llama.yaml")
 	if err := s.Insert(InsertParams{
 		Manifest: m,
-		Paths:    pathsForSingleInstance(m, "/tmp"),
+		Paths:    pathsFor(m, "/tmp"),
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}

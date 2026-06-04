@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -41,6 +42,12 @@ const (
 	AuthBearerInjected = "bearer-injected"
 )
 
+// dependsOn start conditions.
+const (
+	DependsServiceStarted = "service_started"
+	DependsServiceHealthy = "service_healthy"
+)
+
 // Config field types.
 const (
 	ConfigTypeString  = "string"
@@ -59,18 +66,56 @@ const (
 
 // Manifest is the parsed in-memory form of smoothnas-plugin.yaml.
 // Field-level validation lives in ValidateManifest.
+//
+// metadata, instances, ui, and profiles are plugin-level. Everything
+// that was per-image — artifact, container, volumes, ports, config —
+// lives under a named Service: a plugin owns its services as a single
+// managed set (compose-style). See plugins-10-compose-services.
 type Manifest struct {
-	APIVersion string        `json:"apiVersion" yaml:"apiVersion"`
-	Kind       string        `json:"kind" yaml:"kind"`
-	Metadata   Metadata      `json:"metadata" yaml:"metadata"`
-	Artifact   Artifact      `json:"artifact" yaml:"artifact"`
-	Container  Container     `json:"container" yaml:"container"`
-	Instances  Instances     `json:"instances" yaml:"instances"`
-	Volumes    []Volume      `json:"volumes,omitempty" yaml:"volumes"`
-	Ports      []Port        `json:"ports,omitempty" yaml:"ports"`
-	UI         *UI           `json:"ui,omitempty" yaml:"ui,omitempty"`
-	Profiles   []string      `json:"profiles,omitempty" yaml:"profiles"`
-	Config     []ConfigField `json:"config,omitempty" yaml:"config"`
+	APIVersion string    `json:"apiVersion" yaml:"apiVersion"`
+	Kind       string    `json:"kind" yaml:"kind"`
+	Metadata   Metadata  `json:"metadata" yaml:"metadata"`
+	Instances  Instances `json:"instances" yaml:"instances"`
+	UI         *UI       `json:"ui,omitempty" yaml:"ui,omitempty"`
+	Profiles   []string  `json:"profiles,omitempty" yaml:"profiles"`
+
+	// Services is required and non-empty. A single-container plugin is
+	// simply one service; the retired top-level single-image shape has
+	// no backward-compatibility path (strict YAML decode rejects it).
+	Services []Service `json:"services" yaml:"services"`
+}
+
+// Service is one container within a plugin. Artifact, container knobs,
+// volumes, ports, and config are all per-service; the plugin owns the
+// services as one lifecycle unit. Replica fan-out (instances) is
+// plugin-level and applies to every service uniformly.
+type Service struct {
+	Name      string                      `json:"name" yaml:"name"`
+	Artifact  Artifact                    `json:"artifact" yaml:"artifact"`
+	Container Container                   `json:"container,omitempty" yaml:"container,omitempty"`
+	Env       map[string]string           `json:"env,omitempty" yaml:"env,omitempty"`
+	Volumes   []Volume                    `json:"volumes,omitempty" yaml:"volumes"`
+	Ports     []Port                      `json:"ports,omitempty" yaml:"ports"`
+	Config    []ConfigField               `json:"config,omitempty" yaml:"config"`
+	DependsOn map[string]DependsCondition `json:"dependsOn,omitempty" yaml:"dependsOn,omitempty"`
+	Health    *Healthcheck                `json:"health,omitempty" yaml:"health,omitempty"`
+}
+
+// DependsCondition is the start gate for one dependsOn edge. The map
+// key (in Service.DependsOn) is the sibling service name.
+type DependsCondition struct {
+	Condition string `json:"condition" yaml:"condition"`
+}
+
+// Healthcheck mirrors the compose / LXC2Docker healthcheck surface. A
+// dependent declaring a service_healthy dependency requires its target
+// to carry one.
+type Healthcheck struct {
+	Test        []string `json:"test" yaml:"test"`
+	Interval    string   `json:"interval,omitempty" yaml:"interval,omitempty"`
+	Timeout     string   `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	Retries     int      `json:"retries,omitempty" yaml:"retries,omitempty"`
+	StartPeriod string   `json:"startPeriod,omitempty" yaml:"startPeriod,omitempty"`
 }
 
 // Metadata is the descriptive header.
@@ -232,15 +277,177 @@ func ValidateManifest(m *Manifest) error {
 	}
 
 	validateMetadata(v, &m.Metadata)
-	validateArtifact(v, &m.Artifact)
-	validateContainer(v, &m.Container, &m.Artifact, m.Config)
-	validateInstances(v, &m.Instances, m.Volumes)
-	validateVolumes(v, m.Volumes)
-	validatePorts(v, m.Ports)
+	validateInstances(v, &m.Instances, m.allVolumes())
 	validateUI(v, m.UI)
-	validateConfig(v, m.Config)
+	validateServices(v, m.Services)
 
 	return v.asError()
+}
+
+// allVolumes flattens every service's volumes. The instances check only
+// asks whether any volume opts into perInstance, so a union is enough.
+func (m *Manifest) allVolumes() []Volume {
+	var out []Volume
+	for i := range m.Services {
+		out = append(out, m.Services[i].Volumes...)
+	}
+	return out
+}
+
+// validateServices checks the service set: non-empty, unique DNS-label
+// names, per-service artifact/container/volume/port/config rules, no
+// host-port collisions across services, and an acyclic dependsOn graph.
+func validateServices(v *ValidationError, services []Service) {
+	if len(services) == 0 {
+		v.add("services", "at least one service is required")
+		return
+	}
+
+	names := make(map[string]bool, len(services))
+	for i := range services {
+		names[services[i].Name] = true
+	}
+
+	seenName := map[string]bool{}
+	hostPorts := map[int]string{} // host-published container port -> owning service
+	for i := range services {
+		s := &services[i]
+		prefix := fmt.Sprintf("services[%d]", i)
+
+		if !reName.MatchString(s.Name) {
+			v.add(prefix+".name", "must match %s (DNS-1123 label, ≤40 chars)", reName)
+		}
+		if seenName[s.Name] {
+			v.add(prefix+".name", "duplicate service name %q", s.Name)
+		}
+		seenName[s.Name] = true
+
+		validateArtifact(v, prefix, &s.Artifact)
+		validateContainer(v, prefix, &s.Container, &s.Artifact, s.Config)
+		validateVolumes(v, prefix, s.Volumes)
+		validatePorts(v, prefix, s.Ports)
+		validateConfig(v, prefix, s.Config)
+
+		// Host-published ports map to the same port on the SmoothNAS
+		// host, so two services of one plugin can't claim the same one.
+		for _, p := range s.Ports {
+			if !p.HostExpose {
+				continue
+			}
+			if owner, ok := hostPorts[p.Port]; ok {
+				v.add(prefix+".ports", "host-published port %d already published by service %q", p.Port, owner)
+			} else {
+				hostPorts[p.Port] = s.Name
+			}
+		}
+
+		validateDependsOn(v, prefix, s, names, services)
+	}
+
+	if cycle := dependsCycle(services); len(cycle) > 0 {
+		v.add("services", "dependsOn graph has a cycle: %s", strings.Join(cycle, " -> "))
+	}
+}
+
+// validateDependsOn checks one service's dependsOn edges: each target
+// is a distinct sibling, the condition is recognised, and a
+// service_healthy target actually declares a health block.
+func validateDependsOn(v *ValidationError, prefix string, s *Service, names map[string]bool, services []Service) {
+	for dep, cond := range s.DependsOn {
+		field := prefix + ".dependsOn." + dep
+		switch {
+		case dep == s.Name:
+			v.add(field, "service %q cannot depend on itself", s.Name)
+		case !names[dep]:
+			v.add(field, "references unknown service %q", dep)
+		}
+		switch cond.Condition {
+		case DependsServiceStarted:
+		case DependsServiceHealthy:
+			if t := findService(services, dep); t != nil && t.Health == nil {
+				v.add(field, "condition %q requires service %q to declare a health block", DependsServiceHealthy, dep)
+			}
+		case "":
+			v.add(field, "condition is required (%q or %q)", DependsServiceStarted, DependsServiceHealthy)
+		default:
+			v.add(field, "condition must be %q or %q (got %q)", DependsServiceStarted, DependsServiceHealthy, cond.Condition)
+		}
+	}
+}
+
+// dependsCycle returns a service-name path describing a cycle in the
+// dependsOn graph, or nil when it is acyclic. Edges to unknown services
+// are skipped (validateDependsOn reports those separately). Iteration
+// order is fixed (declared order, sorted edges) for stable messages.
+func dependsCycle(services []Service) []string {
+	known := make(map[string]bool, len(services))
+	for i := range services {
+		known[services[i].Name] = true
+	}
+	graph := make(map[string][]string, len(services))
+	for i := range services {
+		s := &services[i]
+		deps := make([]string, 0, len(s.DependsOn))
+		for dep := range s.DependsOn {
+			if known[dep] && dep != s.Name {
+				deps = append(deps, dep)
+			}
+		}
+		sort.Strings(deps)
+		graph[s.Name] = deps
+	}
+
+	const (
+		white = 0
+		gray  = 1
+		black = 2
+	)
+	color := map[string]int{}
+	var path []string
+	var visit func(n string) []string
+	visit = func(n string) []string {
+		color[n] = gray
+		path = append(path, n)
+		for _, m := range graph[n] {
+			switch color[m] {
+			case gray:
+				// Back-edge: slice the path from m to close the cycle.
+				for idx, p := range path {
+					if p == m {
+						return append(append([]string{}, path[idx:]...), m)
+					}
+				}
+			case white:
+				if c := visit(m); c != nil {
+					return c
+				}
+			}
+		}
+		path = path[:len(path)-1]
+		color[n] = black
+		return nil
+	}
+
+	for i := range services {
+		n := services[i].Name
+		if color[n] == white {
+			path = path[:0]
+			if c := visit(n); c != nil {
+				return c
+			}
+		}
+	}
+	return nil
+}
+
+// findService returns the service with the given name, or nil.
+func findService(services []Service, name string) *Service {
+	for i := range services {
+		if services[i].Name == name {
+			return &services[i]
+		}
+	}
+	return nil
 }
 
 func validateMetadata(v *ValidationError, m *Metadata) {
@@ -252,61 +459,61 @@ func validateMetadata(v *ValidationError, m *Metadata) {
 	}
 }
 
-func validateArtifact(v *ValidationError, a *Artifact) {
+func validateArtifact(v *ValidationError, prefix string, a *Artifact) {
 	switch a.Type {
 	case ArtifactOCIImage:
 		if a.Image == "" {
-			v.add("artifact.image", "is required for type %q", ArtifactOCIImage)
+			v.add(prefix+".artifact.image", "is required for type %q", ArtifactOCIImage)
 		}
 		if a.Digest != "" && !reHexDigest.MatchString(a.Digest) {
-			v.add("artifact.digest", "must match %s when present", reHexDigest)
+			v.add(prefix+".artifact.digest", "must match %s when present", reHexDigest)
 		}
 		// Reject lxc-distro fields populated by mistake.
 		if a.Distro != "" || a.Release != "" || len(a.Packages) > 0 || len(a.Setup) > 0 {
-			v.add("artifact", "lxc-distro fields (distro/release/packages/setup) must be empty when type is %q", ArtifactOCIImage)
+			v.add(prefix+".artifact", "lxc-distro fields (distro/release/packages/setup) must be empty when type is %q", ArtifactOCIImage)
 		}
 	case ArtifactLXCDistro:
 		if !reDistroToken.MatchString(a.Distro) {
-			v.add("artifact.distro", "is required and must match %s", reDistroToken)
+			v.add(prefix+".artifact.distro", "is required and must match %s", reDistroToken)
 		}
 		if !reDistroToken.MatchString(a.Release) {
-			v.add("artifact.release", "is required and must match %s", reDistroToken)
+			v.add(prefix+".artifact.release", "is required and must match %s", reDistroToken)
 		}
 		if a.Arch != "" {
 			if _, ok := validArches[a.Arch]; !ok {
-				v.add("artifact.arch", "must be one of amd64/arm64/armhf/i386 (got %q)", a.Arch)
+				v.add(prefix+".artifact.arch", "must be one of amd64/arm64/armhf/i386 (got %q)", a.Arch)
 			}
 		}
 		// Reject oci-image fields populated by mistake.
 		if a.Image != "" || a.Digest != "" {
-			v.add("artifact", "oci-image fields (image/digest) must be empty when type is %q", ArtifactLXCDistro)
+			v.add(prefix+".artifact", "oci-image fields (image/digest) must be empty when type is %q", ArtifactLXCDistro)
 		}
 	case "":
-		v.add("artifact.type", "is required (must be %q or %q)", ArtifactOCIImage, ArtifactLXCDistro)
+		v.add(prefix+".artifact.type", "is required (must be %q or %q)", ArtifactOCIImage, ArtifactLXCDistro)
 	default:
-		v.add("artifact.type", "must be %q or %q (got %q)", ArtifactOCIImage, ArtifactLXCDistro, a.Type)
+		v.add(prefix+".artifact.type", "must be %q or %q (got %q)", ArtifactOCIImage, ArtifactLXCDistro, a.Type)
 	}
 }
 
-func validateContainer(v *ValidationError, c *Container, a *Artifact, config []ConfigField) {
+func validateContainer(v *ValidationError, prefix string, c *Container, a *Artifact, config []ConfigField) {
 	switch c.RestartPolicy {
 	case "", RestartUnlessStopped, RestartOnFailure, RestartNo:
 		// "" means "use default" (unless-stopped) — install.go fills it in.
 	default:
-		v.add("container.restartPolicy", "must be one of %q/%q/%q (got %q)",
+		v.add(prefix+".container.restartPolicy", "must be one of %q/%q/%q (got %q)",
 			RestartUnlessStopped, RestartOnFailure, RestartNo, c.RestartPolicy)
 	}
-	// lxc-distro plugins must declare a command — distro templates have
+	// lxc-distro services must declare a command — distro templates have
 	// no default CMD.
 	if a.Type == ArtifactLXCDistro && len(c.Command) == 0 {
-		v.add("container.command", "is required when artifact.type is %q", ArtifactLXCDistro)
+		v.add(prefix+".container.command", "is required when artifact.type is %q", ArtifactLXCDistro)
 	}
-	validateResources(v, &c.Resources, config)
+	validateResources(v, prefix, &c.Resources, config)
 }
 
-func validateResources(v *ValidationError, r *Resources, config []ConfigField) {
-	validateConfigurableResource(v, "container.resources.memory", r.Memory, config, parseByteSize)
-	validateConfigurableResource(v, "container.resources.cpu", r.CPU, config, parseCPUCount)
+func validateResources(v *ValidationError, prefix string, r *Resources, config []ConfigField) {
+	validateConfigurableResource(v, prefix+".container.resources.memory", r.Memory, config, parseByteSize)
+	validateConfigurableResource(v, prefix+".container.resources.cpu", r.CPU, config, parseCPUCount)
 }
 
 func validateConfigurableResource(v *ValidationError, field, value string, config []ConfigField, parse func(string) (int64, error)) {
@@ -435,10 +642,10 @@ func validateInstances(v *ValidationError, in *Instances, vols []Volume) {
 	}
 }
 
-func validateVolumes(v *ValidationError, vols []Volume) {
+func validateVolumes(v *ValidationError, prefix string, vols []Volume) {
 	seen := map[string]bool{}
 	for i, vol := range vols {
-		field := fmt.Sprintf("volumes[%d]", i)
+		field := fmt.Sprintf("%s.volumes[%d]", prefix, i)
 		if !reVolumeName.MatchString(vol.Name) {
 			v.add(field+".name", "must match %s", reVolumeName)
 		}
@@ -470,10 +677,10 @@ func validateVolumes(v *ValidationError, vols []Volume) {
 	}
 }
 
-func validatePorts(v *ValidationError, ports []Port) {
+func validatePorts(v *ValidationError, prefix string, ports []Port) {
 	seen := map[string]bool{}
 	for i, p := range ports {
-		field := fmt.Sprintf("ports[%d]", i)
+		field := fmt.Sprintf("%s.ports[%d]", prefix, i)
 		if p.Name == "" {
 			v.add(field+".name", "is required")
 		}
@@ -503,10 +710,10 @@ func validateUI(v *ValidationError, ui *UI) {
 	}
 }
 
-func validateConfig(v *ValidationError, fields []ConfigField) {
+func validateConfig(v *ValidationError, prefix string, fields []ConfigField) {
 	seen := map[string]bool{}
 	for i, f := range fields {
-		field := fmt.Sprintf("config[%d]", i)
+		field := fmt.Sprintf("%s.config[%d]", prefix, i)
 		if !reConfigKey.MatchString(f.Key) {
 			v.add(field+".key", "must match %s", reConfigKey)
 		}
@@ -549,23 +756,24 @@ func (m *Manifest) EffectiveCount() int {
 	return m.Instances.Count
 }
 
-// EffectiveRestartPolicy returns the restart policy after defaulting.
-func (m *Manifest) EffectiveRestartPolicy() string {
-	if m.Container.RestartPolicy == "" {
+// EffectiveRestartPolicy returns the service's restart policy after
+// defaulting.
+func (s *Service) EffectiveRestartPolicy() string {
+	if s.Container.RestartPolicy == "" {
 		return RestartUnlessStopped
 	}
-	return m.Container.RestartPolicy
+	return s.Container.RestartPolicy
 }
 
 // DistroSummary returns a single-line description of an lxc-distro
 // artifact for display ("ubuntu/jammy/amd64"). Empty for oci-image.
-func (m *Manifest) DistroSummary() string {
-	if m.Artifact.Type != ArtifactLXCDistro {
+func (s *Service) DistroSummary() string {
+	if s.Artifact.Type != ArtifactLXCDistro {
 		return ""
 	}
-	arch := m.Artifact.Arch
+	arch := s.Artifact.Arch
 	if arch == "" {
 		arch = "host"
 	}
-	return strings.Join([]string{m.Artifact.Distro, m.Artifact.Release, arch}, "/")
+	return strings.Join([]string{s.Artifact.Distro, s.Artifact.Release, arch}, "/")
 }

@@ -76,23 +76,23 @@ func (r *Reconciler) Sync(ctx context.Context) error {
 				// know it. Mark the instance failed so the operator
 				// sees it; the lifecycle will recreate on the next
 				// Materialise.
-				_ = r.store.SetInstanceState(p.Name, inst.Instance, StateFailed,
+				_ = r.store.SetInstanceState(p.Name, inst.Service, inst.Instance, StateFailed,
 					"container missing from runtime at startup")
-				log.Printf("plugin reconcile: %s instance %d missing container %s",
-					p.Name, inst.Instance, shortID(inst.ContainerID))
+				log.Printf("plugin reconcile: %s service %s instance %d missing container %s",
+					p.Name, inst.Service, inst.Instance, shortID(inst.ContainerID))
 				continue
 			}
 			// Update state from runtime view.
 			newState := mapDockerState(summary.State)
 			if newState != inst.State {
-				_ = r.store.SetInstanceState(p.Name, inst.Instance, newState, "")
+				_ = r.store.SetInstanceState(p.Name, inst.Service, inst.Instance, newState, "")
 			}
 			// Refresh bridge IP — it's stable across restarts but not
 			// across recreate.
 			if inst.BridgeIP == "" {
 				if details, err := r.rt.InspectContainer(ctx, inst.ContainerID); err == nil {
 					if ip := pickBridgeIP(details); ip != "" {
-						_ = r.store.SetInstanceBridgeIP(p.Name, inst.Instance, ip)
+						_ = r.store.SetInstanceBridgeIP(p.Name, inst.Service, inst.Instance, ip)
 					}
 				}
 			}
@@ -161,17 +161,23 @@ func (r *Reconciler) watchOnce(ctx context.Context) error {
 	}
 }
 
-// handleEvent updates plugin_instances based on a single Docker
-// event. Routing uses the io.smoothnas.plugin and io.smoothnas.plugin.instance
-// labels the lifecycle wrote at create time.
+// handleEvent updates plugin_instances based on a single Docker event.
+// Routing uses the io.smoothnas.plugin, io.smoothnas.plugin.service, and
+// io.smoothnas.plugin.instance labels the lifecycle wrote at create time.
 func (r *Reconciler) handleEvent(ev runtime.Event) {
 	if ev.Type != "container" {
 		return
 	}
 	pluginName := ev.Actor.Attributes[runtime.PluginNameLabel]
+	service := ev.Actor.Attributes[runtime.PluginServiceLabel]
 	instStr := ev.Actor.Attributes[runtime.PluginInstanceLabel]
 	if pluginName == "" || instStr == "" {
 		return // not a managed plugin event
+	}
+	if service == "" {
+		// Pre-plugins-10 containers had no service label; the migration
+		// names the implicit service after the plugin.
+		service = pluginName
 	}
 	instance, err := strconv.Atoi(instStr)
 	if err != nil {
@@ -181,8 +187,8 @@ func (r *Reconciler) handleEvent(ev runtime.Event) {
 	if state == "" {
 		return // an event we don't translate (e.g. exec_create)
 	}
-	if err := r.store.SetInstanceState(pluginName, instance, state, lastError); err != nil {
-		log.Printf("plugin event: update %s/%d → %s: %v", pluginName, instance, state, err)
+	if err := r.store.SetInstanceState(pluginName, service, instance, state, lastError); err != nil {
+		log.Printf("plugin event: update %s/%s/%d → %s: %v", pluginName, service, instance, state, err)
 	}
 }
 

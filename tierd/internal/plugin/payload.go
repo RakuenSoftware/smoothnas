@@ -12,22 +12,33 @@ import (
 )
 
 // ContainerName returns the LXC2Docker container name for a given
-// (plugin, instance) pair. Single-instance plugins use the bare name
-// (matches operator expectations when they list with `lxc-ls`);
-// multi-instance plugins suffix with -<n>.
-func ContainerName(pluginName string, instance, instanceCount int) string {
-	if instanceCount <= 1 {
-		return pluginName
+// (plugin, service, instance) unit. A single-service plugin (service ==
+// plugin name) keeps the bare plugin name as its base (matching operator
+// expectations when they list with `lxc-ls`); extra services suffix the
+// service name. Multi-instance plugins further suffix with -<n>.
+func ContainerName(pluginName, service string, instance, instanceCount int) string {
+	base := pluginName
+	if service != "" && service != pluginName {
+		base = pluginName + "-" + service
 	}
-	return fmt.Sprintf("%s-%d", pluginName, instance)
+	if instanceCount <= 1 {
+		return base
+	}
+	return fmt.Sprintf("%s-%d", base, instance)
 }
 
 // SetupTemplateImage is the cached template image name for the
-// committed result of an lxc-distro plugin's setup script. Stable
+// committed result of an lxc-distro service's setup script. Stable
 // across reinstalls of the same (manifest version, packages, setup)
 // triple so the setup container only runs when one of those changes.
-func SetupTemplateImage(pluginName, manifestVersion string) string {
-	return fmt.Sprintf("smoothnas-plugin-%s:%s", pluginName, manifestVersion)
+// A service segment is appended only for extra services (service !=
+// plugin name) so single-container plugins keep their original tag and
+// multiple lxc-distro services in one plugin don't collide.
+func SetupTemplateImage(pluginName, service, manifestVersion string) string {
+	if service == "" || service == pluginName {
+		return fmt.Sprintf("smoothnas-plugin-%s:%s", pluginName, manifestVersion)
+	}
+	return fmt.Sprintf("smoothnas-plugin-%s-%s:%s", pluginName, service, manifestVersion)
 }
 
 // SetupHash is a content hash over the lxc-distro setup inputs
@@ -59,16 +70,73 @@ func SetupHash(packages, setup []string) string {
 // passes in after it resolves the pull.
 type PayloadInputs struct {
 	Plugin   *PluginRow
-	Manifest *Manifest
+	Service  *Service // the manifest service this container realises
 	Instance int
 	ImageRef string      // resolved by Materialise; e.g. "ghcr.io/...@sha256:..."
-	Volumes  []VolumeRow // from the DB; expanded with per-instance host paths
-	Config   []ConfigRow // already merged with manifest defaults
+	Volumes  []VolumeRow // this service's volumes, expanded with per-instance host paths
+	Config   []ConfigRow // this service's config, already merged with manifest defaults
+	// Discovery maps sibling service name → its reachable endpoint on the
+	// plugin bridge. Used to render {{service.<name>.host}} and
+	// {{service.<name>.port.<portName>}} tokens in the service's Env.
+	Discovery map[string]ServiceEndpoint
 	// Profiles is the merged profile fragments (devices, env, capAdd,
 	// pidsLimit, oomScoreAdj, lxc raw config). When nil the renderer
-	// behaves as phase 1–4 (no profile contribution); production
-	// callers always pass a non-nil *Resolved from plugin.Resolve.
+	// adds no profile contribution; production callers pass a non-nil
+	// *Resolved from plugin.Resolve.
 	Profiles *Resolved
+}
+
+// ServiceEndpoint is a sibling service's reachable address on the plugin
+// bridge (LXC2Docker has no embedded DNS, so discovery is by injected IP).
+type ServiceEndpoint struct {
+	Host  string
+	Ports map[string]int // port name → container port
+}
+
+// renderDiscovery substitutes {{service.<name>.host}} and
+// {{service.<name>.port.<portName>}} tokens against the discovery map.
+// Unknown tokens are left verbatim so a misconfiguration is visible
+// rather than silently blank.
+func renderDiscovery(value string, disc map[string]ServiceEndpoint) string {
+	if !strings.Contains(value, "{{") {
+		return value
+	}
+	var b strings.Builder
+	rest := value
+	for {
+		start := strings.Index(rest, "{{")
+		if start < 0 {
+			b.WriteString(rest)
+			break
+		}
+		b.WriteString(rest[:start])
+		end := strings.Index(rest[start:], "}}")
+		if end < 0 {
+			b.WriteString(rest[start:])
+			break
+		}
+		token := strings.TrimSpace(rest[start+2 : start+end])
+		b.WriteString(resolveDiscoveryToken(token, disc))
+		rest = rest[start+end+2:]
+	}
+	return b.String()
+}
+
+func resolveDiscoveryToken(token string, disc map[string]ServiceEndpoint) string {
+	parts := strings.Split(token, ".")
+	if len(parts) >= 3 && parts[0] == "service" {
+		if ep, ok := disc[parts[1]]; ok {
+			switch {
+			case parts[2] == "host":
+				return ep.Host
+			case parts[2] == "port" && len(parts) >= 4:
+				if p, ok := ep.Ports[parts[3]]; ok {
+					return strconv.Itoa(p)
+				}
+			}
+		}
+	}
+	return "{{" + token + "}}"
 }
 
 // BuildCreatePayload renders the runtime.CreateContainerRequest for
@@ -79,8 +147,8 @@ type PayloadInputs struct {
 // is missing or empty (which would mean phase 03 hasn't resolved a
 // tier-bound volume yet, and the caller is racing the resolver).
 func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error) {
-	if in.Plugin == nil || in.Manifest == nil {
-		return runtime.CreateContainerRequest{}, fmt.Errorf("BuildCreatePayload: nil plugin or manifest")
+	if in.Plugin == nil || in.Service == nil {
+		return runtime.CreateContainerRequest{}, fmt.Errorf("BuildCreatePayload: nil plugin or service")
 	}
 	if in.ImageRef == "" {
 		return runtime.CreateContainerRequest{}, fmt.Errorf("BuildCreatePayload: empty image ref")
@@ -101,18 +169,22 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 		binds = append(binds, host+":"+vol.BindPath)
 	}
 
-	// Build the env list. Profile-contributed env entries land first,
-	// the manifest's plugin_config entries after — so plugin_config
-	// wins on key collisions (operators tuning runtime values
-	// override profile defaults).
+	// Build the env list. Precedence (low→high): profile-contributed
+	// env, the service's static Env (where discovery tokens live), then
+	// plugin_config entries — so operator-tuned plugin_config wins on
+	// key collisions. Discovery tokens ({{service.X.host}}) are rendered
+	// against sibling endpoints as values are added.
 	envMap := map[string]string{}
 	if in.Profiles != nil {
 		for k, v := range in.Profiles.Env {
 			envMap[k] = v
 		}
 	}
+	for k, v := range in.Service.Env {
+		envMap[k] = renderDiscovery(v, in.Discovery)
+	}
 	for _, c := range in.Config {
-		envMap[c.Key] = c.Value
+		envMap[c.Key] = renderDiscovery(c.Value, in.Discovery)
 	}
 	envKeys := make([]string, 0, len(envMap))
 	for k := range envMap {
@@ -123,7 +195,7 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 	for _, k := range envKeys {
 		env = append(env, k+"="+envMap[k])
 	}
-	gpu, err := selectedGPU(in.Manifest, envMap)
+	gpu, err := selectedGPU(in.Service.Config, envMap)
 	if err != nil {
 		return runtime.CreateContainerRequest{}, err
 	}
@@ -131,6 +203,7 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 	labels := map[string]string{
 		runtime.PluginManagedLabel:           "true",
 		runtime.PluginNameLabel:              in.Plugin.Name,
+		runtime.PluginServiceLabel:           in.Service.Name,
 		runtime.PluginVersionLabel:           in.Plugin.Version,
 		runtime.PluginInstanceLabel:          strconv.Itoa(in.Instance),
 		runtime.LXC2DockerBindMountInitLabel: "image",
@@ -140,12 +213,12 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 		Binds:       binds,
 		NetworkMode: runtime.PluginBridgeName,
 		RestartPolicy: runtime.RestartPolicy{
-			Name: dockerRestartPolicyName(in.Manifest.EffectiveRestartPolicy()),
+			Name: dockerRestartPolicyName(in.Service.EffectiveRestartPolicy()),
 		},
 	}
 	exposedPorts := map[string]struct{}{}
 	portBindings := map[string][]runtime.PortBinding{}
-	for _, p := range in.Manifest.Ports {
+	for _, p := range in.Service.Ports {
 		if !p.HostExpose {
 			continue
 		}
@@ -191,16 +264,16 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 			labels[fmt.Sprintf("io.smoothnas.lxc.raw.%d", i)] = raw
 		}
 	}
-	if in.Manifest.Container.Resources.Memory != "" {
-		raw := expandArg(in.Manifest.Container.Resources.Memory, envMap)
+	if in.Service.Container.Resources.Memory != "" {
+		raw := expandArg(in.Service.Container.Resources.Memory, envMap)
 		memory, err := parseByteSize(raw)
 		if err != nil {
 			return runtime.CreateContainerRequest{}, fmt.Errorf("container.resources.memory: %w", err)
 		}
 		host.Memory = memory
 	}
-	if in.Manifest.Container.Resources.CPU != "" {
-		raw := expandArg(in.Manifest.Container.Resources.CPU, envMap)
+	if in.Service.Container.Resources.CPU != "" {
+		raw := expandArg(in.Service.Container.Resources.CPU, envMap)
 		nanoCPUs, err := parseCPUCount(raw)
 		if err != nil {
 			return runtime.CreateContainerRequest{}, fmt.Errorf("container.resources.cpu: %w", err)
@@ -210,10 +283,10 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 
 	req := runtime.CreateContainerRequest{
 		Image:      in.ImageRef,
-		Cmd:        expandCommand(in.Manifest.Container.Command, envMap),
+		Cmd:        expandCommand(in.Service.Container.Command, envMap),
 		Env:        env,
-		WorkingDir: in.Manifest.Container.WorkingDir,
-		User:       in.Manifest.Container.User,
+		WorkingDir: in.Service.Container.WorkingDir,
+		User:       in.Service.Container.User,
 		Labels:     labels,
 		HostConfig: host,
 	}
@@ -302,8 +375,8 @@ type gpuSelection struct {
 	Path   string
 }
 
-func selectedGPU(m *Manifest, env map[string]string) (gpuSelection, error) {
-	for _, f := range m.Config {
+func selectedGPU(config []ConfigField, env map[string]string) (gpuSelection, error) {
+	for _, f := range config {
 		if f.Type != ConfigTypeGPU {
 			continue
 		}

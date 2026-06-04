@@ -1,0 +1,116 @@
+# aimee-kb — self-contained knowledge base (DB2 + pgvector).
+#
+# Serves the /v1 HTTP API and owns the shared, vector-backed memory store.
+# As a compose-style SmoothNAS plugin (smoothnas.io/v1 services), this brings
+# up its OWN pgvector Postgres and embedder alongside the kb — no external
+# infrastructure to stand up or configure. The kb reaches its siblings over the
+# plugin bridge via service-discovery tokens ({{service.<name>.host}}).
+#
+# Images:
+#   ghcr.io/rakuensoftware/aimee-kb         (kb)
+#   pgvector/pgvector:pg16                  (Postgres, public)
+#   ghcr.io/rakuensoftware/aimee-embedder   (embedder — published from
+#                                            Dockerfile.embedder; see release CI)
+apiVersion: smoothnas.io/v1
+kind: Plugin
+metadata:
+  name: aimee-kb
+  version: 0.1.0
+  description: >-
+    aimee knowledge base — shared, vector-backed memory over the /v1 HTTP API.
+    Self-contained: bundles its pgvector Postgres and embedder, so there is no
+    external database or embedder to configure.
+  vendor: RakuenSoftware
+  homepage: https://github.com/RakuenSoftware/aimee
+services:
+  # Bundled pgvector Postgres backing DB2. Brought up first; the kb waits for
+  # it to pass its healthcheck before starting.
+  - name: postgres
+    artifact:
+      type: oci-image
+      image: pgvector/pgvector:pg16
+    container:
+      restartPolicy: unless-stopped
+    env:
+      POSTGRES_DB: aimee_shared
+      POSTGRES_USER: aimee
+      POSTGRES_PASSWORD: aimee
+    volumes:
+      - name: pgdata
+        mode: flat
+        bind: /var/lib/postgresql/data
+    health:
+      test: ["CMD-SHELL", "pg_isready -U aimee -d aimee_shared"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Bundled embedder: holds all-MiniLM-L6-v2 resident and serves /embed over
+  # HTTP so the kb embeds without reloading the model per call.
+  - name: embedder
+    artifact:
+      type: oci-image
+      image: ghcr.io/rakuensoftware/aimee-embedder:latest
+    container:
+      restartPolicy: unless-stopped
+    volumes:
+      - name: models
+        mode: flat
+        bind: /opt/models
+    ports:
+      - name: http
+        port: 8080
+        protocol: tcp
+        expose: false
+    health:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      startPeriod: 30s
+
+  # The kb itself. Reaches postgres + embedder over the plugin bridge; both
+  # URLs are rendered from sibling service discovery, so nothing to configure.
+  - name: kb
+    artifact:
+      type: oci-image
+      image: ghcr.io/rakuensoftware/aimee-kb:latest
+    container:
+      # Image default CMD is ["--http-port=8741"]; AIMEE_KB_HTTP_BIND=1 binds
+      # the listener on 0.0.0.0.
+      restartPolicy: unless-stopped
+    dependsOn:
+      postgres:
+        condition: service_healthy
+      embedder:
+        condition: service_healthy
+    env:
+      AIMEE_DB2_URL: postgresql://aimee:aimee@{{service.postgres.host}}:5432/aimee_shared
+      AIMEE_EMBEDDER_URL: http://{{service.embedder.host}}:8080
+      AIMEE_KB_HTTP_BIND: "1"
+    volumes:
+      # kb state and baked config under AIMEE_HOME.
+      - name: home
+        mode: flat
+        bind: /var/lib/aimee
+    ports:
+      - name: api
+        port: 8741
+        protocol: tcp
+        expose: false
+        hostExpose: true
+    config:
+      # Optional OpenAI-compatible LLM endpoint enabling the synthesis /
+      # curator passes. Blank leaves them disabled (they fail closed).
+      - key: LLM_ENDPOINT
+        type: string
+        label: LLM endpoint (optional)
+        default: ""
+        description: >-
+          Optional. OpenAI-compatible endpoint (e.g. http://10.0.0.7:8080/v1) to
+          enable the candidate-synthesis and curator passes. Blank = disabled.
+      - key: LLM_MODEL
+        type: string
+        label: LLM model (optional)
+        default: ""
+        description: Optional. Model name to request from the LLM endpoint.

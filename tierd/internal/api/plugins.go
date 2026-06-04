@@ -281,11 +281,27 @@ func toPluginListItem(r plugin.PluginRow) pluginListItem {
 // state + volumes + ports + config) for one plugin.
 type pluginDetail struct {
 	Plugin    pluginListItem       `json:"plugin"`
+	Services  []pluginServiceItem  `json:"services"`
 	Instances []plugin.InstanceRow `json:"instances"`
 	Volumes   []plugin.VolumeRow   `json:"volumes"`
 	Ports     []plugin.PortRow     `json:"ports"`
 	Config    []plugin.ConfigRow   `json:"config"`
 	Manifest  string               `json:"manifest"`
+}
+
+// pluginServiceItem is the UI-facing view of one service in a
+// compose-style plugin: its image, ordering, dependencies, whether it
+// declares a healthcheck, and the rolled-up state of its instances.
+type pluginServiceItem struct {
+	Name          string               `json:"name"`
+	ArtifactType  string               `json:"artifactType"`
+	ImageRef      string               `json:"imageRef,omitempty"`
+	DistroSummary string               `json:"distroSummary,omitempty"`
+	Ordinal       int                  `json:"ordinal"`
+	DependsOn     map[string]string    `json:"dependsOn,omitempty"`
+	HasHealth     bool                 `json:"hasHealth"`
+	State         string               `json:"state"`
+	Instances     []plugin.InstanceRow `json:"instances"`
 }
 
 func toPluginDetail(rec *plugin.PluginRecord) pluginDetail {
@@ -307,12 +323,41 @@ func toPluginDetail(rec *plugin.PluginRecord) pluginDetail {
 	}
 	return pluginDetail{
 		Plugin:    toPluginListItem(rec.Plugin),
+		Services:  toPluginServiceItems(rec),
 		Instances: instances,
 		Volumes:   volumes,
 		Ports:     ports,
 		Config:    config,
 		Manifest:  rec.Plugin.ManifestYAML,
 	}
+}
+
+// toPluginServiceItems rolls the per-service rows up into the UI view,
+// pairing each service with its own instances and an aggregate state.
+func toPluginServiceItems(rec *plugin.PluginRecord) []pluginServiceItem {
+	out := make([]pluginServiceItem, 0, len(rec.Services))
+	for _, sr := range rec.Services {
+		insts := []plugin.InstanceRow{}
+		counts := map[string]int{}
+		for _, inst := range rec.Instances {
+			if inst.Service == sr.Service {
+				insts = append(insts, inst)
+				counts[inst.State]++
+			}
+		}
+		out = append(out, pluginServiceItem{
+			Name:          sr.Service,
+			ArtifactType:  sr.ArtifactType,
+			ImageRef:      sr.ImageRef,
+			DistroSummary: sr.DistroSummary,
+			Ordinal:       sr.Ordinal,
+			DependsOn:     sr.DependsOn,
+			HasHealth:     sr.Health != nil,
+			State:         plugin.AggregateInstanceStates(counts, len(insts)),
+			Instances:     insts,
+		})
+	}
+	return out
 }
 
 func (h *PluginsHandler) detail(w http.ResponseWriter, _ *http.Request, name string) {

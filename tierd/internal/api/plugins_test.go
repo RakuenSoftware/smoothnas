@@ -150,23 +150,31 @@ func TestPluginsAPI_ParseReturnsManifestJSONShape(t *testing.T) {
 	if got := metadata["name"]; got != "llama-cpp" {
 		t.Fatalf("manifest.metadata.name = %#v", got)
 	}
-	artifact, ok := resp.Manifest["artifact"].(map[string]any)
+	services, ok := resp.Manifest["services"].([]any)
+	if !ok || len(services) != 1 {
+		t.Fatalf("manifest.services = %#v", resp.Manifest["services"])
+	}
+	service, ok := services[0].(map[string]any)
 	if !ok {
-		t.Fatalf("manifest.artifact missing or wrong type: %#v", resp.Manifest["artifact"])
+		t.Fatalf("manifest.services[0] wrong type: %#v", services[0])
+	}
+	artifact, ok := service["artifact"].(map[string]any)
+	if !ok {
+		t.Fatalf("manifest.services[0].artifact missing or wrong type: %#v", service["artifact"])
 	}
 	if got := artifact["image"]; got != "ghcr.io/ggml-org/llama.cpp:server-cuda-b3500" {
-		t.Fatalf("manifest.artifact.image = %#v", got)
+		t.Fatalf("manifest.services[0].artifact.image = %#v", got)
 	}
-	volumes, ok := resp.Manifest["volumes"].([]any)
+	volumes, ok := service["volumes"].([]any)
 	if !ok || len(volumes) != 1 {
-		t.Fatalf("manifest.volumes = %#v", resp.Manifest["volumes"])
+		t.Fatalf("manifest.services[0].volumes = %#v", service["volumes"])
 	}
 	firstVolume, ok := volumes[0].(map[string]any)
 	if !ok {
-		t.Fatalf("manifest.volumes[0] wrong type: %#v", volumes[0])
+		t.Fatalf("manifest.services[0].volumes[0] wrong type: %#v", volumes[0])
 	}
 	if got := firstVolume["minSize"]; got != "50G" {
-		t.Fatalf("manifest.volumes[0].minSize = %#v", got)
+		t.Fatalf("manifest.services[0].volumes[0].minSize = %#v", got)
 	}
 }
 
@@ -345,6 +353,46 @@ func TestPluginsAPI_DetailUsesEmptyArraysForNoPortPlugin(t *testing.T) {
 		if _, ok := raw[key].([]any); !ok {
 			t.Fatalf("%s = %#v, want JSON array", key, raw[key])
 		}
+	}
+}
+
+func TestPluginsAPI_DetailExposesServices(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	install := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{
+		"manifest":        readManifestFixture(t, "gh-runner.yaml"),
+		"tierAssignments": map[string]any{"default": "media"},
+	})
+	if install.Code != http.StatusCreated {
+		t.Fatalf("install status = %d body=%s", install.Code, install.Body.String())
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/plugins/gh-runner", nil)
+	(&routeHandler{h}).ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("detail status = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var detail pluginDetail
+	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	if len(detail.Services) != 1 {
+		t.Fatalf("services = %+v, want one", detail.Services)
+	}
+	svc := detail.Services[0]
+	if svc.Name != "gh-runner" {
+		t.Errorf("service name = %q want gh-runner", svc.Name)
+	}
+	if svc.ArtifactType != "oci-image" {
+		t.Errorf("service artifactType = %q", svc.ArtifactType)
+	}
+	// gh-runner is count: 2, so the service rolls up two instances.
+	if len(svc.Instances) != 2 {
+		t.Errorf("service instances = %d want 2", len(svc.Instances))
+	}
+	if svc.State != "installed" {
+		t.Errorf("service state = %q want installed", svc.State)
 	}
 }
 

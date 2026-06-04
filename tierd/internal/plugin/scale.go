@@ -173,18 +173,15 @@ func (l *Lifecycle) scaleDown(ctx context.Context, rec *PluginRecord, target int
 		removed = append(removed, i)
 	}
 
-	// Stop + remove the doomed instances' containers. Best-effort —
-	// we collect errors but continue, otherwise a half-failed scale-
-	// down could strand the operator.
-	for _, instNum := range removed {
-		var inst *InstanceRow
-		for j := range rec.Instances {
-			if rec.Instances[j].Instance == instNum {
-				inst = &rec.Instances[j]
-				break
-			}
-		}
-		if inst == nil || inst.ContainerID == "" {
+	// Stop + remove the doomed instances' containers across every
+	// service. Best-effort — we continue past missing containers,
+	// otherwise a half-failed scale-down could strand the operator.
+	removedSet := map[int]struct{}{}
+	for _, n := range removed {
+		removedSet[n] = struct{}{}
+	}
+	for _, inst := range rec.Instances {
+		if _, ok := removedSet[inst.Instance]; !ok || inst.ContainerID == "" {
 			continue
 		}
 		_ = l.rt.StopContainer(ctx, inst.ContainerID, DefaultStopTimeoutSeconds)
@@ -268,25 +265,28 @@ func (l *Lifecycle) startNewInstances(ctx context.Context, name string, added []
 	for _, n := range added {
 		addedSet[n] = struct{}{}
 	}
+	// Start new replicas of every service. They were created by
+	// Materialise with discovery env pointed at instance-1 of each
+	// dependency, so a direct start is sufficient.
 	for _, inst := range rec.Instances {
 		if _, ok := addedSet[inst.Instance]; !ok {
 			continue
 		}
 		if inst.ContainerID == "" {
-			return fmt.Errorf("instance %d has no container — materialise first", inst.Instance)
+			return fmt.Errorf("service %s instance %d has no container — materialise first", inst.Service, inst.Instance)
 		}
-		_ = l.setInstanceState(name, inst.Instance, StateStarting, "")
+		_ = l.setInstanceState(name, inst.Service, inst.Instance, StateStarting, "")
 		if err := l.rt.StartContainer(ctx, inst.ContainerID); err != nil {
-			_ = l.setInstanceState(name, inst.Instance, StateFailed, err.Error())
-			return fmt.Errorf("start instance %d: %w", inst.Instance, err)
+			_ = l.setInstanceState(name, inst.Service, inst.Instance, StateFailed, err.Error())
+			return fmt.Errorf("start %s/%d: %w", inst.Service, inst.Instance, err)
 		}
 		if ip, err := l.captureBridgeIP(ctx, inst.ContainerID); err != nil {
-			_ = l.setInstanceState(name, inst.Instance, StateFailed, fmt.Sprintf("bridge IP: %v", err))
-			return fmt.Errorf("capture bridge IP for instance %d: %w", inst.Instance, err)
+			_ = l.setInstanceState(name, inst.Service, inst.Instance, StateFailed, fmt.Sprintf("bridge IP: %v", err))
+			return fmt.Errorf("capture bridge IP for %s/%d: %w", inst.Service, inst.Instance, err)
 		} else if ip != "" {
-			_ = l.store.SetInstanceBridgeIP(name, inst.Instance, ip)
+			_ = l.store.SetInstanceBridgeIP(name, inst.Service, inst.Instance, ip)
 		}
-		_ = l.setInstanceState(name, inst.Instance, StateRunning, "")
+		_ = l.setInstanceState(name, inst.Service, inst.Instance, StateRunning, "")
 	}
 	return nil
 }
@@ -302,11 +302,11 @@ func (l *Lifecycle) startNewInstances(ctx context.Context, name string, added []
 //   - paths[volumeName][instanceNum] = host path  (only per-instance volumes)
 //   - mkdirs: ordered list of new dirs to create on disk
 func computeNewInstancePaths(rec *PluginRecord, addedInstances []int) (
-	paths map[string]map[int]string,
+	paths map[string]map[string]map[int]string,
 	mkdirs []string,
 	err error,
 ) {
-	paths = map[string]map[int]string{}
+	paths = map[string]map[string]map[int]string{}
 	for _, vol := range rec.Volumes {
 		if !vol.PerInstance {
 			continue
@@ -329,15 +329,18 @@ func computeNewInstancePaths(rec *PluginRecord, addedInstances []int) (
 			// install with no tier provider). The operator must
 			// reinstall to fix; we can't fan out to new instances
 			// without a base path.
-			return nil, nil, fmt.Errorf("volume %q has no resolved host path; reinstall the plugin with a tier assignment before scaling", vol.Name)
+			return nil, nil, fmt.Errorf("volume %q/%q has no resolved host path; reinstall the plugin with a tier assignment before scaling", vol.Service, vol.Name)
 		}
-		paths[vol.Name] = map[int]string{}
+		if paths[vol.Service] == nil {
+			paths[vol.Service] = map[string]map[int]string{}
+		}
+		paths[vol.Service][vol.Name] = map[int]string{}
 		for _, instNum := range addedInstances {
 			p, err := swapInstanceSegment(template, templateInst, instNum)
 			if err != nil {
-				return nil, nil, fmt.Errorf("derive path for volume %q instance %d: %w", vol.Name, instNum, err)
+				return nil, nil, fmt.Errorf("derive path for volume %q/%q instance %d: %w", vol.Service, vol.Name, instNum, err)
 			}
-			paths[vol.Name][instNum] = p
+			paths[vol.Service][vol.Name][instNum] = p
 			mkdirs = append(mkdirs, p)
 		}
 	}
@@ -395,9 +398,11 @@ func perInstanceDirs(rec *PluginRecord, removed []int) []string {
 // keyed (volume name → instance num → host path) and only includes
 // per-instance volumes (shared volumes have no new path).
 //
-// Returns ErrPluginNotFound when the named plugin does not exist.
-// Validates that newCount is the count of existing rows + len(addedInstances).
-func (s *Store) AddInstanceRows(name string, newCount int, addedInstances []int, volumePaths map[string]map[int]string) error {
+// Returns ErrPluginNotFound when the named plugin does not exist. New
+// instance rows are created for every service; volumePaths is keyed
+// service → volume name → instance num → host path (per-instance volumes
+// only — shared volumes have no new path).
+func (s *Store) AddInstanceRows(name string, newCount int, addedInstances []int, volumePaths map[string]map[string]map[int]string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -410,25 +415,48 @@ func (s *Store) AddInstanceRows(name string, newCount int, addedInstances []int,
 		return ErrPluginNotFound
 	}
 
-	for _, instNum := range addedInstances {
-		if _, err := tx.Exec(
-			`INSERT INTO plugin_instances (plugin_name, instance, state)
-			 VALUES (?, ?, ?)`,
-			name, instNum, StateInstalled,
-		); err != nil {
-			return fmt.Errorf("insert plugin_instances[%d]: %w", instNum, err)
+	// Every service gains the new replica instances.
+	svcRows, err := tx.Query(`SELECT service FROM plugin_services WHERE plugin_name = ?`, name)
+	if err != nil {
+		return fmt.Errorf("list services: %w", err)
+	}
+	var services []string
+	for svcRows.Next() {
+		var svc string
+		if err := svcRows.Scan(&svc); err != nil {
+			svcRows.Close()
+			return err
+		}
+		services = append(services, svc)
+	}
+	svcRows.Close()
+	if err := svcRows.Err(); err != nil {
+		return err
+	}
+
+	for _, svc := range services {
+		for _, instNum := range addedInstances {
+			if _, err := tx.Exec(
+				`INSERT INTO plugin_instances (plugin_name, service, instance, state)
+				 VALUES (?, ?, ?, ?)`,
+				name, svc, instNum, StateInstalled,
+			); err != nil {
+				return fmt.Errorf("insert plugin_instances[%s/%d]: %w", svc, instNum, err)
+			}
 		}
 	}
 
-	for volName, perInst := range volumePaths {
-		for instNum, hostPath := range perInst {
-			if _, err := tx.Exec(
-				`INSERT INTO plugin_volume_paths
-				 (plugin_name, volume_name, instance, host_path)
-				 VALUES (?, ?, ?, ?)`,
-				name, volName, instNum, hostPath,
-			); err != nil {
-				return fmt.Errorf("insert plugin_volume_paths[%s/%d]: %w", volName, instNum, err)
+	for svc, vols := range volumePaths {
+		for volName, perInst := range vols {
+			for instNum, hostPath := range perInst {
+				if _, err := tx.Exec(
+					`INSERT INTO plugin_volume_paths
+					 (plugin_name, service, volume_name, instance, host_path)
+					 VALUES (?, ?, ?, ?, ?)`,
+					name, svc, volName, instNum, hostPath,
+				); err != nil {
+					return fmt.Errorf("insert plugin_volume_paths[%s/%s/%d]: %w", svc, volName, instNum, err)
+				}
 			}
 		}
 	}

@@ -405,13 +405,15 @@ kind: Plugin
 metadata:
   name: bare-distro
   version: 0.0.1
-artifact:
-  type: lxc-distro
-  distro: alpine
-  release: "3.19"
-container:
-  command: ["/bin/sh", "-c", "sleep infinity"]
-  restartPolicy: unless-stopped
+services:
+  - name: bare-distro
+    artifact:
+      type: lxc-distro
+      distro: alpine
+      release: "3.19"
+    container:
+      command: ["/bin/sh", "-c", "sleep infinity"]
+      restartPolicy: unless-stopped
 `)
 	store := openTestStore(t)
 	inst := NewInstaller(store)

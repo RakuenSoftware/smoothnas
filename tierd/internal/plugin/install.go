@@ -133,8 +133,9 @@ func (i *Installer) InstallWithOptions(yamlBytes []byte, opts InstallOptions) (*
 	// generation; preflight gives us the resolved pool name (for
 	// the DB row) and the canonical single-instance host path
 	// (which we use as the parent for per-instance fan-out).
-	tierPools := map[string]string{}
-	tierBases := map[string]string{}
+	// Tier pools + bases are keyed by service → volume.
+	tierPools := map[string]map[string]string{}
+	tierBases := map[string]map[string]string{}
 	if i.tierProvider != nil {
 		preflight, err := PreflightTierAssignments(i.tierProvider, i.statfs, m, opts.Tiers, i.pluginsRoot)
 		if err != nil {
@@ -145,12 +146,16 @@ func (i *Installer) InstallWithOptions(yamlBytes []byte, opts InstallOptions) (*
 		}
 		for _, p := range preflight.Placements {
 			if p.Pool != "" {
-				tierPools[p.Volume] = p.Pool
+				if tierPools[p.Service] == nil {
+					tierPools[p.Service] = map[string]string{}
+					tierBases[p.Service] = map[string]string{}
+				}
+				tierPools[p.Service][p.Volume] = p.Pool
 				// p.HostPath is the canonical single-instance form
-				// (.../<volume>); for per-instance fan-out we need
-				// the parent (.../<plugin-name>/) so we can splice
-				// in instance-N. Strip the volume name suffix.
-				tierBases[p.Volume] = stripVolumeSuffix(p.HostPath, p.Volume)
+				// (.../<service>/<volume>); for per-instance fan-out we
+				// need the parent (.../<service>/) so we can splice in
+				// instance-N. Strip the volume name suffix.
+				tierBases[p.Service][p.Volume] = stripVolumeSuffix(p.HostPath, p.Volume)
 			}
 		}
 	}
@@ -224,59 +229,65 @@ func (e *PreflightError) Error() string {
 // that parent and the volume name. Tier-bound volumes NOT in
 // tierBases get empty paths (no tier provider wired, phase-1
 // fallback) and need a reinstall to fix.
-func (i *Installer) resolveVolumePaths(m *Manifest, count int, tierBases map[string]string) (
-	paths map[string]map[int]string,
+func (i *Installer) resolveVolumePaths(m *Manifest, count int, tierBases map[string]map[string]string) (
+	paths map[string]map[string]map[int]string,
 	mkdirs []string,
 	err error,
 ) {
-	paths = make(map[string]map[int]string, len(m.Volumes))
-	for _, vol := range m.Volumes {
-		entries := make(map[int]string)
-		switch vol.Mode {
-		case VolumeModeFlat:
-			if vol.PerInstance {
-				for inst := 1; inst <= count; inst++ {
-					p := filepath.Join(i.pluginsRoot, m.Metadata.Name,
-						fmt.Sprintf("instance-%d", inst), vol.Name)
-					entries[inst] = p
-					mkdirs = append(mkdirs, p)
-				}
-			} else {
-				p := filepath.Join(i.pluginsRoot, m.Metadata.Name, vol.Name)
-				entries[1] = p
-				mkdirs = append(mkdirs, p)
-			}
-		case VolumeModeTierBound:
-			base := tierBases[vol.Name]
-			if base == "" {
-				// No tier provider configured (phase-1 caller) —
-				// keep the empty-path sentinel so the schema row
-				// still satisfies (plugin, volume, instance).
+	paths = make(map[string]map[string]map[int]string, len(m.Services))
+	for si := range m.Services {
+		svc := &m.Services[si]
+		svcPaths := make(map[string]map[int]string, len(svc.Volumes))
+		seg := servicePathSegment(m.Metadata.Name, svc.Name)
+		for _, vol := range svc.Volumes {
+			entries := make(map[int]string)
+			switch vol.Mode {
+			case VolumeModeFlat:
 				if vol.PerInstance {
 					for inst := 1; inst <= count; inst++ {
-						entries[inst] = ""
+						p := filepath.Join(i.pluginsRoot, m.Metadata.Name, seg,
+							fmt.Sprintf("instance-%d", inst), vol.Name)
+						entries[inst] = p
+						mkdirs = append(mkdirs, p)
 					}
 				} else {
-					entries[1] = ""
-				}
-				break
-			}
-			// Resolved: real per-instance paths under the tier mount.
-			if vol.PerInstance {
-				for inst := 1; inst <= count; inst++ {
-					p := filepath.Join(base, fmt.Sprintf("instance-%d", inst), vol.Name)
-					entries[inst] = p
+					p := filepath.Join(i.pluginsRoot, m.Metadata.Name, seg, vol.Name)
+					entries[1] = p
 					mkdirs = append(mkdirs, p)
 				}
-			} else {
-				p := filepath.Join(base, vol.Name)
-				entries[1] = p
-				mkdirs = append(mkdirs, p)
+			case VolumeModeTierBound:
+				base := tierBases[svc.Name][vol.Name]
+				if base == "" {
+					// No tier provider configured — keep the empty-path
+					// sentinel so the schema row still satisfies
+					// (plugin, service, volume, instance).
+					if vol.PerInstance {
+						for inst := 1; inst <= count; inst++ {
+							entries[inst] = ""
+						}
+					} else {
+						entries[1] = ""
+					}
+					break
+				}
+				// Resolved: real per-instance paths under the tier mount.
+				if vol.PerInstance {
+					for inst := 1; inst <= count; inst++ {
+						p := filepath.Join(base, fmt.Sprintf("instance-%d", inst), vol.Name)
+						entries[inst] = p
+						mkdirs = append(mkdirs, p)
+					}
+				} else {
+					p := filepath.Join(base, vol.Name)
+					entries[1] = p
+					mkdirs = append(mkdirs, p)
+				}
+			default:
+				return nil, nil, fmt.Errorf("resolveVolumePaths: unknown mode %q for volume %q/%q", vol.Mode, svc.Name, vol.Name)
 			}
-		default:
-			return nil, nil, fmt.Errorf("resolveVolumePaths: unknown mode %q for volume %q", vol.Mode, vol.Name)
+			svcPaths[vol.Name] = entries
 		}
-		paths[vol.Name] = entries
+		paths[svc.Name] = svcPaths
 	}
 	return paths, mkdirs, nil
 }

@@ -201,17 +201,19 @@ kind: Plugin
 metadata:
   name: weird
   version: 0.0.1
-artifact:
-  type: oci-image
-  image: example.com/x:1
-container:
-  command: ["sleep","1"]
-  restartPolicy: unless-stopped
-volumes:
-  - name: data
-    mode: tier-bound
-    slot: NONEXISTENT
-    bind: /data
+services:
+  - name: weird
+    artifact:
+      type: oci-image
+      image: example.com/x:1
+    container:
+      command: ["sleep","1"]
+      restartPolicy: unless-stopped
+    volumes:
+      - name: data
+        mode: tier-bound
+        slot: NONEXISTENT
+        bind: /data
 `)
 	m, err := ParseManifest(yaml)
 	if err != nil {
