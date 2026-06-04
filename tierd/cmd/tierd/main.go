@@ -17,6 +17,7 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/api"
 	"github.com/JBailes/SmoothNAS/tierd/internal/backup"
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
+	"github.com/JBailes/SmoothNAS/tierd/internal/firewall"
 	"github.com/JBailes/SmoothNAS/tierd/internal/iopressure"
 	"github.com/JBailes/SmoothNAS/tierd/internal/lvm"
 	"github.com/JBailes/SmoothNAS/tierd/internal/mdadm"
@@ -178,6 +179,18 @@ func main() {
 	if catalogErr != nil {
 		log.Printf("plugin profile catalog: %v (built-ins still loaded)", catalogErr)
 	}
+	// Apply the host firewall on startup so the on-disk ruleset always
+	// matches this binary. tierd otherwise only regenerates it on a
+	// sharing-protocol toggle or mid-update, so a fresh release could
+	// leave a stale /etc/nftables.conf (e.g. missing the rule that
+	// accepts DNAT'd inbound to published plugin ports, which made Wolf's
+	// Moonlight ports and the Wolf Den UI unreachable from the LAN after
+	// an update). Apply before the plugin runtime autostarts containers
+	// so the scoped table replace can't race the runtime's DNAT setup.
+	if err := firewall.Apply(firewall.GetEnabledProtocols()); err != nil {
+		log.Printf("startup firewall apply: %v", err)
+	}
+
 	pluginLifecycle, stopPluginRuntime := setupPluginRuntime(plugin.NewStore(store), pluginCatalog)
 	backupHandler := api.NewBackupHandler(store)
 
