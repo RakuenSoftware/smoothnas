@@ -1,4 +1,142 @@
-SmoothNAS Third-Party Software Notice
+SmoothNAS
+Copyright (C) 2026 RakuenSoftware.
+
+This product is licensed under the GNU Affero General Public License,
+version 3 or later (AGPL-3.0-or-later). See the LICENSE file for the full
+license text and LICENSING.md for dual-licensing (including the
+alternative commercial license) details.
+
+This NOTICE file is provided for attribution purposes and does not modify
+the license. Each third-party component listed below remains licensed
+under its own terms by its respective copyright holders.
+
+================================================================================
+1. Third-party software linked into the SmoothNAS backend (tierd)
+================================================================================
+
+The `tierd` backend is written in Go and statically links the following
+modules (direct and indirect dependencies). Each remains under its own
+license; the original copyright notices are reproduced below.
+
+  - github.com/RakuenSoftware/smoothfs           — RakuenSoftware; see project repository
+  - github.com/RakuenSoftware/smoothgui/auth     — RakuenSoftware; see project repository
+  - github.com/RakuenSoftware/nonraid            — RakuenSoftware; see project repository
+
+  - github.com/cespare/xxhash/v2                 — MIT — Copyright (c) 2016 Caleb Spare
+  - github.com/creack/pty/v2                      — MIT — Copyright (c) 2011 Keith Rarick
+  - github.com/mattn/go-sqlite3                   — MIT — Copyright (c) 2014 Yasuhiro Matsumoto
+  - github.com/pressly/goose/v3                   — MIT — Copyright (c) 2012 Liam Staskawicz; 2016 Pressly Inc.
+  - go.etcd.io/bbolt                              — MIT — Copyright (c) 2013 Ben Johnson
+  - github.com/mdlayher/genetlink                 — MIT — Copyright (C) 2016-2022 Matt Layher
+  - github.com/mdlayher/netlink                   — MIT — Copyright (C) 2016- Matt Layher
+  - github.com/mdlayher/socket                    — MIT — Copyright (C) 2021 Matt Layher
+  - github.com/mfridman/interpolate               — MIT — Copyright (c) 2014-2017 Buildkite Pty Ltd
+  - go.uber.org/multierr                          — MIT — Copyright (c) 2017-2021 Uber Technologies, Inc.
+
+  - github.com/google/uuid                        — BSD-3-Clause — Copyright (c) 2009,2014 Google Inc.
+  - github.com/google/go-cmp                      — BSD-3-Clause — Copyright (c) 2017 The Go Authors
+  - golang.org/x/sys                              — BSD-3-Clause — Copyright (c) 2009 The Go Authors
+  - golang.org/x/net                              — BSD-3-Clause — Copyright (c) 2009 The Go Authors
+  - golang.org/x/sync                             — BSD-3-Clause — Copyright (c) 2009 The Go Authors
+
+  - github.com/msteinert/pam/v2                   — BSD-2-Clause — Copyright 2011 krockot; Michael Steinert
+  - github.com/sethvargo/go-retry                 — Apache-2.0 — Copyright (c) Seth Vargo
+  - gopkg.in/yaml.v3                              — MIT and Apache-2.0 — Copyright (c) 2011-2019 Canonical Ltd
+  - nhooyr.io/websocket                           — ISC — Copyright (c) 2023 Anmol Sethi <hi@nhooyr.io>
+
+The MIT License (applies to the MIT-licensed modules above):
+
+  Permission is hereby granted, free of charge, to any person obtaining a
+  copy of this software and associated documentation files (the
+  "Software"), to deal in the Software without restriction, including
+  without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, and/or sell copies of the Software, and to
+  permit persons to whom the Software is furnished to do so, subject to
+  the following conditions:
+
+  The above copyright notice and this permission notice shall be included
+  in all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+  TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+  SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+The 3-clause BSD License (applies to the BSD-3-Clause modules above, incl.
+the golang.org/x and Google modules):
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are
+  met:
+
+  1. Redistributions of source code must retain the above copyright
+     notice, this list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright
+     notice, this list of conditions and the following disclaimer in the
+     documentation and/or other materials provided with the distribution.
+  3. Neither the name of the copyright holder nor the names of its
+     contributors may be used to endorse or promote products derived from
+     this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+  IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+  TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+  PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+  HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+  TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+  PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+  LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+  (The 2-clause BSD License used by github.com/msteinert/pam/v2 is the same
+  as the above without clause 3.)
+
+The ISC License (nhooyr.io/websocket):
+
+  Permission to use, copy, modify, and distribute this software for any
+  purpose with or without fee is hereby granted, provided that the above
+  copyright notice and this permission notice appear in all copies.
+
+  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+  ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+The Apache License 2.0 (github.com/sethvargo/go-retry; gopkg.in/yaml.v3 in
+part) is available at https://www.apache.org/licenses/LICENSE-2.0 and in
+the respective module source trees.
+
+================================================================================
+2. Third-party software bundled into the SmoothNAS web UI (tierd-ui)
+================================================================================
+
+The production web UI build bundles the following npm packages. Each is
+licensed under the MIT License (reproduced above), with the copyright
+holders noted:
+
+  - react                          — Copyright (c) Meta Platforms, Inc. and affiliates
+  - react-dom                      — Copyright (c) Meta Platforms, Inc. and affiliates
+  - react-router-dom               — Copyright (c) React Training LLC; Remix Software Inc.
+  - @xterm/xterm                   — Copyright (c) 2017-2019 The xterm.js authors; (c) 2014-2016 SourceLair
+  - @xterm/addon-fit               — Copyright (c) 2017-2019 The xterm.js authors
+  - @xterm/addon-web-links         — Copyright (c) 2017-2019 The xterm.js authors
+  - @rakuensoftware/smoothgui      — RakuenSoftware; see project repository
+
+Build-time-only tooling (vite, typescript, eslint, sass, and related
+plugins) is used to produce the UI but is not redistributed as part of the
+appliance; those tools remain under their own (predominantly MIT) licenses.
+
+================================================================================
+3. Bundled and system software (ISO and installer)
+================================================================================
 
 SmoothNAS ISO images and release artifacts include bundled third-party
 software needed to install the appliance without rebuilding the kernel
@@ -19,7 +157,9 @@ This includes:
 
   - Samba, NFS, targetcli, nginx, and all other system packages:
     installed from Debian's repositories during installation unless a
-    package is explicitly bundled in the local appliance cache.
+    package is explicitly bundled in the local appliance cache. Each
+    remains under its own license (GPL, LGPL, BSD, etc.) as published by
+    Debian and the respective upstream projects.
 
   - smoothfs source: included from the pinned
     `RakuenSoftware/smoothfs` repository checkout so DKMS can build the
