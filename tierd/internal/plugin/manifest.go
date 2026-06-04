@@ -79,10 +79,23 @@ type Manifest struct {
 	UI         *UI       `json:"ui,omitempty" yaml:"ui,omitempty"`
 	Profiles   []string  `json:"profiles,omitempty" yaml:"profiles"`
 
-	// Services is required and non-empty. A single-container plugin is
-	// simply one service; the retired top-level single-image shape has
-	// no backward-compatibility path (strict YAML decode rejects it).
-	Services []Service `json:"services" yaml:"services"`
+	// Services is the set of containers this plugin owns. A single-
+	// container plugin is one service. New manifests should use this
+	// shape; pre-plugins-10 manifests using the top-level fields below
+	// are auto-wrapped into a single service by ParseManifest.
+	Services []Service `json:"services" yaml:"services,omitempty"`
+
+	// Legacy single-image top-level fields (pre-plugins-10). When present
+	// and Services is empty, ParseManifest folds them into one service
+	// named after the plugin — so already-installed plugins (whose stored
+	// manifest is re-parsed on every Materialise) and third-party
+	// single-image manifests keep working. Hidden from JSON: the API and
+	// the rest of the runtime only ever see the normalized Services view.
+	LegacyArtifact  *Artifact     `json:"-" yaml:"artifact,omitempty"`
+	LegacyContainer *Container    `json:"-" yaml:"container,omitempty"`
+	LegacyVolumes   []Volume      `json:"-" yaml:"volumes,omitempty"`
+	LegacyPorts     []Port        `json:"-" yaml:"ports,omitempty"`
+	LegacyConfig    []ConfigField `json:"-" yaml:"config,omitempty"`
 }
 
 // Service is one container within a plugin. Artifact, container knobs,
@@ -239,7 +252,39 @@ func ParseManifest(data []byte) (*Manifest, error) {
 	if err := dec.Decode(&m); err != nil {
 		return nil, fmt.Errorf("parse manifest: %w", err)
 	}
+	m.normalizeLegacy()
 	return &m, nil
+}
+
+// normalizeLegacy folds a pre-plugins-10 single-image manifest (top-level
+// artifact/container/volumes/ports/config) into one service named after
+// the plugin, so older and third-party manifests keep parsing. The
+// service name is the plugin name, which yields the same bare container
+// name the plugin already runs under — so an installed plugin survives
+// the upgrade without a recreate.
+//
+// A no-op when the manifest already uses services: or carries no legacy
+// artifact. The both-shapes-present conflict is reported by ValidateManifest.
+func (m *Manifest) normalizeLegacy() {
+	if len(m.Services) > 0 || m.LegacyArtifact == nil {
+		return
+	}
+	svc := Service{
+		Name:     m.Metadata.Name,
+		Artifact: *m.LegacyArtifact,
+		Volumes:  m.LegacyVolumes,
+		Ports:    m.LegacyPorts,
+		Config:   m.LegacyConfig,
+	}
+	if m.LegacyContainer != nil {
+		svc.Container = *m.LegacyContainer
+	}
+	m.Services = []Service{svc}
+	m.LegacyArtifact = nil
+	m.LegacyContainer = nil
+	m.LegacyVolumes = nil
+	m.LegacyPorts = nil
+	m.LegacyConfig = nil
 }
 
 // Field-level regexes. Public so tests and other packages can re-use
@@ -274,6 +319,12 @@ func ValidateManifest(m *Manifest) error {
 	}
 	if m.Kind != Kind {
 		v.add("kind", "must be %q (got %q)", Kind, m.Kind)
+	}
+
+	// A normalized manifest never has both; this only fires when a YAML
+	// mixed the legacy top-level artifact with an explicit services: block.
+	if m.LegacyArtifact != nil && len(m.Services) > 0 {
+		v.add("services", "set either the top-level artifact (legacy) or services, not both")
 	}
 
 	validateMetadata(v, &m.Metadata)

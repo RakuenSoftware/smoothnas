@@ -100,10 +100,12 @@ unknownField: oops
 	}
 }
 
-// TestParseManifest_RejectsRetiredTopLevelShape proves the breaking
-// change: the retired single-image top-level artifact field no longer
-// exists, so strict decoding rejects manifests that still use it.
-func TestParseManifest_RejectsRetiredTopLevelShape(t *testing.T) {
+// TestParseManifest_WrapsLegacyTopLevelShape proves backward compat: a
+// pre-plugins-10 single-image manifest (top-level artifact/container/
+// volumes/ports/config) parses and is auto-wrapped into one service named
+// after the plugin, so already-installed and third-party plugins keep
+// working after the schema change.
+func TestParseManifest_WrapsLegacyTopLevelShape(t *testing.T) {
 	yaml := []byte(`
 apiVersion: smoothnas.io/v1
 kind: Plugin
@@ -113,9 +115,76 @@ metadata:
 artifact:
   type: oci-image
   image: example/foo:latest
+container:
+  command: ["/run"]
+  restartPolicy: unless-stopped
+volumes:
+  - name: data
+    mode: flat
+    bind: /data
+ports:
+  - name: http
+    port: 8080
+    protocol: tcp
+    expose: true
+config:
+  - key: FOO
+    type: string
+    default: bar
 `)
-	if _, err := ParseManifest(yaml); err == nil {
-		t.Fatal("expected parse error for retired top-level artifact, got nil")
+	m, err := ParseManifest(yaml)
+	if err != nil {
+		t.Fatalf("legacy manifest should parse, got: %v", err)
+	}
+	if len(m.Services) != 1 {
+		t.Fatalf("legacy manifest should wrap into 1 service, got %d", len(m.Services))
+	}
+	svc := m.Services[0]
+	if svc.Name != "foo" {
+		t.Errorf("wrapped service name = %q, want the plugin name foo", svc.Name)
+	}
+	if svc.Artifact.Image != "example/foo:latest" {
+		t.Errorf("artifact not carried into service: %+v", svc.Artifact)
+	}
+	if len(svc.Volumes) != 1 || len(svc.Ports) != 1 || len(svc.Config) != 1 {
+		t.Errorf("volumes/ports/config not carried into service: %+v", svc)
+	}
+	if svc.Container.RestartPolicy != "unless-stopped" {
+		t.Errorf("container not carried into service: %+v", svc.Container)
+	}
+	// The legacy fields are consumed; the JSON/runtime view is services-only.
+	if m.LegacyArtifact != nil {
+		t.Error("legacy artifact should be cleared after normalization")
+	}
+	if err := ValidateManifest(m); err != nil {
+		t.Errorf("wrapped legacy manifest should validate: %v", err)
+	}
+}
+
+// TestValidateManifest_RejectsMixedShape ensures a manifest can't set both
+// the legacy top-level artifact and an explicit services: block.
+func TestValidateManifest_RejectsMixedShape(t *testing.T) {
+	yaml := []byte(`
+apiVersion: smoothnas.io/v1
+kind: Plugin
+metadata:
+  name: foo
+  version: 0.1.0
+artifact:
+  type: oci-image
+  image: example/foo:latest
+services:
+  - name: foo
+    artifact:
+      type: oci-image
+      image: example/foo:latest
+`)
+	m, err := ParseManifest(yaml)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := ValidateManifest(m); err == nil {
+		t.Fatal("expected validation error for mixed legacy + services shape")
 	}
 }
 
