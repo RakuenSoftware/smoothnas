@@ -35,6 +35,7 @@ type fakeRuntime struct {
 	pullErr        error
 	pullErrs       []error
 	createErr      error
+	createErrs     []error // one-shot per-call errors, consumed front-to-back
 	startErr       error
 	waitExit       int
 	commitErr      error
@@ -116,6 +117,13 @@ func (f *fakeRuntime) RemoveImage(ctx context.Context, ref string) error {
 func (f *fakeRuntime) CreateContainer(ctx context.Context, name string, req runtime.CreateContainerRequest) (runtime.CreateContainerResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if len(f.createErrs) > 0 {
+		err := f.createErrs[0]
+		f.createErrs = f.createErrs[1:]
+		if err != nil {
+			return runtime.CreateContainerResponse{}, err
+		}
+	}
 	if f.createErr != nil {
 		return runtime.CreateContainerResponse{}, f.createErr
 	}
@@ -249,6 +257,48 @@ func TestLifecycle_Materialise_OCIImage(t *testing.T) {
 	}
 	if rec.Instances[0].ContainerID == "" {
 		t.Error("container_id should be recorded after materialise")
+	}
+	if rec.Instances[0].State != StateStopped {
+		t.Errorf("state = %q want stopped (post-create)", rec.Instances[0].State)
+	}
+}
+
+// TestLifecycle_Materialise_RecoversFromNameConflict covers the
+// orphan-on-cancel deadlock: a previous create that was canceled
+// mid-pull leaves a container under the deterministic name without a
+// recorded ContainerID, so the stale-container cleanup (which keys off
+// ContainerID) is skipped and every retry 409s. Materialise must
+// force-remove the name-conflicting orphan and retry once.
+func TestLifecycle_Materialise_RecoversFromNameConflict(t *testing.T) {
+	lc, rt, store := installFixture(t, "llama.yaml")
+
+	if _, err := store.db.Exec(
+		`UPDATE plugin_volume_paths SET host_path = '/mnt/media/.plugins/llama-cpp/models' WHERE plugin_name = 'llama-cpp'`,
+	); err != nil {
+		t.Fatalf("fake tier resolution: %v", err)
+	}
+
+	// First create 409s (orphan holds the name); retry must succeed.
+	rt.createErrs = []error{&runtime.APIError{StatusCode: 409, Message: `container name "/llama-cpp" is already in use`}}
+
+	if err := lc.Materialise(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("materialise should recover from name conflict, got: %v", err)
+	}
+
+	// The conflicting orphan must have been force-removed by name, and the
+	// retried create (the only one the fake records on success) recorded.
+	if len(rt.removeCalls) != 1 || rt.removeCalls[0] != "llama-cpp" {
+		t.Errorf("expected one remove of the name-conflicting container %q, got %v", "llama-cpp", rt.removeCalls)
+	}
+	if len(rt.createNames) != 1 || rt.createNames[0] != "llama-cpp" {
+		t.Errorf("expected the retried create to be recorded, got names %v", rt.createNames)
+	}
+	rec, err := store.Get("llama-cpp")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if rec.Instances[0].ContainerID == "" {
+		t.Error("container_id should be recorded after the retried create")
 	}
 	if rec.Instances[0].State != StateStopped {
 		t.Errorf("state = %q want stopped (post-create)", rec.Instances[0].State)
