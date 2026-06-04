@@ -14,7 +14,7 @@ import (
 
 // Plugin states. Per-instance states match StateInstalled..StateFailed.
 // The aggregate `plugins.state` column also accepts StateDegraded (used
-// when some instances are running and others are failed).
+// when some (service,instance) units are running and others are failed).
 const (
 	StateInstalled = "installed"
 	StatePulling   = "pulling"
@@ -29,8 +29,9 @@ const (
 const bearerExpectedConfigKey = "SMOOTHNAS_BEARER_EXPECTED"
 
 // Store is the persistence layer for the plugin subsystem. It wraps
-// the shared db.Store and exposes plugin-shaped CRUD on the six
-// tables introduced in migration 00011_plugins.sql.
+// the shared db.Store and exposes plugin-shaped CRUD over the
+// per-service tables (plugins, plugin_services, and the per-(service)
+// child tables introduced/extended in migrations 00011 and 00019).
 type Store struct {
 	store *db.Store
 	db    *sql.DB
@@ -44,7 +45,10 @@ func NewStore(s *db.Store) *Store {
 }
 
 // PluginRow is the in-memory image of one row in the `plugins` table
-// joined with derived fields. Used by Get / List.
+// joined with derived fields. Used by Get / List. ArtifactType /
+// ImageRef / DistroSummary are legacy mirrors of the plugin's primary
+// (first) service — the authoritative per-service data lives in
+// PluginRecord.Services.
 type PluginRow struct {
 	Name                 string
 	Version              string
@@ -59,15 +63,29 @@ type PluginRow struct {
 	UpdatedAt            string
 	// ResolvedProfiles is the profile-name list that was actually
 	// applied at install/materialise time (after default-limits
-	// auto-injection and operator overrides). Empty list = no
-	// profiles. The phase-1 install path leaves this empty;
-	// Lifecycle.Materialise populates it once profiles are wired.
+	// auto-injection and operator overrides). Empty list = no profiles.
 	ResolvedProfiles []string
 }
 
-// InstanceRow is the in-memory image of one plugin_instances row.
+// ServiceRow is the in-memory image of one plugin_services row.
+type ServiceRow struct {
+	PluginName    string
+	Service       string
+	ArtifactType  string
+	ImageRef      string
+	DistroSummary string
+	// DependsOn maps a sibling service name → start condition
+	// (service_started / service_healthy).
+	DependsOn map[string]string
+	Health    *Healthcheck
+	Ordinal   int
+}
+
+// InstanceRow is the in-memory image of one plugin_instances row. The
+// run unit is (PluginName, Service, Instance).
 type InstanceRow struct {
 	PluginName  string
+	Service     string
 	Instance    int
 	ContainerID string
 	State       string
@@ -81,6 +99,7 @@ type InstanceRow struct {
 // plugin_volume_paths. Paths is keyed by instance number (1..N).
 type VolumeRow struct {
 	PluginName  string
+	Service     string
 	Name        string
 	Mode        string
 	Slot        string
@@ -93,6 +112,7 @@ type VolumeRow struct {
 // PortRow is the in-memory image of one plugin_ports row.
 type PortRow struct {
 	PluginName    string
+	Service       string
 	Name          string
 	ContainerPort int
 	Protocol      string
@@ -103,6 +123,7 @@ type PortRow struct {
 // ConfigRow is the in-memory image of one plugin_config row.
 type ConfigRow struct {
 	PluginName string
+	Service    string
 	Key        string
 	Value      string
 }
@@ -111,6 +132,7 @@ type ConfigRow struct {
 // one structure, the shape callers usually want.
 type PluginRecord struct {
 	Plugin    PluginRow
+	Services  []ServiceRow
 	Instances []InstanceRow
 	Volumes   []VolumeRow
 	Ports     []PortRow
@@ -118,41 +140,37 @@ type PluginRecord struct {
 }
 
 // InsertParams is the input to Insert: the validated manifest plus
-// the resolved per-instance host paths for each volume. install.go
-// fills this in.
+// the resolved per-(service,volume) host paths. install.go fills this in.
 type InsertParams struct {
 	Manifest *Manifest
-	// Paths is keyed by (volume name) → (instance number → host path).
-	// Tier-bound volumes whose host path has not yet been resolved
-	// (phase 1 callers without tier assignments) MUST still appear
-	// in this map with their instance entries set to "" (empty
-	// string). The plugin_volumes row's tier_pool gets the sentinel
+	// Paths is keyed by service → volume name → instance number → host
+	// path. Tier-bound volumes whose host path has not yet been resolved
+	// MUST still appear with their instance entries set to "" (empty
+	// string); the plugin_volumes row's tier_pool gets the sentinel
 	// "<unresolved>" in that case.
-	Paths map[string]map[int]string
-	// Tiers maps volume name → tier pool name for tier-bound volumes
-	// that the caller has already resolved (phase 03+). Volumes not
-	// present in this map fall back to the "<unresolved>" sentinel.
-	Tiers map[string]string
-	// Config maps manifest config keys to operator-supplied
-	// install-time values. Keys not declared by Manifest.Config are
-	// ignored; declared keys not present here use their manifest default.
+	Paths map[string]map[string]map[int]string
+	// Tiers maps service → volume name → tier pool name for tier-bound
+	// volumes the caller has already resolved. Volumes not present fall
+	// back to the "<unresolved>" sentinel.
+	Tiers map[string]map[string]string
+	// Config maps manifest config keys to operator-supplied install-time
+	// values. Applied to every service that declares the key. Keys not
+	// declared by any service are ignored.
 	Config map[string]string
 }
 
-// Insert persists a plugin atomically across all six tables. Returns
+// Insert persists a plugin atomically across all tables. Returns
 // ErrPluginExists if a plugin with this name is already installed.
 func (s *Store) Insert(p InsertParams) error {
 	if p.Manifest == nil {
 		return fmt.Errorf("plugin.Insert: nil manifest")
 	}
 	m := p.Manifest
+	if len(m.Services) == 0 {
+		return fmt.Errorf("plugin.Insert: manifest has no services")
+	}
 
-	// Marshal the original manifest YAML for storage. We could
-	// reserialise from the struct but operators sometimes care about
-	// the exact bytes they uploaded (comments, ordering); install.go
-	// passes the raw input through via a side channel below. For now
-	// we store the parsed struct's re-render via fmt — install.go
-	// stamps the real bytes immediately after Insert returns. The
+	// install.go stamps the real bytes immediately after Insert; the
 	// schema requires a non-empty value, so a placeholder is fine.
 	manifestText := fmt.Sprintf("# parsed manifest for %s@%s\n", m.Metadata.Name, m.Metadata.Version)
 
@@ -162,21 +180,18 @@ func (s *Store) Insert(p InsertParams) error {
 	}
 	defer tx.Rollback() //nolint:errcheck // best-effort on error path
 
-	imageRef := ""
-	distro := m.DistroSummary()
-	switch m.Artifact.Type {
-	case ArtifactOCIImage:
-		// Phase 02 will resolve a digest and replace this with the
-		// fully-qualified image@sha256:... ref. Phase 1 records the
-		// manifest's pre-resolution form so the operator can see it
-		// in `plugin show`.
-		imageRef = digestPinnedImageRef(m.Artifact.Image, m.Artifact.Digest)
-	}
-
 	count := m.EffectiveCount()
 	configurable := 0
 	if m.Instances.Configurable {
 		configurable = 1
+	}
+
+	// Legacy mirror columns on `plugins` carry the primary (first)
+	// service's artifact for display; plugin_services is authoritative.
+	primary := &m.Services[0]
+	legacyImage := ""
+	if primary.Artifact.Type == ArtifactOCIImage {
+		legacyImage = digestPinnedImageRef(primary.Artifact.Image, primary.Artifact.Digest)
 	}
 
 	res, err := tx.Exec(
@@ -186,7 +201,7 @@ func (s *Store) Insert(p InsertParams) error {
 		  instance_count, instance_configurable)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.Metadata.Name, m.Metadata.Version, StateInstalled, manifestText,
-		m.Artifact.Type, sqlNullable(imageRef), sqlNullable(distro),
+		primary.Artifact.Type, sqlNullable(legacyImage), sqlNullable(primary.DistroSummary()),
 		count, configurable,
 	)
 	if err != nil {
@@ -199,112 +214,135 @@ func (s *Store) Insert(p InsertParams) error {
 		return fmt.Errorf("insert plugins: expected 1 row, got %d", n)
 	}
 
-	// One plugin_instances row per replica.
-	for i := 1; i <= count; i++ {
-		if _, err := tx.Exec(
-			`INSERT INTO plugin_instances
-			 (plugin_name, instance, state)
-			 VALUES (?, ?, ?)`,
-			m.Metadata.Name, i, StateInstalled,
-		); err != nil {
-			return fmt.Errorf("insert plugin_instances[%d]: %w", i, err)
-		}
-	}
+	ordinals := serviceOrdinals(m.Services)
 
-	// Volumes + their per-instance paths.
-	for _, vol := range m.Volumes {
-		perInst := 0
-		if vol.PerInstance {
-			perInst = 1
+	for si := range m.Services {
+		svc := &m.Services[si]
+
+		imageRef := ""
+		if svc.Artifact.Type == ArtifactOCIImage {
+			imageRef = digestPinnedImageRef(svc.Artifact.Image, svc.Artifact.Digest)
 		}
-		var tierPool sql.NullString
-		var slot sql.NullString
-		if vol.Mode == VolumeModeTierBound {
-			slot = sql.NullString{String: vol.Slot, Valid: vol.Slot != ""}
-			// Phase 03 callers populate p.Tiers with the resolved
-			// tier pool name. Phase 1 callers (no tier assignments)
-			// land here with an empty entry; we record the sentinel
-			// so the row reads "I'm tier-bound but not yet placed".
-			if resolved, ok := p.Tiers[vol.Name]; ok && resolved != "" {
-				tierPool = sql.NullString{String: resolved, Valid: true}
-			} else {
-				tierPool = sql.NullString{String: "<unresolved>", Valid: true}
-			}
+		dependsJSON, err := marshalDependsOn(svc.DependsOn)
+		if err != nil {
+			return fmt.Errorf("encode dependsOn[%s]: %w", svc.Name, err)
+		}
+		healthJSON, err := marshalHealth(svc.Health)
+		if err != nil {
+			return fmt.Errorf("encode health[%s]: %w", svc.Name, err)
 		}
 		if _, err := tx.Exec(
-			`INSERT INTO plugin_volumes
-			 (plugin_name, volume_name, mode, slot, tier_pool,
-			  per_instance, bind_path)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			m.Metadata.Name, vol.Name, vol.Mode, slot, tierPool,
-			perInst, vol.Bind,
+			`INSERT INTO plugin_services
+			 (plugin_name, service, artifact_type, image_ref,
+			  distro_summary, depends_on, health, ordinal)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			m.Metadata.Name, svc.Name, svc.Artifact.Type, sqlNullable(imageRef),
+			sqlNullable(svc.DistroSummary()), dependsJSON, healthJSON, ordinals[svc.Name],
 		); err != nil {
-			return fmt.Errorf("insert plugin_volumes[%s]: %w", vol.Name, err)
+			return fmt.Errorf("insert plugin_services[%s]: %w", svc.Name, err)
 		}
 
-		paths := p.Paths[vol.Name]
-		if paths == nil {
-			return fmt.Errorf("plugin.Insert: missing host paths for volume %q", vol.Name)
-		}
-		// Shared volumes always have one entry at instance=1; per-instance
-		// volumes have N entries 1..count.
-		var expected int
-		if vol.PerInstance {
-			expected = count
-		} else {
-			expected = 1
-		}
-		if len(paths) != expected {
-			return fmt.Errorf("plugin.Insert: volume %q expected %d path(s), got %d", vol.Name, expected, len(paths))
-		}
-		for inst, host := range paths {
+		// One plugin_instances row per replica, per service.
+		for i := 1; i <= count; i++ {
 			if _, err := tx.Exec(
-				`INSERT INTO plugin_volume_paths
-				 (plugin_name, volume_name, instance, host_path)
+				`INSERT INTO plugin_instances
+				 (plugin_name, service, instance, state)
 				 VALUES (?, ?, ?, ?)`,
-				m.Metadata.Name, vol.Name, inst, host,
+				m.Metadata.Name, svc.Name, i, StateInstalled,
 			); err != nil {
-				return fmt.Errorf("insert plugin_volume_paths[%s/%d]: %w", vol.Name, inst, err)
+				return fmt.Errorf("insert plugin_instances[%s/%d]: %w", svc.Name, i, err)
 			}
 		}
-	}
 
-	// Ports.
-	for _, port := range m.Ports {
-		expose := 0
-		if port.Expose {
-			expose = 1
-		}
-		hostExpose := 0
-		if port.HostExpose {
-			hostExpose = 1
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO plugin_ports
-			 (plugin_name, port_name, container_port, protocol,
-			  expose, host_expose)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
-			m.Metadata.Name, port.Name, port.Port, port.Protocol,
-			expose, hostExpose,
-		); err != nil {
-			return fmt.Errorf("insert plugin_ports[%s]: %w", port.Name, err)
-		}
-	}
+		// Volumes + their per-instance paths.
+		for _, vol := range svc.Volumes {
+			perInst := 0
+			if vol.PerInstance {
+				perInst = 1
+			}
+			var tierPool sql.NullString
+			var slot sql.NullString
+			if vol.Mode == VolumeModeTierBound {
+				slot = sql.NullString{String: vol.Slot, Valid: vol.Slot != ""}
+				if resolved, ok := p.Tiers[svc.Name][vol.Name]; ok && resolved != "" {
+					tierPool = sql.NullString{String: resolved, Valid: true}
+				} else {
+					tierPool = sql.NullString{String: "<unresolved>", Valid: true}
+				}
+			}
+			if _, err := tx.Exec(
+				`INSERT INTO plugin_volumes
+				 (plugin_name, service, volume_name, mode, slot, tier_pool,
+				  per_instance, bind_path)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				m.Metadata.Name, svc.Name, vol.Name, vol.Mode, slot, tierPool,
+				perInst, vol.Bind,
+			); err != nil {
+				return fmt.Errorf("insert plugin_volumes[%s/%s]: %w", svc.Name, vol.Name, err)
+			}
 
-	// Config defaults plus any install-time operator overrides.
-	for _, f := range m.Config {
-		value := f.Default
-		if p.Config != nil {
-			if override, ok := p.Config[f.Key]; ok {
-				value = override
+			paths := p.Paths[svc.Name][vol.Name]
+			if paths == nil {
+				return fmt.Errorf("plugin.Insert: missing host paths for volume %q in service %q", vol.Name, svc.Name)
+			}
+			var expected int
+			if vol.PerInstance {
+				expected = count
+			} else {
+				expected = 1
+			}
+			if len(paths) != expected {
+				return fmt.Errorf("plugin.Insert: volume %q/%q expected %d path(s), got %d", svc.Name, vol.Name, expected, len(paths))
+			}
+			for inst, host := range paths {
+				if _, err := tx.Exec(
+					`INSERT INTO plugin_volume_paths
+					 (plugin_name, service, volume_name, instance, host_path)
+					 VALUES (?, ?, ?, ?, ?)`,
+					m.Metadata.Name, svc.Name, vol.Name, inst, host,
+				); err != nil {
+					return fmt.Errorf("insert plugin_volume_paths[%s/%s/%d]: %w", svc.Name, vol.Name, inst, err)
+				}
 			}
 		}
-		if _, err := tx.Exec(
-			`INSERT INTO plugin_config (plugin_name, key, value)
-			 VALUES (?, ?, ?)`,
-			m.Metadata.Name, f.Key, value,
-		); err != nil {
-			return fmt.Errorf("insert plugin_config[%s]: %w", f.Key, err)
+
+		// Ports.
+		for _, port := range svc.Ports {
+			expose := 0
+			if port.Expose {
+				expose = 1
+			}
+			hostExpose := 0
+			if port.HostExpose {
+				hostExpose = 1
+			}
+			if _, err := tx.Exec(
+				`INSERT INTO plugin_ports
+				 (plugin_name, service, port_name, container_port, protocol,
+				  expose, host_expose)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				m.Metadata.Name, svc.Name, port.Name, port.Port, port.Protocol,
+				expose, hostExpose,
+			); err != nil {
+				return fmt.Errorf("insert plugin_ports[%s/%s]: %w", svc.Name, port.Name, err)
+			}
+		}
+
+		// Config defaults plus any install-time operator overrides.
+		for _, f := range svc.Config {
+			value := f.Default
+			if p.Config != nil {
+				if override, ok := p.Config[f.Key]; ok {
+					value = override
+				}
+			}
+			if _, err := tx.Exec(
+				`INSERT INTO plugin_config (plugin_name, service, key, value)
+				 VALUES (?, ?, ?, ?)`,
+				m.Metadata.Name, svc.Name, f.Key, value,
+			); err != nil {
+				return fmt.Errorf("insert plugin_config[%s/%s]: %w", svc.Name, f.Key, err)
+			}
 		}
 	}
 
@@ -314,10 +352,79 @@ func (s *Store) Insert(p InsertParams) error {
 	return nil
 }
 
-// SetManifestYAML overwrites the stored raw manifest bytes for a
-// plugin. install.go calls this immediately after Insert with the
-// operator-supplied YAML so what we hand back to the UI matches
-// the input verbatim, including comments and field ordering.
+// serviceOrdinals returns each service's start ordinal: dependencies
+// get lower ordinals than the services that depend on them. The graph
+// is acyclic (ValidateManifest guarantees it); a defensive fallback
+// assigns any remaining services in declared order.
+func serviceOrdinals(services []Service) map[string]int {
+	known := make(map[string]bool, len(services))
+	for i := range services {
+		known[services[i].Name] = true
+	}
+	ord := make(map[string]int, len(services))
+	placed := make(map[string]bool, len(services))
+	n := 0
+	for len(placed) < len(services) {
+		progressed := false
+		for i := range services {
+			s := &services[i]
+			if placed[s.Name] {
+				continue
+			}
+			ready := true
+			for dep := range s.DependsOn {
+				if known[dep] && dep != s.Name && !placed[dep] {
+					ready = false
+					break
+				}
+			}
+			if ready {
+				ord[s.Name] = n
+				n++
+				placed[s.Name] = true
+				progressed = true
+			}
+		}
+		if !progressed {
+			for i := range services {
+				if !placed[services[i].Name] {
+					ord[services[i].Name] = n
+					n++
+					placed[services[i].Name] = true
+				}
+			}
+		}
+	}
+	return ord
+}
+
+func marshalDependsOn(deps map[string]DependsCondition) (sql.NullString, error) {
+	if len(deps) == 0 {
+		return sql.NullString{}, nil
+	}
+	flat := make(map[string]string, len(deps))
+	for k, v := range deps {
+		flat[k] = v.Condition
+	}
+	b, err := json.Marshal(flat)
+	if err != nil {
+		return sql.NullString{}, err
+	}
+	return sql.NullString{String: string(b), Valid: true}, nil
+}
+
+func marshalHealth(h *Healthcheck) (sql.NullString, error) {
+	if h == nil {
+		return sql.NullString{}, nil
+	}
+	b, err := json.Marshal(h)
+	if err != nil {
+		return sql.NullString{}, err
+	}
+	return sql.NullString{String: string(b), Valid: true}, nil
+}
+
+// SetManifestYAML overwrites the stored raw manifest bytes for a plugin.
 func (s *Store) SetManifestYAML(name string, yaml string) error {
 	if yaml == "" {
 		return fmt.Errorf("plugin.SetManifestYAML: empty yaml")
@@ -344,6 +451,9 @@ func (s *Store) Get(name string) (*PluginRecord, error) {
 		return nil, err
 	}
 	rec := &PluginRecord{Plugin: row}
+	if rec.Services, err = s.listServices(name); err != nil {
+		return nil, err
+	}
 	if rec.Instances, err = s.listInstances(name); err != nil {
 		return nil, err
 	}
@@ -386,8 +496,7 @@ func (s *Store) List() ([]PluginRow, error) {
 }
 
 // Delete removes the plugin and every cascading row. Returns
-// ErrPluginNotFound when no row matches. Phase 1 callers use this
-// directly; phase 02+ wraps it with container teardown.
+// ErrPluginNotFound when no row matches.
 func (s *Store) Delete(name string) error {
 	res, err := s.db.Exec(`DELETE FROM plugins WHERE name = ?`, name)
 	if err != nil {
@@ -401,9 +510,8 @@ func (s *Store) Delete(name string) error {
 }
 
 // GetBearerToken returns the per-plugin bearer token issued for the
-// nginx auth-injection flow (phase 07). Returns empty string + nil
-// when the plugin has no token (auth=none plugins, plugins
-// installed before phase 07).
+// nginx auth-injection flow. Returns empty string + nil when the
+// plugin has no token.
 func (s *Store) GetBearerToken(name string) (string, error) {
 	var token string
 	err := s.db.QueryRow(
@@ -419,14 +527,11 @@ func (s *Store) GetBearerToken(name string) (string, error) {
 	return token, nil
 }
 
-// IssueBearerToken generates a new 256-bit token, persists it,
-// and returns the value. Idempotent insert — called from Installer
-// after every install when the manifest declares
-// ui.embed.auth=bearer-injected. Calling twice for the same plugin
-// is allowed and rotates the token.
+// IssueBearerToken generates a new 256-bit token, persists it, and
+// returns the value. The expected-bearer config key is written to the
+// plugin's primary (highest-ordinal) service — the user-facing one that
+// fronts the UI. Idempotent; calling twice rotates the token.
 func (s *Store) IssueBearerToken(name string) (string, error) {
-	// Verify plugin exists first so a typo doesn't insert an orphan
-	// (the FK would catch it but the error would be ugly).
 	if _, err := s.getPluginRow(name); err != nil {
 		return "", err
 	}
@@ -439,6 +544,11 @@ func (s *Store) IssueBearerToken(name string) (string, error) {
 		return "", fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+
+	svc, err := primaryServiceTx(tx, name)
+	if err != nil {
+		return "", err
+	}
 	if _, err = tx.Exec(
 		`INSERT INTO plugin_secrets (plugin_name, bearer_token)
 		 VALUES (?, ?)
@@ -450,11 +560,11 @@ func (s *Store) IssueBearerToken(name string) (string, error) {
 		return "", fmt.Errorf("upsert plugin_secrets: %w", err)
 	}
 	if _, err = tx.Exec(
-		`INSERT INTO plugin_config (plugin_name, key, value)
-		 VALUES (?, ?, ?)
-		 ON CONFLICT(plugin_name, key) DO UPDATE SET
+		`INSERT INTO plugin_config (plugin_name, service, key, value)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(plugin_name, service, key) DO UPDATE SET
 		   value = excluded.value`,
-		name, bearerExpectedConfigKey, token,
+		name, svc, bearerExpectedConfigKey, token,
 	); err != nil {
 		return "", fmt.Errorf("upsert bearer config: %w", err)
 	}
@@ -464,19 +574,14 @@ func (s *Store) IssueBearerToken(name string) (string, error) {
 	return token, nil
 }
 
-// DeleteBearerToken removes the per-plugin token row. Normally
-// unnecessary because the plugins-row FK cascades on uninstall;
-// exposed for the rare "operator wants to drop bearer auth without
-// uninstalling" path.
+// DeleteBearerToken removes the per-plugin token row.
 func (s *Store) DeleteBearerToken(name string) error {
 	_, err := s.db.Exec(`DELETE FROM plugin_secrets WHERE plugin_name = ?`, name)
 	return err
 }
 
-// newBearerToken returns 32 random bytes as a hex string. 64 chars,
-// 256 bits of entropy — same shape Docker / k8s use for similar
-// tokens. crypto/rand panics never on Linux + /dev/urandom; bubble
-// the error up regardless to satisfy the spec.
+// newBearerToken returns 32 random bytes as a hex string (64 chars,
+// 256 bits of entropy).
 func newBearerToken() (string, error) {
 	var buf [32]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -485,12 +590,30 @@ func newBearerToken() (string, error) {
 	return hex.EncodeToString(buf[:]), nil
 }
 
-// TierConsumers returns the names of every installed plugin that
-// has at least one volume bound to the given tier pool. The api
-// layer's tier-deletion handler consults this so an operator can't
-// destroy a tier out from under a running plugin.
-//
-// Returns an empty slice (not nil) when no plugins use the tier.
+// primaryServiceTx returns the plugin's primary service — the
+// highest-ordinal one, which fronts the UI in a compose-style plugin
+// (it depends on its backends, so it starts last). Falls back to the
+// first service by name when ordinals tie.
+func primaryServiceTx(tx *sql.Tx, name string) (string, error) {
+	var svc string
+	err := tx.QueryRow(
+		`SELECT service FROM plugin_services
+		 WHERE plugin_name = ?
+		 ORDER BY ordinal DESC, service ASC
+		 LIMIT 1`,
+		name,
+	).Scan(&svc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrPluginNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve primary service: %w", err)
+	}
+	return svc, nil
+}
+
+// TierConsumers returns the names of every installed plugin that has
+// at least one volume bound to the given tier pool.
 func (s *Store) TierConsumers(poolName string) ([]string, error) {
 	if poolName == "" {
 		return nil, nil
@@ -517,21 +640,19 @@ func (s *Store) TierConsumers(poolName string) ([]string, error) {
 	return out, rows.Err()
 }
 
-// RawDB returns the underlying db.Store. The api layer needs it to
-// satisfy the TierProvider interface for phase 03 preflight without
-// a second DB connection.
+// RawDB returns the underlying db.Store.
 func (s *Store) RawDB() *db.Store { return s.store }
 
-// ReplaceConfig wipes every existing plugin_config row for the
-// named plugin and inserts the supplied key→value map in one
-// transaction. Generated bearer auth config is preserved when callers
-// omit it or submit it empty, because the installer/detail UI should
-// not be able to blank the wrapper's auth secret during ordinary
-// config edits. Returns ErrPluginNotFound when the plugin does not
-// exist (cascades from the SELECT before the DELETE so a typo
-// doesn't silently no-op).
+// ReplaceConfig wipes every existing plugin_config row for the named
+// plugin's primary service and inserts the supplied key→value map in
+// one transaction. Generated bearer auth config is preserved when
+// callers omit it or submit it empty. Returns ErrPluginNotFound when
+// the plugin does not exist.
+//
+// Multi-service config editing is a phase-06 concern; today operator
+// config edits target the primary (user-facing) service, which is the
+// only service for single-container plugins.
 func (s *Store) ReplaceConfig(name string, cfg map[string]string) error {
-	// Verify plugin exists first so a typo doesn't quietly return ok.
 	if _, err := s.getPluginRow(name); err != nil {
 		return err
 	}
@@ -551,13 +672,18 @@ func (s *Store) ReplaceConfig(name string, cfg map[string]string) error {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
-	if _, err := tx.Exec(`DELETE FROM plugin_config WHERE plugin_name = ?`, name); err != nil {
+
+	svc, err := primaryServiceTx(tx, name)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM plugin_config WHERE plugin_name = ? AND service = ?`, name, svc); err != nil {
 		return fmt.Errorf("delete plugin_config: %w", err)
 	}
 	for k, v := range cfg {
 		if _, err := tx.Exec(
-			`INSERT INTO plugin_config (plugin_name, key, value) VALUES (?, ?, ?)`,
-			name, k, v,
+			`INSERT INTO plugin_config (plugin_name, service, key, value) VALUES (?, ?, ?, ?)`,
+			name, svc, k, v,
 		); err != nil {
 			return fmt.Errorf("insert plugin_config[%s]: %w", k, err)
 		}
@@ -578,10 +704,8 @@ func cloneConfig(cfg map[string]string) map[string]string {
 	return out
 }
 
-// SetResolvedProfiles records the merged-profile-name list applied
-// at install/materialise time. Stored as a JSON array so a future
-// tierd doesn't have to re-resolve against a possibly-changed
-// catalog to know what the containers were created with.
+// SetResolvedProfiles records the merged-profile-name list applied at
+// install/materialise time as a JSON array.
 func (s *Store) SetResolvedProfiles(name string, profileNames []string) error {
 	if profileNames == nil {
 		profileNames = []string{}
@@ -604,15 +728,14 @@ func (s *Store) SetResolvedProfiles(name string, profileNames []string) error {
 	return nil
 }
 
-// SetInstanceContainerID records the runtime daemon's container ID
-// for one instance. Phase 02's Lifecycle.Materialise calls this
-// after each successful POST /containers/create.
-func (s *Store) SetInstanceContainerID(name string, instance int, id string) error {
+// SetInstanceContainerID records the runtime daemon's container ID for
+// one (service, instance) unit.
+func (s *Store) SetInstanceContainerID(name, service string, instance int, id string) error {
 	res, err := s.db.Exec(
 		`UPDATE plugin_instances
 		 SET container_id = ?, last_change = datetime('now')
-		 WHERE plugin_name = ? AND instance = ?`,
-		sqlNullable(id), name, instance,
+		 WHERE plugin_name = ? AND service = ? AND instance = ?`,
+		sqlNullable(id), name, service, instance,
 	)
 	if err != nil {
 		return fmt.Errorf("update plugin_instances.container_id: %w", err)
@@ -625,9 +748,9 @@ func (s *Store) SetInstanceContainerID(name string, instance int, id string) err
 }
 
 // UpdateManifest replaces an installed plugin's manifest while preserving
-// operator-owned state: volume placements, instance count, and existing config
-// values for keys that still exist. Volume shape changes are rejected because
-// they require fresh tier assignment choices and filesystem placement.
+// operator-owned state: volume placements, instance count, and existing
+// config values for keys that still exist. Volume or service shape changes
+// are rejected because they require fresh tier assignment / placement.
 func (s *Store) UpdateManifest(name string, m *Manifest, yamlText string) error {
 	if m == nil {
 		return fmt.Errorf("plugin.UpdateManifest: nil manifest")
@@ -643,16 +766,20 @@ func (s *Store) UpdateManifest(name string, m *Manifest, yamlText string) error 
 	if err != nil {
 		return err
 	}
-	if err := compatibleVolumeSchema(rec.Volumes, m.Volumes); err != nil {
+	if err := compatibleVolumeSchema(rec.Volumes, m); err != nil {
 		return err
 	}
 	if !m.Instances.Configurable && m.EffectiveCount() != rec.Plugin.InstanceCount {
 		return fmt.Errorf("%w: instance count change (installed %d, manifest %d)", ErrPluginUpdateRequiresReinstall, rec.Plugin.InstanceCount, m.EffectiveCount())
 	}
 
-	existingConfig := make(map[string]string, len(rec.Config))
+	// Preserve config values keyed by (service, key).
+	existingConfig := make(map[string]map[string]string, len(rec.Services))
 	for _, row := range rec.Config {
-		existingConfig[row.Key] = row.Value
+		if existingConfig[row.Service] == nil {
+			existingConfig[row.Service] = map[string]string{}
+		}
+		existingConfig[row.Service][row.Key] = row.Value
 	}
 
 	tx, err := s.db.Begin()
@@ -661,9 +788,10 @@ func (s *Store) UpdateManifest(name string, m *Manifest, yamlText string) error 
 	}
 	defer tx.Rollback() //nolint:errcheck // best-effort on error path
 
-	imageRef := ""
-	if m.Artifact.Type == ArtifactOCIImage {
-		imageRef = digestPinnedImageRef(m.Artifact.Image, m.Artifact.Digest)
+	primary := &m.Services[0]
+	legacyImage := ""
+	if primary.Artifact.Type == ArtifactOCIImage {
+		legacyImage = digestPinnedImageRef(primary.Artifact.Image, primary.Artifact.Digest)
 	}
 	configurable := 0
 	if m.Instances.Configurable {
@@ -676,8 +804,8 @@ func (s *Store) UpdateManifest(name string, m *Manifest, yamlText string) error 
 		     image_ref = ?, distro_summary = ?,
 		     instance_configurable = ?, updated_at = datetime('now')
 		 WHERE name = ?`,
-		m.Metadata.Version, yamlText, m.Artifact.Type,
-		sqlNullable(imageRef), sqlNullable(m.DistroSummary()),
+		m.Metadata.Version, yamlText, primary.Artifact.Type,
+		sqlNullable(legacyImage), sqlNullable(primary.DistroSummary()),
 		configurable, name,
 	)
 	if err != nil {
@@ -687,43 +815,74 @@ func (s *Store) UpdateManifest(name string, m *Manifest, yamlText string) error 
 		return ErrPluginNotFound
 	}
 
-	if _, err := tx.Exec(`DELETE FROM plugin_ports WHERE plugin_name = ?`, name); err != nil {
-		return fmt.Errorf("delete plugin_ports: %w", err)
-	}
-	for _, port := range m.Ports {
-		expose := 0
-		if port.Expose {
-			expose = 1
+	// Refresh per-service artifact mirrors (depends_on/health/ordinal too).
+	ordinals := serviceOrdinals(m.Services)
+	for si := range m.Services {
+		svc := &m.Services[si]
+		imageRef := ""
+		if svc.Artifact.Type == ArtifactOCIImage {
+			imageRef = digestPinnedImageRef(svc.Artifact.Image, svc.Artifact.Digest)
 		}
-		hostExpose := 0
-		if port.HostExpose {
-			hostExpose = 1
+		dependsJSON, err := marshalDependsOn(svc.DependsOn)
+		if err != nil {
+			return fmt.Errorf("encode dependsOn[%s]: %w", svc.Name, err)
+		}
+		healthJSON, err := marshalHealth(svc.Health)
+		if err != nil {
+			return fmt.Errorf("encode health[%s]: %w", svc.Name, err)
 		}
 		if _, err := tx.Exec(
-			`INSERT INTO plugin_ports
-			 (plugin_name, port_name, container_port, protocol,
-			  expose, host_expose)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
-			name, port.Name, port.Port, port.Protocol, expose, hostExpose,
+			`UPDATE plugin_services
+			 SET artifact_type = ?, image_ref = ?, distro_summary = ?,
+			     depends_on = ?, health = ?, ordinal = ?
+			 WHERE plugin_name = ? AND service = ?`,
+			svc.Artifact.Type, sqlNullable(imageRef), sqlNullable(svc.DistroSummary()),
+			dependsJSON, healthJSON, ordinals[svc.Name], name, svc.Name,
 		); err != nil {
-			return fmt.Errorf("insert plugin_ports[%s]: %w", port.Name, err)
+			return fmt.Errorf("update plugin_services[%s]: %w", svc.Name, err)
 		}
 	}
 
+	// Rebuild ports + config from the new manifest, per service.
+	if _, err := tx.Exec(`DELETE FROM plugin_ports WHERE plugin_name = ?`, name); err != nil {
+		return fmt.Errorf("delete plugin_ports: %w", err)
+	}
 	if _, err := tx.Exec(`DELETE FROM plugin_config WHERE plugin_name = ?`, name); err != nil {
 		return fmt.Errorf("delete plugin_config: %w", err)
 	}
-	for _, field := range m.Config {
-		value, ok := existingConfig[field.Key]
-		if !ok {
-			value = field.Default
+	for si := range m.Services {
+		svc := &m.Services[si]
+		for _, port := range svc.Ports {
+			expose := 0
+			if port.Expose {
+				expose = 1
+			}
+			hostExpose := 0
+			if port.HostExpose {
+				hostExpose = 1
+			}
+			if _, err := tx.Exec(
+				`INSERT INTO plugin_ports
+				 (plugin_name, service, port_name, container_port, protocol,
+				  expose, host_expose)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				name, svc.Name, port.Name, port.Port, port.Protocol, expose, hostExpose,
+			); err != nil {
+				return fmt.Errorf("insert plugin_ports[%s/%s]: %w", svc.Name, port.Name, err)
+			}
 		}
-		if _, err := tx.Exec(
-			`INSERT INTO plugin_config (plugin_name, key, value)
-			 VALUES (?, ?, ?)`,
-			name, field.Key, value,
-		); err != nil {
-			return fmt.Errorf("insert plugin_config[%s]: %w", field.Key, err)
+		for _, field := range svc.Config {
+			value, ok := existingConfig[svc.Name][field.Key]
+			if !ok {
+				value = field.Default
+			}
+			if _, err := tx.Exec(
+				`INSERT INTO plugin_config (plugin_name, service, key, value)
+				 VALUES (?, ?, ?, ?)`,
+				name, svc.Name, field.Key, value,
+			); err != nil {
+				return fmt.Errorf("insert plugin_config[%s/%s]: %w", svc.Name, field.Key, err)
+			}
 		}
 	}
 
@@ -733,55 +892,76 @@ func (s *Store) UpdateManifest(name string, m *Manifest, yamlText string) error 
 	return nil
 }
 
-func compatibleVolumeSchema(installed []VolumeRow, desired []Volume) error {
-	if len(installed) != len(desired) {
+// compatibleVolumeSchema rejects volume shape changes across an update.
+// Volumes are compared by (service, volume name); any add/remove/shape
+// change requires a reinstall so tier placement can be re-chosen.
+func compatibleVolumeSchema(installed []VolumeRow, m *Manifest) error {
+	type key struct{ svc, vol string }
+	byKey := make(map[key]VolumeRow, len(installed))
+	for _, vol := range installed {
+		byKey[key{vol.Service, vol.Name}] = vol
+	}
+	desiredCount := 0
+	for si := range m.Services {
+		svc := &m.Services[si]
+		for _, vol := range svc.Volumes {
+			desiredCount++
+			got, ok := byKey[key{svc.Name, vol.Name}]
+			if !ok {
+				return fmt.Errorf("%w: volume %q/%q is new", ErrPluginUpdateRequiresReinstall, svc.Name, vol.Name)
+			}
+			if got.Mode != vol.Mode || got.Slot != vol.Slot || got.PerInstance != vol.PerInstance || got.BindPath != vol.Bind {
+				return fmt.Errorf("%w: volume %q/%q changed shape", ErrPluginUpdateRequiresReinstall, svc.Name, vol.Name)
+			}
+		}
+	}
+	if desiredCount != len(installed) {
 		return fmt.Errorf("%w: volume changes", ErrPluginUpdateRequiresReinstall)
 	}
-	byName := make(map[string]VolumeRow, len(installed))
-	for _, vol := range installed {
-		byName[vol.Name] = vol
-	}
-	for _, vol := range desired {
-		got, ok := byName[vol.Name]
-		if !ok {
-			return fmt.Errorf("%w: volume %q is new", ErrPluginUpdateRequiresReinstall, vol.Name)
-		}
-		if got.Mode != vol.Mode || got.Slot != vol.Slot || got.PerInstance != vol.PerInstance || got.BindPath != vol.Bind {
-			return fmt.Errorf("%w: volume %q changed shape", ErrPluginUpdateRequiresReinstall, vol.Name)
-		}
-	}
 	return nil
 }
 
-// SetImageRef updates the resolved image ref on the plugins row.
-// Lifecycle calls this after a successful pull so subsequent
-// operations don't have to re-resolve.
-func (s *Store) SetImageRef(name, ref string) error {
-	res, err := s.db.Exec(
-		`UPDATE plugins
-		 SET image_ref = ?, updated_at = datetime('now')
-		 WHERE name = ?`,
-		sqlNullable(ref), name,
+// SetImageRef updates the resolved image ref for one service (and, when
+// it is the primary service, the legacy mirror on the plugins row).
+func (s *Store) SetImageRef(name, service, ref string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	res, err := tx.Exec(
+		`UPDATE plugin_services SET image_ref = ? WHERE plugin_name = ? AND service = ?`,
+		sqlNullable(ref), name, service,
 	)
 	if err != nil {
-		return fmt.Errorf("update plugins.image_ref: %w", err)
+		return fmt.Errorf("update plugin_services.image_ref: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrPluginNotFound
 	}
-	return nil
+	primary, err := primaryServiceTx(tx, name)
+	if err != nil {
+		return err
+	}
+	if service == primary {
+		if _, err := tx.Exec(
+			`UPDATE plugins SET image_ref = ?, updated_at = datetime('now') WHERE name = ?`,
+			sqlNullable(ref), name,
+		); err != nil {
+			return fmt.Errorf("update plugins.image_ref: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
-// SetInstanceBridgeIP records the per-instance bridge IP. Phase 04
-// will use this when generating the nginx route. Phase 02 wires the
-// setter so the call site exists; phase 04 reads it.
-func (s *Store) SetInstanceBridgeIP(name string, instance int, ip string) error {
+// SetInstanceBridgeIP records the per-(service,instance) bridge IP.
+func (s *Store) SetInstanceBridgeIP(name, service string, instance int, ip string) error {
 	res, err := s.db.Exec(
 		`UPDATE plugin_instances
 		 SET bridge_ip = ?, last_change = datetime('now')
-		 WHERE plugin_name = ? AND instance = ?`,
-		sqlNullable(ip), name, instance,
+		 WHERE plugin_name = ? AND service = ? AND instance = ?`,
+		sqlNullable(ip), name, service, instance,
 	)
 	if err != nil {
 		return fmt.Errorf("update plugin_instances.bridge_ip: %w", err)
@@ -793,13 +973,10 @@ func (s *Store) SetInstanceBridgeIP(name string, instance int, ip string) error 
 	return nil
 }
 
-// SetInstanceState updates one instance's state and recomputes the
-// aggregate plugins.state column atomically. Returns ErrPluginNotFound
-// if the (plugin, instance) row doesn't exist.
-//
-// Exposed in phase 1 so the CLI can simulate state transitions for
-// tests and so phase 02 has a single callsite to plug into.
-func (s *Store) SetInstanceState(name string, instance int, state, lastError string) error {
+// SetInstanceState updates one (service, instance) unit's state and
+// recomputes the aggregate plugins.state column atomically. Returns
+// ErrPluginNotFound if the row doesn't exist.
+func (s *Store) SetInstanceState(name, service string, instance int, state, lastError string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -809,8 +986,8 @@ func (s *Store) SetInstanceState(name string, instance int, state, lastError str
 	res, err := tx.Exec(
 		`UPDATE plugin_instances
 		 SET state = ?, last_error = ?, last_change = datetime('now')
-		 WHERE plugin_name = ? AND instance = ?`,
-		state, sqlNullable(lastError), name, instance,
+		 WHERE plugin_name = ? AND service = ? AND instance = ?`,
+		state, sqlNullable(lastError), name, service, instance,
 	)
 	if err != nil {
 		return err
@@ -825,8 +1002,10 @@ func (s *Store) SetInstanceState(name string, instance int, state, lastError str
 	return tx.Commit()
 }
 
-// recomputeAggregateStateTx runs the per-instance → aggregate state
-// rollup defined in plugins-01-foundation.md.
+// recomputeAggregateStateTx runs the per-unit → aggregate state rollup.
+// It spans every (service, instance) row of the plugin, so a plugin is
+// "running" only when all of its services' instances are running, and
+// "degraded" when some are up and others are down.
 func recomputeAggregateStateTx(tx *sql.Tx, name string) error {
 	rows, err := tx.Query(
 		`SELECT state FROM plugin_instances WHERE plugin_name = ?`,
@@ -851,8 +1030,6 @@ func recomputeAggregateStateTx(tx *sql.Tx, name string) error {
 		return err
 	}
 	if total == 0 {
-		// Plugin row exists but no instances? Treat as failed —
-		// shouldn't happen but don't leave stale state.
 		_, err := tx.Exec(`UPDATE plugins SET state = ? WHERE name = ?`, StateFailed, name)
 		return err
 	}
@@ -865,10 +1042,20 @@ func recomputeAggregateStateTx(tx *sql.Tx, name string) error {
 	return err
 }
 
+// AggregateInstanceStates rolls a service's per-instance state counts up
+// into a single state, using the same rule as the plugin-wide aggregate.
+// Exposed for the API layer's per-service breakdown. A service with no
+// instances reports StateInstalled.
+func AggregateInstanceStates(counts map[string]int, total int) string {
+	if total == 0 {
+		return StateInstalled
+	}
+	return aggregateState(counts, total)
+}
+
 // aggregateState applies the rollup table from the proposal:
-//   - any in-flight transitional state (pulling/creating/starting)
-//     wins (we report progress, not the eventual outcome)
-//   - all instances same → that state
+//   - any in-flight transitional state (pulling/creating/starting) wins
+//   - all units same → that state
 //   - some running, some failed → degraded
 //   - mixed otherwise → degraded
 func aggregateState(counts map[string]int, total int) string {
@@ -910,8 +1097,7 @@ func (s *Store) getPluginRow(name string) (PluginRow, error) {
 	return r, err
 }
 
-// rowScanner is the common interface of *sql.Row and *sql.Rows used
-// by scanPluginRow.
+// rowScanner is the common interface of *sql.Row and *sql.Rows.
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -930,19 +1116,53 @@ func scanPluginRow(rs rowScanner) (PluginRow, error) {
 	}
 	r.InstanceConfigurable = configurable != 0
 	if profilesJSON != "" {
-		// Default value from the migration is the empty array, so
-		// this should always succeed; tolerate the unlikely
-		// "old row with NULL" case by leaving ResolvedProfiles nil.
 		_ = json.Unmarshal([]byte(profilesJSON), &r.ResolvedProfiles)
 	}
 	return r, nil
 }
 
+func (s *Store) listServices(name string) ([]ServiceRow, error) {
+	rows, err := s.db.Query(
+		`SELECT plugin_name, service, artifact_type,
+		        COALESCE(image_ref, ''), COALESCE(distro_summary, ''),
+		        COALESCE(depends_on, ''), COALESCE(health, ''), ordinal
+		 FROM plugin_services WHERE plugin_name = ? ORDER BY ordinal, service`,
+		name,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ServiceRow
+	for rows.Next() {
+		var r ServiceRow
+		var dependsJSON, healthJSON string
+		if err := rows.Scan(
+			&r.PluginName, &r.Service, &r.ArtifactType,
+			&r.ImageRef, &r.DistroSummary,
+			&dependsJSON, &healthJSON, &r.Ordinal,
+		); err != nil {
+			return nil, err
+		}
+		if dependsJSON != "" {
+			_ = json.Unmarshal([]byte(dependsJSON), &r.DependsOn)
+		}
+		if healthJSON != "" {
+			var h Healthcheck
+			if err := json.Unmarshal([]byte(healthJSON), &h); err == nil {
+				r.Health = &h
+			}
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) listInstances(name string) ([]InstanceRow, error) {
 	rows, err := s.db.Query(
-		`SELECT plugin_name, instance, COALESCE(container_id, ''), state,
+		`SELECT plugin_name, service, instance, COALESCE(container_id, ''), state,
 		        COALESCE(bridge_ip, ''), last_change, COALESCE(last_error, '')
-		 FROM plugin_instances WHERE plugin_name = ? ORDER BY instance`,
+		 FROM plugin_instances WHERE plugin_name = ? ORDER BY service, instance`,
 		name,
 	)
 	if err != nil {
@@ -953,7 +1173,7 @@ func (s *Store) listInstances(name string) ([]InstanceRow, error) {
 	for rows.Next() {
 		var r InstanceRow
 		if err := rows.Scan(
-			&r.PluginName, &r.Instance, &r.ContainerID, &r.State,
+			&r.PluginName, &r.Service, &r.Instance, &r.ContainerID, &r.State,
 			&r.BridgeIP, &r.LastChange, &r.LastError,
 		); err != nil {
 			return nil, err
@@ -965,38 +1185,40 @@ func (s *Store) listInstances(name string) ([]InstanceRow, error) {
 
 func (s *Store) listVolumes(name string) ([]VolumeRow, error) {
 	rows, err := s.db.Query(
-		`SELECT plugin_name, volume_name, mode,
+		`SELECT plugin_name, service, volume_name, mode,
 		        COALESCE(slot, ''), COALESCE(tier_pool, ''),
 		        per_instance, bind_path
-		 FROM plugin_volumes WHERE plugin_name = ? ORDER BY volume_name`,
+		 FROM plugin_volumes WHERE plugin_name = ? ORDER BY service, volume_name`,
 		name,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	vols := map[string]*VolumeRow{}
-	var order []string
+	type vkey struct{ svc, vol string }
+	vols := map[vkey]*VolumeRow{}
+	var order []vkey
 	for rows.Next() {
 		var v VolumeRow
 		var perInst int
 		if err := rows.Scan(
-			&v.PluginName, &v.Name, &v.Mode, &v.Slot, &v.TierPool,
+			&v.PluginName, &v.Service, &v.Name, &v.Mode, &v.Slot, &v.TierPool,
 			&perInst, &v.BindPath,
 		); err != nil {
 			return nil, err
 		}
 		v.PerInstance = perInst != 0
 		v.Paths = map[int]string{}
-		vols[v.Name] = &v
-		order = append(order, v.Name)
+		k := vkey{v.Service, v.Name}
+		vols[k] = &v
+		order = append(order, k)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
 	pathRows, err := s.db.Query(
-		`SELECT volume_name, instance, host_path
+		`SELECT service, volume_name, instance, host_path
 		 FROM plugin_volume_paths WHERE plugin_name = ?`,
 		name,
 	)
@@ -1005,13 +1227,13 @@ func (s *Store) listVolumes(name string) ([]VolumeRow, error) {
 	}
 	defer pathRows.Close()
 	for pathRows.Next() {
-		var vol string
+		var svc, vol string
 		var inst int
 		var host string
-		if err := pathRows.Scan(&vol, &inst, &host); err != nil {
+		if err := pathRows.Scan(&svc, &vol, &inst, &host); err != nil {
 			return nil, err
 		}
-		if v, ok := vols[vol]; ok {
+		if v, ok := vols[vkey{svc, vol}]; ok {
 			v.Paths[inst] = host
 		}
 	}
@@ -1020,17 +1242,17 @@ func (s *Store) listVolumes(name string) ([]VolumeRow, error) {
 	}
 
 	out := make([]VolumeRow, 0, len(order))
-	for _, n := range order {
-		out = append(out, *vols[n])
+	for _, k := range order {
+		out = append(out, *vols[k])
 	}
 	return out, nil
 }
 
 func (s *Store) listPorts(name string) ([]PortRow, error) {
 	rows, err := s.db.Query(
-		`SELECT plugin_name, port_name, container_port, protocol,
+		`SELECT plugin_name, service, port_name, container_port, protocol,
 		        expose, host_expose
-		 FROM plugin_ports WHERE plugin_name = ? ORDER BY port_name`,
+		 FROM plugin_ports WHERE plugin_name = ? ORDER BY service, port_name`,
 		name,
 	)
 	if err != nil {
@@ -1042,7 +1264,7 @@ func (s *Store) listPorts(name string) ([]PortRow, error) {
 		var r PortRow
 		var expose, hostExpose int
 		if err := rows.Scan(
-			&r.PluginName, &r.Name, &r.ContainerPort, &r.Protocol,
+			&r.PluginName, &r.Service, &r.Name, &r.ContainerPort, &r.Protocol,
 			&expose, &hostExpose,
 		); err != nil {
 			return nil, err
@@ -1056,8 +1278,8 @@ func (s *Store) listPorts(name string) ([]PortRow, error) {
 
 func (s *Store) listConfig(name string) ([]ConfigRow, error) {
 	rows, err := s.db.Query(
-		`SELECT plugin_name, key, value
-		 FROM plugin_config WHERE plugin_name = ? ORDER BY key`,
+		`SELECT plugin_name, service, key, value
+		 FROM plugin_config WHERE plugin_name = ? ORDER BY service, key`,
 		name,
 	)
 	if err != nil {
@@ -1067,7 +1289,7 @@ func (s *Store) listConfig(name string) ([]ConfigRow, error) {
 	var out []ConfigRow
 	for rows.Next() {
 		var r ConfigRow
-		if err := rows.Scan(&r.PluginName, &r.Key, &r.Value); err != nil {
+		if err := rows.Scan(&r.PluginName, &r.Service, &r.Key, &r.Value); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -1075,8 +1297,8 @@ func (s *Store) listConfig(name string) ([]ConfigRow, error) {
 	return out, rows.Err()
 }
 
-// sqlNullable converts a Go string to a sql.NullString that is
-// invalid (NULL) when empty.
+// sqlNullable converts a Go string to a sql.NullString that is invalid
+// (NULL) when empty.
 func sqlNullable(s string) sql.NullString {
 	if s == "" {
 		return sql.NullString{}
@@ -1085,8 +1307,7 @@ func sqlNullable(s string) sql.NullString {
 }
 
 // isUniqueViolation matches the SQLite error text for a UNIQUE
-// constraint failure on plugins.name. The driver does not expose
-// a typed code, so we string-match.
+// constraint failure on plugins.name.
 func isUniqueViolation(err error) bool {
 	if err == nil {
 		return false

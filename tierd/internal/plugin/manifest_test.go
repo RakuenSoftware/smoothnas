@@ -41,6 +41,9 @@ func TestManifestJSONUsesYAMLFieldNames(t *testing.T) {
 	if _, ok := got["Metadata"]; ok {
 		t.Fatalf("json should not expose Go field name Metadata: %s", data)
 	}
+	if _, ok := got["services"]; !ok {
+		t.Fatalf("json missing services key: %s", data)
+	}
 }
 
 func TestParseManifest_Fixtures(t *testing.T) {
@@ -59,13 +62,17 @@ func TestParseManifest_Fixtures(t *testing.T) {
 		tc := tc
 		t.Run(tc.file, func(t *testing.T) {
 			m := loadFixture(t, tc.file)
-			if m.Artifact.Type != tc.wantArtifact {
-				t.Errorf("artifact.type = %q, want %q", m.Artifact.Type, tc.wantArtifact)
+			if len(m.Services) != 1 {
+				t.Fatalf("expected 1 service, got %d", len(m.Services))
+			}
+			svc := &m.Services[0]
+			if svc.Artifact.Type != tc.wantArtifact {
+				t.Errorf("artifact.type = %q, want %q", svc.Artifact.Type, tc.wantArtifact)
 			}
 			if got := m.EffectiveCount(); got != tc.wantCount {
 				t.Errorf("EffectiveCount = %d, want %d", got, tc.wantCount)
 			}
-			if got := m.DistroSummary(); got != tc.wantDistro {
+			if got := svc.DistroSummary(); got != tc.wantDistro {
 				t.Errorf("DistroSummary = %q, want %q", got, tc.wantDistro)
 			}
 			if err := ValidateManifest(m); err != nil {
@@ -93,13 +100,23 @@ unknownField: oops
 	}
 }
 
-// mutateOCI returns a fresh, valid llama.yaml with a single targeted
-// mutation applied. Keeps the table-driven failure cases below tight.
-func mutateOCI(t *testing.T, mutate func(*Manifest)) *Manifest {
-	t.Helper()
-	m := loadFixture(t, "llama.yaml")
-	mutate(m)
-	return m
+// TestParseManifest_RejectsRetiredTopLevelShape proves the breaking
+// change: the retired single-image top-level artifact field no longer
+// exists, so strict decoding rejects manifests that still use it.
+func TestParseManifest_RejectsRetiredTopLevelShape(t *testing.T) {
+	yaml := []byte(`
+apiVersion: smoothnas.io/v1
+kind: Plugin
+metadata:
+  name: foo
+  version: 0.1.0
+artifact:
+  type: oci-image
+  image: example/foo:latest
+`)
+	if _, err := ParseManifest(yaml); err == nil {
+		t.Fatal("expected parse error for retired top-level artifact, got nil")
+	}
 }
 
 func TestValidateManifest_FailureModes(t *testing.T) {
@@ -129,52 +146,67 @@ func TestValidateManifest_FailureModes(t *testing.T) {
 			wantField: "metadata.version",
 		},
 		{
+			name:      "no services",
+			mutate:    func(m *Manifest) { m.Services = nil },
+			wantField: "services",
+		},
+		{
+			name:      "bad service name (uppercase)",
+			mutate:    func(m *Manifest) { m.Services[0].Name = "BadSvc" },
+			wantField: "services[0].name",
+		},
+		{
+			name:      "duplicate service name",
+			mutate:    func(m *Manifest) { m.Services = append(m.Services, m.Services[0]) },
+			wantField: "services[1].name",
+		},
+		{
 			name:      "unknown artifact.type",
-			mutate:    func(m *Manifest) { m.Artifact.Type = "tarball" },
-			wantField: "artifact.type",
+			mutate:    func(m *Manifest) { m.Services[0].Artifact.Type = "tarball" },
+			wantField: "services[0].artifact.type",
 		},
 		{
 			name:      "oci-image missing image",
-			mutate:    func(m *Manifest) { m.Artifact.Image = "" },
-			wantField: "artifact.image",
+			mutate:    func(m *Manifest) { m.Services[0].Artifact.Image = "" },
+			wantField: "services[0].artifact.image",
 		},
 		{
 			name:      "oci-image bad digest",
-			mutate:    func(m *Manifest) { m.Artifact.Digest = "deadbeef" },
-			wantField: "artifact.digest",
+			mutate:    func(m *Manifest) { m.Services[0].Artifact.Digest = "deadbeef" },
+			wantField: "services[0].artifact.digest",
 		},
 		{
 			name: "oci-image with lxc-distro fields populated",
 			mutate: func(m *Manifest) {
-				m.Artifact.Distro = "ubuntu"
-				m.Artifact.Release = "jammy"
+				m.Services[0].Artifact.Distro = "ubuntu"
+				m.Services[0].Artifact.Release = "jammy"
 			},
-			wantField: "artifact",
+			wantField: "services[0].artifact",
 		},
 		{
 			name:      "bad container.restartPolicy",
-			mutate:    func(m *Manifest) { m.Container.RestartPolicy = "always" },
-			wantField: "container.restartPolicy",
+			mutate:    func(m *Manifest) { m.Services[0].Container.RestartPolicy = "always" },
+			wantField: "services[0].container.restartPolicy",
 		},
 		{
 			name:      "bad container.resources.memory",
-			mutate:    func(m *Manifest) { m.Container.Resources.Memory = "64XB" },
-			wantField: "container.resources.memory",
+			mutate:    func(m *Manifest) { m.Services[0].Container.Resources.Memory = "64XB" },
+			wantField: "services[0].container.resources.memory",
 		},
 		{
 			name:      "container.resources.memory references unknown config",
-			mutate:    func(m *Manifest) { m.Container.Resources.Memory = "${MEMORY_LIMIT}" },
-			wantField: "container.resources.memory",
+			mutate:    func(m *Manifest) { m.Services[0].Container.Resources.Memory = "${MEMORY_LIMIT}" },
+			wantField: "services[0].container.resources.memory",
 		},
 		{
 			name:      "bad container.resources.cpu",
-			mutate:    func(m *Manifest) { m.Container.Resources.CPU = "fast" },
-			wantField: "container.resources.cpu",
+			mutate:    func(m *Manifest) { m.Services[0].Container.Resources.CPU = "fast" },
+			wantField: "services[0].container.resources.cpu",
 		},
 		{
 			name:      "container.resources.cpu references unknown config",
-			mutate:    func(m *Manifest) { m.Container.Resources.CPU = "${CPU_LIMIT}" },
-			wantField: "container.resources.cpu",
+			mutate:    func(m *Manifest) { m.Services[0].Container.Resources.CPU = "${CPU_LIMIT}" },
+			wantField: "services[0].container.resources.cpu",
 		},
 		{
 			name:      "instances.count negative",
@@ -183,36 +215,38 @@ func TestValidateManifest_FailureModes(t *testing.T) {
 		},
 		{
 			name:      "volume bind not absolute",
-			mutate:    func(m *Manifest) { m.Volumes[0].Bind = "models" },
-			wantField: "volumes[0].bind",
+			mutate:    func(m *Manifest) { m.Services[0].Volumes[0].Bind = "models" },
+			wantField: "services[0].volumes[0].bind",
 		},
 		{
 			name:      "tier-bound volume missing slot",
-			mutate:    func(m *Manifest) { m.Volumes[0].Slot = "" },
-			wantField: "volumes[0].slot",
+			mutate:    func(m *Manifest) { m.Services[0].Volumes[0].Slot = "" },
+			wantField: "services[0].volumes[0].slot",
 		},
 		{
 			name: "flat volume with slot set",
 			mutate: func(m *Manifest) {
-				m.Volumes[0].Mode = VolumeModeFlat
+				m.Services[0].Volumes[0].Mode = VolumeModeFlat
 				// Slot left non-empty from the fixture.
 			},
-			wantField: "volumes[0].slot",
+			wantField: "services[0].volumes[0].slot",
 		},
 		{
-			name:      "duplicate volume name",
-			mutate:    func(m *Manifest) { m.Volumes = append(m.Volumes, m.Volumes[0]) },
-			wantField: "volumes[1].name",
+			name: "duplicate volume name",
+			mutate: func(m *Manifest) {
+				m.Services[0].Volumes = append(m.Services[0].Volumes, m.Services[0].Volumes[0])
+			},
+			wantField: "services[0].volumes[1].name",
 		},
 		{
 			name:      "port out of range",
-			mutate:    func(m *Manifest) { m.Ports[0].Port = 70000 },
-			wantField: "ports[0].port",
+			mutate:    func(m *Manifest) { m.Services[0].Ports[0].Port = 70000 },
+			wantField: "services[0].ports[0].port",
 		},
 		{
 			name:      "bad port protocol",
-			mutate:    func(m *Manifest) { m.Ports[0].Protocol = "sctp" },
-			wantField: "ports[0].protocol",
+			mutate:    func(m *Manifest) { m.Services[0].Ports[0].Protocol = "sctp" },
+			wantField: "services[0].ports[0].protocol",
 		},
 		{
 			name:      "bad UI auth mode",
@@ -221,40 +255,113 @@ func TestValidateManifest_FailureModes(t *testing.T) {
 		},
 		{
 			name:      "lowercase config key",
-			mutate:    func(m *Manifest) { m.Config[0].Key = "model_path" },
-			wantField: "config[0].key",
+			mutate:    func(m *Manifest) { m.Services[0].Config[0].Key = "model_path" },
+			wantField: "services[0].config[0].key",
 		},
 		{
 			name:      "bad config type",
-			mutate:    func(m *Manifest) { m.Config[0].Type = "range" },
-			wantField: "config[0].type",
+			mutate:    func(m *Manifest) { m.Services[0].Config[0].Type = "range" },
+			wantField: "services[0].config[0].type",
 		},
 		{
 			name: "bad gpu vendor",
 			mutate: func(m *Manifest) {
-				m.Config[0].Type = ConfigTypeGPU
-				m.Config[0].GPUVendor = "matrox"
+				m.Services[0].Config[0].Type = ConfigTypeGPU
+				m.Services[0].Config[0].GPUVendor = "matrox"
 			},
-			wantField: "config[0].gpuVendor",
+			wantField: "services[0].config[0].gpuVendor",
 		},
 		{
 			name: "gpu vendor on non-gpu field",
 			mutate: func(m *Manifest) {
-				m.Config[0].Type = ConfigTypeString
-				m.Config[0].GPUVendor = GPUVendorNVIDIA
+				m.Services[0].Config[0].Type = ConfigTypeString
+				m.Services[0].Config[0].GPUVendor = GPUVendorNVIDIA
 			},
-			wantField: "config[0].gpuVendor",
+			wantField: "services[0].config[0].gpuVendor",
 		},
 		{
 			name:      "select config missing options",
-			mutate:    func(m *Manifest) { m.Config[0].Type = "select" },
-			wantField: "config[0].options",
+			mutate:    func(m *Manifest) { m.Services[0].Config[0].Type = "select" },
+			wantField: "services[0].config[0].options",
+		},
+		{
+			name: "dependsOn unknown service",
+			mutate: func(m *Manifest) {
+				m.Services[0].DependsOn = map[string]DependsCondition{
+					"nope": {Condition: DependsServiceStarted},
+				}
+			},
+			wantField: "services[0].dependsOn.nope",
+		},
+		{
+			name: "dependsOn self",
+			mutate: func(m *Manifest) {
+				m.Services[0].DependsOn = map[string]DependsCondition{
+					"llama-cpp": {Condition: DependsServiceStarted},
+				}
+			},
+			wantField: "services[0].dependsOn.llama-cpp",
+		},
+		{
+			name: "dependsOn bad condition",
+			mutate: func(m *Manifest) {
+				m.Services = append(m.Services, Service{
+					Name:     "sidecar",
+					Artifact: Artifact{Type: ArtifactOCIImage, Image: "example/sidecar:latest"},
+				})
+				m.Services[0].DependsOn = map[string]DependsCondition{
+					"sidecar": {Condition: "service_blessed"},
+				}
+			},
+			wantField: "services[0].dependsOn.sidecar",
+		},
+		{
+			name: "dependsOn service_healthy without health block",
+			mutate: func(m *Manifest) {
+				m.Services = append(m.Services, Service{
+					Name:     "sidecar",
+					Artifact: Artifact{Type: ArtifactOCIImage, Image: "example/sidecar:latest"},
+				})
+				m.Services[0].DependsOn = map[string]DependsCondition{
+					"sidecar": {Condition: DependsServiceHealthy},
+				}
+			},
+			wantField: "services[0].dependsOn.sidecar",
+		},
+		{
+			name: "dependsOn cycle",
+			mutate: func(m *Manifest) {
+				m.Services = append(m.Services, Service{
+					Name:      "sidecar",
+					Artifact:  Artifact{Type: ArtifactOCIImage, Image: "example/sidecar:latest"},
+					DependsOn: map[string]DependsCondition{"llama-cpp": {Condition: DependsServiceStarted}},
+				})
+				m.Services[0].DependsOn = map[string]DependsCondition{
+					"sidecar": {Condition: DependsServiceStarted},
+				}
+			},
+			wantField: "services",
+		},
+		{
+			name: "host port collision across services",
+			mutate: func(m *Manifest) {
+				// Give llama's sole service a host-published port, then add
+				// a second service that host-publishes the same port number.
+				m.Services[0].Ports[0].HostExpose = true
+				m.Services = append(m.Services, Service{
+					Name:     "sidecar",
+					Artifact: Artifact{Type: ArtifactOCIImage, Image: "example/sidecar:latest"},
+					Ports:    []Port{{Name: "http", Port: 8080, Protocol: "tcp", HostExpose: true}},
+				})
+			},
+			wantField: "services[1].ports",
 		},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			m := mutateOCI(t, tc.mutate)
+			m := loadFixture(t, "llama.yaml")
+			tc.mutate(m)
 			err := ValidateManifest(m)
 			if err == nil {
 				t.Fatalf("expected validation error for %q, got nil", tc.name)
@@ -281,9 +388,24 @@ func TestValidateManifest_FailureModes(t *testing.T) {
 	}
 }
 
+func TestValidateManifest_AllowsServiceDiscovery(t *testing.T) {
+	m := loadFixture(t, "llama.yaml")
+	m.Services = append(m.Services, Service{
+		Name:     "db",
+		Artifact: Artifact{Type: ArtifactOCIImage, Image: "pgvector/pgvector:pg16"},
+		Health:   &Healthcheck{Test: []string{"CMD-SHELL", "pg_isready"}, Retries: 5},
+	})
+	m.Services[0].DependsOn = map[string]DependsCondition{
+		"db": {Condition: DependsServiceHealthy},
+	}
+	if err := ValidateManifest(m); err != nil {
+		t.Fatalf("ValidateManifest: %v", err)
+	}
+}
+
 func TestValidateManifest_AllowsGPUConfigField(t *testing.T) {
 	m := loadFixture(t, "llama.yaml")
-	m.Config = append(m.Config, ConfigField{
+	m.Services[0].Config = append(m.Services[0].Config, ConfigField{
 		Key:       "SMOOTHNAS_GPU",
 		Type:      ConfigTypeGPU,
 		Label:     "GPU",
@@ -297,12 +419,12 @@ func TestValidateManifest_AllowsGPUConfigField(t *testing.T) {
 
 func TestValidateManifest_AllowsConfigurableMemoryResource(t *testing.T) {
 	m := loadFixture(t, "llama.yaml")
-	m.Config = append(m.Config, ConfigField{
+	m.Services[0].Config = append(m.Services[0].Config, ConfigField{
 		Key:     "MEMORY_LIMIT",
 		Type:    "string",
 		Default: "64GiB",
 	})
-	m.Container.Resources.Memory = "${MEMORY_LIMIT}"
+	m.Services[0].Container.Resources.Memory = "${MEMORY_LIMIT}"
 
 	if err := ValidateManifest(m); err != nil {
 		t.Fatalf("ValidateManifest: %v", err)
@@ -311,12 +433,12 @@ func TestValidateManifest_AllowsConfigurableMemoryResource(t *testing.T) {
 
 func TestValidateManifest_AllowsConfigurableCPUResource(t *testing.T) {
 	m := loadFixture(t, "llama.yaml")
-	m.Config = append(m.Config, ConfigField{
+	m.Services[0].Config = append(m.Services[0].Config, ConfigField{
 		Key:     "CPU_LIMIT",
 		Type:    "number",
 		Default: "1",
 	})
-	m.Container.Resources.CPU = "${CPU_LIMIT}"
+	m.Services[0].Container.Resources.CPU = "${CPU_LIMIT}"
 
 	if err := ValidateManifest(m); err != nil {
 		t.Fatalf("ValidateManifest: %v", err)
@@ -325,7 +447,7 @@ func TestValidateManifest_AllowsConfigurableCPUResource(t *testing.T) {
 
 func TestValidateManifest_LXCDistroMissingCommand(t *testing.T) {
 	m := loadFixture(t, "ubuntu-python.yaml")
-	m.Container.Command = nil
+	m.Services[0].Container.Command = nil
 	err := ValidateManifest(m)
 	if err == nil {
 		t.Fatal("expected validation error, got nil")
