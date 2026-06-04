@@ -80,20 +80,22 @@ kind: Plugin
 metadata:
   name: multi-flat
   version: 0.0.1
-artifact:
-  type: oci-image
-  image: example.com/test:1
-container:
-  command: ["sleep","infinity"]
-  restartPolicy: unless-stopped
 instances:
   count: 3
   configurable: true
-volumes:
-  - name: scratch
-    mode: flat
-    bind: /scratch
-    perInstance: true
+services:
+  - name: multi-flat
+    artifact:
+      type: oci-image
+      image: example.com/test:1
+    container:
+      command: ["sleep","infinity"]
+      restartPolicy: unless-stopped
+    volumes:
+      - name: scratch
+        mode: flat
+        bind: /scratch
+        perInstance: true
 `)
 	rec, err := inst.Install(yaml)
 	if err != nil {
@@ -120,11 +122,13 @@ kind: Plugin
 metadata:
   name: BAD-NAME
   version: not-semver
-artifact:
-  type: oci-image
-  image: example.com/test:1
-container:
-  restartPolicy: unless-stopped
+services:
+  - name: app
+    artifact:
+      type: oci-image
+      image: example.com/test:1
+    container:
+      restartPolicy: unless-stopped
 `)
 	_, err := inst.Install(yaml)
 	if err == nil {
@@ -537,7 +541,7 @@ func TestStore_IssueBearerTokenIsIdempotentAndRotates(t *testing.T) {
 	m := mustParse(t, "llama.yaml")
 	if err := s.Insert(InsertParams{
 		Manifest: m,
-		Paths:    pathsForSingleInstance(m, "/tmp"),
+		Paths:    pathsFor(m, "/tmp"),
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -597,7 +601,7 @@ func TestStore_BearerTokenCascadesOnPluginDelete(t *testing.T) {
 	m := mustParse(t, "llama.yaml")
 	if err := s.Insert(InsertParams{
 		Manifest: m,
-		Paths:    pathsForSingleInstance(m, "/tmp"),
+		Paths:    pathsFor(m, "/tmp"),
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}

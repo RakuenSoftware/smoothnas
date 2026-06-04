@@ -6,29 +6,6 @@ metadata:
   description: llama.cpp HTTP inference server
   vendor: smoothnas
   homepage: https://github.com/RakuenSoftware/smoothnas-plugin-llama-cpp
-artifact:
-  type: oci-image
-  image: ghcr.io/ggml-org/llama.cpp:server-cuda-b3500
-  digest: sha256:abababababababababababababababababababababababababababababababab
-container:
-  command:
-    - "./llama-server"
-    - "--host"
-    - "0.0.0.0"
-    - "--port"
-    - "8080"
-  restartPolicy: unless-stopped
-volumes:
-  - name: models
-    mode: tier-bound
-    slot: NVME
-    minSize: 50G
-    bind: /models
-ports:
-  - name: http
-    port: 8080
-    protocol: tcp
-    expose: true
 ui:
   embed:
     path: /
@@ -36,8 +13,33 @@ ui:
 profiles:
   - gpu-nvidia
   - default-limits
-config:
-  - key: MODEL_PATH
-    type: string
-    default: /models/default.gguf
-    description: Model file to load on start
+services:
+  - name: llama-cpp
+    artifact:
+      type: oci-image
+      image: ghcr.io/ggml-org/llama.cpp:server-cuda-b3500
+      digest: sha256:abababababababababababababababababababababababababababababababab
+    container:
+      command:
+        - "./llama-server"
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "8080"
+      restartPolicy: unless-stopped
+    volumes:
+      - name: models
+        mode: tier-bound
+        slot: NVME
+        minSize: 50G
+        bind: /models
+    ports:
+      - name: http
+        port: 8080
+        protocol: tcp
+        expose: true
+    config:
+      - key: MODEL_PATH
+        type: string
+        default: /models/default.gguf
+        description: Model file to load on start

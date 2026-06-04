@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,16 +43,49 @@ func mustParse(t *testing.T, file string) *Manifest {
 	return m
 }
 
-// pathsForSingleInstance is a small helper to construct the Paths
-// map for a single-instance plugin where every volume is shared.
-func pathsForSingleInstance(m *Manifest, root string) map[string]map[int]string {
-	out := map[string]map[int]string{}
-	for _, vol := range m.Volumes {
-		host := ""
-		if vol.Mode == VolumeModeFlat {
-			host = filepath.Join(root, m.Metadata.Name, vol.Name)
+// pathsFor builds the service→volume→instance host-path map for a
+// manifest. Flat volumes get a real path under root; tier-bound volumes
+// get the empty-path sentinel (resolved later by the tier provider).
+func pathsFor(m *Manifest, root string) map[string]map[string]map[int]string {
+	out := map[string]map[string]map[int]string{}
+	count := m.EffectiveCount()
+	for si := range m.Services {
+		svc := &m.Services[si]
+		seg := servicePathSegment(m.Metadata.Name, svc.Name)
+		vols := map[string]map[int]string{}
+		for _, vol := range svc.Volumes {
+			entries := map[int]string{}
+			n := 1
+			if vol.PerInstance {
+				n = count
+			}
+			for i := 1; i <= n; i++ {
+				host := ""
+				if vol.Mode == VolumeModeFlat {
+					if vol.PerInstance {
+						host = filepath.Join(root, m.Metadata.Name, seg, fmt.Sprintf("instance-%d", i), vol.Name)
+					} else {
+						host = filepath.Join(root, m.Metadata.Name, seg, vol.Name)
+					}
+				}
+				entries[i] = host
+			}
+			vols[vol.Name] = entries
 		}
-		out[vol.Name] = map[int]string{1: host}
+		out[svc.Name] = vols
+	}
+	return out
+}
+
+// cloneServices deep-copies the per-service slices tests mutate so a
+// `*m` shallow copy doesn't alias the original manifest's backing arrays.
+func cloneServices(in []Service) []Service {
+	out := make([]Service, len(in))
+	copy(out, in)
+	for i := range out {
+		out[i].Ports = append([]Port(nil), in[i].Ports...)
+		out[i].Config = append([]ConfigField(nil), in[i].Config...)
+		out[i].Volumes = append([]Volume(nil), in[i].Volumes...)
 	}
 	return out
 }
@@ -61,7 +95,7 @@ func TestStore_InsertGet_SingleInstance(t *testing.T) {
 	m := mustParse(t, "llama.yaml")
 	if err := s.Insert(InsertParams{
 		Manifest: m,
-		Paths:    pathsForSingleInstance(m, "/var/lib/smoothnas/plugins"),
+		Paths:    pathsFor(m, "/var/lib/smoothnas/plugins"),
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -79,11 +113,17 @@ func TestStore_InsertGet_SingleInstance(t *testing.T) {
 	if rec.Plugin.InstanceCount != 1 {
 		t.Errorf("instance_count = %d want 1", rec.Plugin.InstanceCount)
 	}
+	if len(rec.Services) != 1 || rec.Services[0].Service != "llama-cpp" {
+		t.Fatalf("services = %+v want one named llama-cpp", rec.Services)
+	}
 	if len(rec.Instances) != 1 {
 		t.Fatalf("instances = %d want 1", len(rec.Instances))
 	}
 	if rec.Instances[0].State != StateInstalled {
 		t.Errorf("instance[0].state = %q", rec.Instances[0].State)
+	}
+	if rec.Instances[0].Service != "llama-cpp" {
+		t.Errorf("instance[0].service = %q", rec.Instances[0].Service)
 	}
 	if len(rec.Volumes) != 1 {
 		t.Fatalf("volumes = %d want 1", len(rec.Volumes))
@@ -99,7 +139,7 @@ func TestStore_InsertGet_SingleInstance(t *testing.T) {
 		t.Errorf("volume paths = %d want %d", got, want)
 	}
 	if rec.Volumes[0].Paths[1] != "" {
-		t.Errorf("tier-bound volume should have empty path in phase 1, got %q", rec.Volumes[0].Paths[1])
+		t.Errorf("tier-bound volume should have empty path, got %q", rec.Volumes[0].Paths[1])
 	}
 	if len(rec.Ports) != 1 || rec.Ports[0].ContainerPort != 8080 {
 		t.Errorf("ports = %+v", rec.Ports)
@@ -116,12 +156,12 @@ func TestStore_Insert_NormalizesEmbeddedImageDigest(t *testing.T) {
 	s := openTestStore(t)
 	m := mustParse(t, "llama.yaml")
 	digest := "sha256:" + strings.Repeat("a", 64)
-	m.Artifact.Image = "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp:0.2.0-vulkan@" + digest
-	m.Artifact.Digest = ""
+	m.Services[0].Artifact.Image = "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp:0.2.0-vulkan@" + digest
+	m.Services[0].Artifact.Digest = ""
 
 	if err := s.Insert(InsertParams{
 		Manifest: m,
-		Paths:    pathsForSingleInstance(m, "/var/lib/smoothnas/plugins"),
+		Paths:    pathsFor(m, "/var/lib/smoothnas/plugins"),
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -134,6 +174,9 @@ func TestStore_Insert_NormalizesEmbeddedImageDigest(t *testing.T) {
 	if rec.Plugin.ImageRef != want {
 		t.Fatalf("image_ref = %q want %q", rec.Plugin.ImageRef, want)
 	}
+	if rec.Services[0].ImageRef != want {
+		t.Fatalf("service image_ref = %q want %q", rec.Services[0].ImageRef, want)
+	}
 }
 
 func TestStore_UpdateManifestPreservesOperatorConfig(t *testing.T) {
@@ -141,7 +184,7 @@ func TestStore_UpdateManifestPreservesOperatorConfig(t *testing.T) {
 	m := mustParse(t, "llama.yaml")
 	if err := s.Insert(InsertParams{
 		Manifest: m,
-		Paths:    pathsForSingleInstance(m, "/var/lib/smoothnas/plugins"),
+		Paths:    pathsFor(m, "/var/lib/smoothnas/plugins"),
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -150,13 +193,14 @@ func TestStore_UpdateManifestPreservesOperatorConfig(t *testing.T) {
 	}
 
 	updated := *m
+	updated.Services = cloneServices(m.Services)
 	updated.Metadata.Version = "9.9.9"
-	updated.Artifact.Image = "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp:9.9.9"
-	updated.Ports = []Port{{
+	updated.Services[0].Artifact.Image = "ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp:9.9.9"
+	updated.Services[0].Ports = []Port{{
 		Name: "api", Port: 9090, Protocol: "tcp", Expose: true,
 	}}
-	updated.Config = append(updated.Config, ConfigField{
-		Key: "EXTRA_FLAG", Type: "text", Default: "on",
+	updated.Services[0].Config = append(updated.Services[0].Config, ConfigField{
+		Key: "EXTRA_FLAG", Type: "string", Default: "on",
 	})
 
 	if err := s.UpdateManifest(m.Metadata.Name, &updated, "updated manifest yaml"); err != nil {
@@ -197,14 +241,15 @@ func TestStore_UpdateManifestRejectsVolumeShapeChange(t *testing.T) {
 	m := mustParse(t, "llama.yaml")
 	if err := s.Insert(InsertParams{
 		Manifest: m,
-		Paths:    pathsForSingleInstance(m, "/var/lib/smoothnas/plugins"),
+		Paths:    pathsFor(m, "/var/lib/smoothnas/plugins"),
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
 	updated := *m
+	updated.Services = cloneServices(m.Services)
 	updated.Metadata.Version = "9.9.9"
-	updated.Volumes = append(updated.Volumes, Volume{
+	updated.Services[0].Volumes = append(updated.Services[0].Volumes, Volume{
 		Name: "cache", Mode: VolumeModeFlat, Bind: "/cache",
 	})
 
@@ -217,13 +262,7 @@ func TestStore_UpdateManifestRejectsVolumeShapeChange(t *testing.T) {
 func TestStore_InsertGet_MultiInstance_PerInstanceVolume(t *testing.T) {
 	s := openTestStore(t)
 	m := mustParse(t, "gh-runner.yaml") // count: 2, perInstance workspace
-	paths := map[string]map[int]string{
-		"workspace": {
-			1: "", // tier-bound, unresolved in phase 1
-			2: "",
-		},
-	}
-	if err := s.Insert(InsertParams{Manifest: m, Paths: paths}); err != nil {
+	if err := s.Insert(InsertParams{Manifest: m, Paths: pathsFor(m, "/tmp")}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
@@ -256,7 +295,6 @@ func TestStore_InsertGet_MultiInstance_PerInstanceVolume(t *testing.T) {
 	if got, want := len(v.Paths), 2; got != want {
 		t.Errorf("workspace paths = %d want %d", got, want)
 	}
-	// Three config rows in the manifest, all with default "" except labels.
 	if len(rec.Config) != 3 {
 		t.Errorf("config rows = %d want 3", len(rec.Config))
 	}
@@ -265,7 +303,7 @@ func TestStore_InsertGet_MultiInstance_PerInstanceVolume(t *testing.T) {
 func TestStore_Insert_DuplicateNameReturnsErrPluginExists(t *testing.T) {
 	s := openTestStore(t)
 	m := mustParse(t, "llama.yaml")
-	paths := pathsForSingleInstance(m, "/tmp")
+	paths := pathsFor(m, "/tmp")
 	if err := s.Insert(InsertParams{Manifest: m, Paths: paths}); err != nil {
 		t.Fatalf("first insert: %v", err)
 	}
@@ -286,10 +324,7 @@ func TestStore_Get_MissingReturnsErrPluginNotFound(t *testing.T) {
 func TestStore_Delete_CascadesAndIsIdempotent(t *testing.T) {
 	s := openTestStore(t)
 	m := mustParse(t, "gh-runner.yaml")
-	paths := map[string]map[int]string{
-		"workspace": {1: "", 2: ""},
-	}
-	if err := s.Insert(InsertParams{Manifest: m, Paths: paths}); err != nil {
+	if err := s.Insert(InsertParams{Manifest: m, Paths: pathsFor(m, "/tmp")}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	if err := s.Delete("gh-runner"); err != nil {
@@ -298,8 +333,8 @@ func TestStore_Delete_CascadesAndIsIdempotent(t *testing.T) {
 
 	// Cascade: every child table should be empty for this plugin.
 	for _, tbl := range []string{
-		"plugin_instances", "plugin_volumes", "plugin_volume_paths",
-		"plugin_ports", "plugin_config",
+		"plugin_services", "plugin_instances", "plugin_volumes",
+		"plugin_volume_paths", "plugin_ports", "plugin_config",
 	} {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM `+tbl+` WHERE plugin_name = ?`, "gh-runner").Scan(&n); err != nil {
@@ -310,7 +345,6 @@ func TestStore_Delete_CascadesAndIsIdempotent(t *testing.T) {
 		}
 	}
 
-	// Second delete returns ErrPluginNotFound.
 	if err := s.Delete("gh-runner"); !errors.Is(err, ErrPluginNotFound) {
 		t.Errorf("second delete err = %v, want ErrPluginNotFound", err)
 	}
@@ -320,20 +354,7 @@ func TestStore_List_OrdersByName(t *testing.T) {
 	s := openTestStore(t)
 	for _, file := range []string{"llama.yaml", "gh-runner.yaml", "ubuntu-python.yaml"} {
 		m := mustParse(t, file)
-		paths := map[string]map[int]string{}
-		for _, v := range m.Volumes {
-			entries := map[int]string{}
-			count := m.EffectiveCount()
-			if v.PerInstance {
-				for i := 1; i <= count; i++ {
-					entries[i] = ""
-				}
-			} else {
-				entries[1] = ""
-			}
-			paths[v.Name] = entries
-		}
-		if err := s.Insert(InsertParams{Manifest: m, Paths: paths}); err != nil {
+		if err := s.Insert(InsertParams{Manifest: m, Paths: pathsFor(m, "/tmp")}); err != nil {
 			t.Fatalf("insert %s: %v", file, err)
 		}
 	}
@@ -355,14 +376,13 @@ func TestStore_List_OrdersByName(t *testing.T) {
 func TestStore_SetInstanceState_RecomputesAggregate(t *testing.T) {
 	s := openTestStore(t)
 	m := mustParse(t, "gh-runner.yaml")
-	paths := map[string]map[int]string{"workspace": {1: "", 2: ""}}
-	if err := s.Insert(InsertParams{Manifest: m, Paths: paths}); err != nil {
+	if err := s.Insert(InsertParams{Manifest: m, Paths: pathsFor(m, "/tmp")}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
 	// Both instances → running. Aggregate should be "running".
 	for inst := 1; inst <= 2; inst++ {
-		if err := s.SetInstanceState("gh-runner", inst, StateRunning, ""); err != nil {
+		if err := s.SetInstanceState("gh-runner", "gh-runner", inst, StateRunning, ""); err != nil {
 			t.Fatalf("set instance %d running: %v", inst, err)
 		}
 	}
@@ -375,7 +395,7 @@ func TestStore_SetInstanceState_RecomputesAggregate(t *testing.T) {
 	}
 
 	// Fail one → degraded.
-	if err := s.SetInstanceState("gh-runner", 2, StateFailed, "boom"); err != nil {
+	if err := s.SetInstanceState("gh-runner", "gh-runner", 2, StateFailed, "boom"); err != nil {
 		t.Fatalf("set failed: %v", err)
 	}
 	rec, _ = s.Get("gh-runner")
@@ -384,7 +404,7 @@ func TestStore_SetInstanceState_RecomputesAggregate(t *testing.T) {
 	}
 
 	// Mark instance 1 as starting → transitional wins.
-	if err := s.SetInstanceState("gh-runner", 1, StateStarting, ""); err != nil {
+	if err := s.SetInstanceState("gh-runner", "gh-runner", 1, StateStarting, ""); err != nil {
 		t.Fatalf("set starting: %v", err)
 	}
 	rec, _ = s.Get("gh-runner")

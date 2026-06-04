@@ -6,33 +6,35 @@ metadata:
   description: GitHub Actions self-hosted runner
   vendor: smoothnas
   homepage: https://github.com/RakuenSoftware/smoothnas-plugin-gh-runner
-artifact:
-  type: oci-image
-  image: ghcr.io/rakuensoftware/smoothnas-plugin-gh-runner:0.1.0
-container:
-  command: ["/entrypoint.sh"]
-  restartPolicy: unless-stopped
 instances:
   count: 2
   configurable: true
-volumes:
-  - name: workspace
-    mode: tier-bound
-    slot: SSD
-    minSize: 100G
-    bind: /home/runner/_work
-    perInstance: true
 profiles:
   - default-limits
-config:
-  - key: GH_REPO_URL
-    type: string
-    description: Full repo URL
-  - key: GH_RUNNER_TOKEN
-    type: string
-    secret: true
-    description: Registration token
-  - key: GH_RUNNER_LABELS
-    type: string
-    default: "self-hosted,linux,x64,smoothnas"
-    description: Comma-separated runner labels
+services:
+  - name: gh-runner
+    artifact:
+      type: oci-image
+      image: ghcr.io/rakuensoftware/smoothnas-plugin-gh-runner:0.1.0
+    container:
+      command: ["/entrypoint.sh"]
+      restartPolicy: unless-stopped
+    volumes:
+      - name: workspace
+        mode: tier-bound
+        slot: SSD
+        minSize: 100G
+        bind: /home/runner/_work
+        perInstance: true
+    config:
+      - key: GH_REPO_URL
+        type: string
+        description: Full repo URL
+      - key: GH_RUNNER_TOKEN
+        type: string
+        secret: true
+        description: Registration token
+      - key: GH_RUNNER_LABELS
+        type: string
+        default: "self-hosted,linux,x64,smoothnas"
+        description: Comma-separated runner labels

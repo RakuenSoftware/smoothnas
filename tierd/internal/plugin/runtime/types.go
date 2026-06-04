@@ -144,6 +144,11 @@ const PluginNameLabel = "io.smoothnas.plugin"
 // PluginVersionLabel is the manifest version.
 const PluginVersionLabel = "io.smoothnas.plugin.version"
 
+// PluginServiceLabel is the service name within a compose-style plugin
+// (plugins-10). Used by the event subscriber to route events back to the
+// right (plugin, service, instance) row.
+const PluginServiceLabel = "io.smoothnas.plugin.service"
+
 // PluginInstanceLabel is the per-instance index (1..N), as a decimal
 // string. Used by the event subscriber to route events back to the
 // right plugin_instances row.

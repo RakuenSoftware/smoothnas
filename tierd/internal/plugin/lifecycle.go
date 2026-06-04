@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -55,89 +56,172 @@ const DefaultStopTimeoutSeconds = 10
 var (
 	imagePullMaxAttempts = 3
 	imagePullRetryDelay  = 5 * time.Second
+	// serviceHealthMaxAttempts/Delay bound the best-effort readiness
+	// wait for a dependency declared with condition: service_healthy.
+	// LXC2Docker does not surface healthcheck-command results, so the
+	// gate currently waits for the container to report Running; true
+	// healthcheck polling is a follow-up once the runtime exposes it.
+	serviceHealthMaxAttempts = 30
+	serviceHealthRetryDelay  = 1 * time.Second
 )
 
 // Lifecycle owns the install/start/stop/uninstall flow that touches
-// the runtime daemon. It does not own the database schema (that's
-// Store) or the manifest format (that's manifest.go); it sits on
-// top of both and adds the runtime calls.
+// the runtime daemon. A plugin owns a set of services (compose-style);
+// Lifecycle brings them up in dependency (ordinal) order, injecting
+// service-discovery addresses as each backend comes online.
 type Lifecycle struct {
-	store *Store
-	rt    RuntimeClient
-	// lxcPath is the smoothnas-runtime container directory root. When
-	// configured, lifecycle removes the backing LXC directory after the
-	// runtime daemon successfully unregisters a container.
+	store   *Store
+	rt      RuntimeClient
 	lxcPath string
-	// proxy is optional: when nil (legacy / test setups), Lifecycle
-	// skips nginx route generation. Production wires *Proxy via
-	// SetProxy at startup.
-	proxy ProxyManager
-	// catalog is optional: when nil (phase 1-4 tests), Materialise
-	// skips profile resolution and the create payload contains no
-	// profile-contributed fragments. Production wires a *Catalog
-	// via SetCatalog at startup.
+	proxy   ProxyManager
 	catalog *Catalog
 }
 
 // NewLifecycle constructs a Lifecycle around an existing Store and a
-// runtime client. Pass *runtime.Client in production; tests pass a
-// fake.
+// runtime client.
 func NewLifecycle(s *Store, rt RuntimeClient) *Lifecycle {
 	return &Lifecycle{store: s, rt: rt}
 }
 
-// SetProxy attaches the nginx route manager. With a Proxy attached,
-// Start writes the per-plugin route after capturing the bridge IP
-// and Demolish removes it on uninstall. Pass nil to disable nginx
-// integration (tests, environments without nginx).
-func (l *Lifecycle) SetProxy(p ProxyManager) {
-	l.proxy = p
-}
+// SetProxy attaches the nginx route manager.
+func (l *Lifecycle) SetProxy(p ProxyManager) { l.proxy = p }
 
-// SetCatalog attaches the profile catalog. With a Catalog attached,
-// Materialise resolves profiles, runs preflight, persists the
-// applied profile names, and threads the merged fragments into the
-// container create payload. Pass nil to disable profile resolution
-// (phase 1-4 behaviour).
-func (l *Lifecycle) SetCatalog(c *Catalog) {
-	l.catalog = c
-}
+// SetCatalog attaches the profile catalog.
+func (l *Lifecycle) SetCatalog(c *Catalog) { l.catalog = c }
 
 // SetLXCPath attaches the smoothnas-runtime LXC root used for container
 // backing directories. Pass an empty string to disable filesystem cleanup.
-func (l *Lifecycle) SetLXCPath(path string) {
-	l.lxcPath = strings.TrimSpace(path)
+func (l *Lifecycle) SetLXCPath(path string) { l.lxcPath = strings.TrimSpace(path) }
+
+// --- per-service helpers -------------------------------------------------
+
+// manifestServiceMap indexes a manifest's services by name.
+func manifestServiceMap(m *Manifest) map[string]*Service {
+	out := make(map[string]*Service, len(m.Services))
+	for i := range m.Services {
+		out[m.Services[i].Name] = &m.Services[i]
+	}
+	return out
 }
 
-// Materialise pulls the image (and runs the lxc-distro setup flow if
-// needed), creates the per-instance containers, and stamps the
-// resulting container IDs into plugin_instances. After Materialise,
-// the plugin can be Started.
+// orderedServices returns the plugin's services in start order (ascending
+// ordinal; ties broken by name for determinism).
+func orderedServices(rec *PluginRecord) []ServiceRow {
+	out := append([]ServiceRow(nil), rec.Services...)
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Ordinal != out[j].Ordinal {
+			return out[i].Ordinal < out[j].Ordinal
+		}
+		return out[i].Service < out[j].Service
+	})
+	return out
+}
+
+// primaryService returns the plugin's user-facing service: the
+// highest-ordinal one (it depends on its backends, so it starts last),
+// ties broken by smallest name — matching Store.primaryServiceTx.
+func primaryService(rec *PluginRecord) string {
+	best := ServiceRow{Ordinal: -1}
+	for _, s := range rec.Services {
+		if s.Ordinal > best.Ordinal || (s.Ordinal == best.Ordinal && (best.Service == "" || s.Service < best.Service)) {
+			best = s
+		}
+	}
+	return best.Service
+}
+
+func filterInstances(rec *PluginRecord, service string) []InstanceRow {
+	var out []InstanceRow
+	for _, r := range rec.Instances {
+		if r.Service == service {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func filterVolumes(rec *PluginRecord, service string) []VolumeRow {
+	var out []VolumeRow
+	for _, r := range rec.Volumes {
+		if r.Service == service {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func filterConfig(rec *PluginRecord, service string) []ConfigRow {
+	var out []ConfigRow
+	for _, r := range rec.Config {
+		if r.Service == service {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// serviceImageRef returns the resolved image for a service, preferring the
+// stored ref and falling back to the manifest's pre-resolution form.
+func serviceImageRef(rec *PluginRecord, svc *Service) string {
+	for _, sr := range rec.Services {
+		if sr.Service == svc.Name && sr.ImageRef != "" {
+			return sr.ImageRef
+		}
+	}
+	if svc.Artifact.Type == ArtifactOCIImage {
+		return digestPinnedImageRef(svc.Artifact.Image, svc.Artifact.Digest)
+	}
+	return svc.Artifact.Distro + ":" + svc.Artifact.Release
+}
+
+// currentDiscovery seeds the discovery map from whatever bridge IPs are
+// already recorded (instance 1 per service) plus each service's declared
+// ports. Start overwrites the host as each service is (re)started.
+func currentDiscovery(rec *PluginRecord, svcMap map[string]*Service) map[string]ServiceEndpoint {
+	disc := map[string]ServiceEndpoint{}
+	for _, sr := range rec.Services {
+		svc := svcMap[sr.Service]
+		if svc == nil {
+			continue
+		}
+		ep := ServiceEndpoint{Ports: map[string]int{}}
+		for _, in := range rec.Instances {
+			if in.Service == sr.Service && in.Instance == 1 {
+				ep.Host = in.BridgeIP
+			}
+		}
+		for _, p := range svc.Ports {
+			ep.Ports[p.Name] = p.Port
+		}
+		disc[sr.Service] = ep
+	}
+	return disc
+}
+
+// --- Materialise ---------------------------------------------------------
+
+// Materialise pulls every service's image (running the lxc-distro setup
+// flow where needed) and creates the per-(service,instance) containers,
+// stamping the resulting container IDs into plugin_instances. After
+// Materialise, the plugin can be Started.
 //
-// Idempotent: if a container already exists for an instance,
-// Materialise re-uses it. If the image is already cached, the pull
-// is fast.
+// Idempotent: an existing container that still matches the desired
+// payload is reused.
 func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 	rec, err := l.store.Get(name)
 	if err != nil {
 		return err
 	}
-
 	manifest, err := ParseManifest([]byte(rec.Plugin.ManifestYAML))
 	if err != nil {
 		return fmt.Errorf("re-parse stored manifest: %w", err)
 	}
+	svcMap := manifestServiceMap(manifest)
 
-	// Phase 04: ensure the smoothnas-plugins bridge exists before
-	// container creation. Idempotent; safe to call every Materialise.
 	if _, err := l.rt.EnsurePluginBridge(ctx); err != nil {
 		return fmt.Errorf("ensure plugin bridge: %w", err)
 	}
 
-	// Phase 05: resolve profiles. nil catalog = no profile fragments
-	// (preserves phase 1-4 test behaviour). When set, this validates
-	// every referenced profile exists, runs preflight gates, and
-	// returns the merged fragments to thread into the create payload.
 	var resolved *Resolved
 	if l.catalog != nil {
 		r, err := Resolve(l.catalog, manifest, nil)
@@ -150,82 +234,95 @@ func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 		resolved = r
 	}
 
-	imageRef, err := l.materialiseImage(ctx, &rec.Plugin, manifest)
-	if err != nil {
-		return err
-	}
-
 	count := rec.Plugin.InstanceCount
-	for _, inst := range rec.Instances {
-		payload, err := BuildCreatePayload(PayloadInputs{
-			Plugin:   &rec.Plugin,
-			Manifest: manifest,
-			Instance: inst.Instance,
-			ImageRef: imageRef,
-			Volumes:  rec.Volumes,
-			Config:   rec.Config,
-			Profiles: resolved,
-		})
-		if err != nil {
-			return fmt.Errorf("build payload for instance %d: %w", inst.Instance, err)
+	disc := currentDiscovery(rec, svcMap)
+
+	for _, sr := range orderedServices(rec) {
+		svc := svcMap[sr.Service]
+		if svc == nil {
+			return fmt.Errorf("stored manifest is missing service %q", sr.Service)
 		}
 
-		if inst.ContainerID != "" {
-			// Already materialised. Verify the container still exists;
-			// if it does, verify it still matches the desired create
-			// payload. Config changes that affect env, args, host
-			// limits, devices, mounts, or networking require a recreate
-			// because Docker/LXC create-time fields cannot be edited
-			// reliably in-place.
-			existing, err := l.rt.InspectContainer(ctx, inst.ContainerID)
-			if err == nil && containerMatchesDesired(existing, payload) {
-				continue
+		imageRef, err := l.materialiseImage(ctx, &rec.Plugin, svc)
+		if err != nil {
+			return err
+		}
+
+		vols := filterVolumes(rec, sr.Service)
+		cfg := filterConfig(rec, sr.Service)
+		for _, inst := range filterInstances(rec, sr.Service) {
+			payload, err := BuildCreatePayload(PayloadInputs{
+				Plugin:    &rec.Plugin,
+				Service:   svc,
+				Instance:  inst.Instance,
+				ImageRef:  imageRef,
+				Volumes:   vols,
+				Config:    cfg,
+				Discovery: disc,
+				Profiles:  resolved,
+			})
+			if err != nil {
+				return fmt.Errorf("build payload for %s/%d: %w", sr.Service, inst.Instance, err)
 			}
-			if err != nil && !runtime.IsNotFound(err) {
-				return fmt.Errorf("inspect existing container for instance %d: %w", inst.Instance, err)
-			}
-			if err == nil {
-				_ = l.rt.StopContainer(ctx, inst.ContainerID, DefaultStopTimeoutSeconds)
-				if err := l.removeContainerWithCleanup(ctx, inst.ContainerID, true); err != nil {
-					return fmt.Errorf("remove stale container for instance %d: %w", inst.Instance, err)
+
+			if inst.ContainerID != "" {
+				existing, err := l.rt.InspectContainer(ctx, inst.ContainerID)
+				if err == nil && containerMatchesDesired(existing, payload) {
+					continue
 				}
-				_ = l.store.SetInstanceContainerID(name, inst.Instance, "")
+				if err != nil && !runtime.IsNotFound(err) {
+					return fmt.Errorf("inspect existing container for %s/%d: %w", sr.Service, inst.Instance, err)
+				}
+				if err == nil {
+					_ = l.rt.StopContainer(ctx, inst.ContainerID, DefaultStopTimeoutSeconds)
+					if err := l.removeContainerWithCleanup(ctx, inst.ContainerID, true); err != nil {
+						return fmt.Errorf("remove stale container for %s/%d: %w", sr.Service, inst.Instance, err)
+					}
+					_ = l.store.SetInstanceContainerID(name, sr.Service, inst.Instance, "")
+				}
 			}
-		}
 
-		containerName := ContainerName(name, inst.Instance, count)
-		_ = l.setInstanceState(name, inst.Instance, StateCreating, "")
-		resp, err := l.rt.CreateContainer(ctx, containerName, payload)
-		if err != nil && runtime.IsConflict(err) {
-			// A create that was canceled mid-flight (e.g. a slow first
-			// image pull whose context deadline expired) can leave a
-			// container under this name that we never recorded an ID for.
-			// The stale-container branch above keys off inst.ContainerID,
-			// so it never runs for such an orphan and every retry 409s —
-			// wedging the plugin until the container is removed by hand.
-			// Force-remove the name-conflicting container and retry once.
-			if rmErr := l.rt.RemoveContainer(ctx, containerName, true); rmErr != nil {
-				_ = l.setInstanceState(name, inst.Instance, StateFailed, err.Error())
-				return fmt.Errorf("remove name-conflicting container %q for instance %d: %w", containerName, inst.Instance, rmErr)
+			if err := l.createInstance(ctx, name, &rec.Plugin, svc, inst.Instance, count, payload); err != nil {
+				return err
 			}
-			resp, err = l.rt.CreateContainer(ctx, containerName, payload)
 		}
-		if err != nil {
-			_ = l.setInstanceState(name, inst.Instance, StateFailed, err.Error())
-			return fmt.Errorf("create container for instance %d: %w", inst.Instance, err)
-		}
-		if err := l.store.SetInstanceContainerID(name, inst.Instance, resp.ID); err != nil {
-			return fmt.Errorf("record container id: %w", err)
-		}
-		_ = l.setInstanceState(name, inst.Instance, StateStopped, "")
 	}
+	return nil
+}
 
+// createInstance creates one container from a pre-built payload, records
+// its ID, and marks the unit stopped (ready to start).
+func (l *Lifecycle) createInstance(ctx context.Context, name string, p *PluginRow, svc *Service, instance, count int, payload runtime.CreateContainerRequest) error {
+	containerName := ContainerName(name, svc.Name, instance, count)
+	_ = l.setInstanceState(name, svc.Name, instance, StateCreating, "")
+	resp, err := l.rt.CreateContainer(ctx, containerName, payload)
+	if err != nil && runtime.IsConflict(err) {
+		// A create canceled mid-flight (e.g. a slow first image pull whose
+		// context deadline expired) can leave a container under this name
+		// that we never recorded an ID for. The stale-container branch in
+		// Materialise keys off the recorded ContainerID, so it never runs
+		// for such an orphan and every retry 409s — wedging the plugin
+		// until the container is removed by hand. Force-remove the
+		// name-conflicting container and retry the create once.
+		if rmErr := l.rt.RemoveContainer(ctx, containerName, true); rmErr != nil {
+			_ = l.setInstanceState(name, svc.Name, instance, StateFailed, err.Error())
+			return fmt.Errorf("remove name-conflicting container %q for %s/%d: %w", containerName, svc.Name, instance, rmErr)
+		}
+		resp, err = l.rt.CreateContainer(ctx, containerName, payload)
+	}
+	if err != nil {
+		_ = l.setInstanceState(name, svc.Name, instance, StateFailed, err.Error())
+		return fmt.Errorf("create container for %s/%d: %w", svc.Name, instance, err)
+	}
+	if err := l.store.SetInstanceContainerID(name, svc.Name, instance, resp.ID); err != nil {
+		return fmt.Errorf("record container id: %w", err)
+	}
+	_ = l.setInstanceState(name, svc.Name, instance, StateStopped, "")
 	return nil
 }
 
 // AutostartAll materialises and starts every installed plugin that is not
-// already running. It continues across per-plugin failures so one bad plugin
-// does not prevent the rest of the system from coming up after boot.
+// already running. It continues across per-plugin failures.
 func (l *Lifecycle) AutostartAll(ctx context.Context) error {
 	plugins, err := l.store.List()
 	if err != nil {
@@ -363,55 +460,45 @@ func labelsContainDesired(existing, desired map[string]string) bool {
 	return true
 }
 
-// materialiseImage handles the artifact-type-specific pull (and, for
-// lxc-distro plugins with a setup script, the one-shot setup
-// container + commit flow). Returns the resolved image ref to use
-// in the per-instance create payloads.
-func (l *Lifecycle) materialiseImage(ctx context.Context, p *PluginRow, m *Manifest) (string, error) {
-	switch m.Artifact.Type {
+// materialiseImage handles the artifact-type-specific pull (and, for an
+// lxc-distro service with a setup script, the one-shot setup container +
+// commit flow). Returns the resolved image ref for the create payloads.
+func (l *Lifecycle) materialiseImage(ctx context.Context, p *PluginRow, svc *Service) (string, error) {
+	switch svc.Artifact.Type {
 	case ArtifactOCIImage:
-		// Update transient state on the first instance — the UI uses
-		// any non-installed state on plugin_instances to render
-		// "pulling…" progress.
-		_ = l.setInstanceState(p.Name, 1, StatePulling, "")
-		ref := digestPinnedImageRef(m.Artifact.Image, m.Artifact.Digest)
+		_ = l.setInstanceState(p.Name, svc.Name, 1, StatePulling, "")
+		ref := digestPinnedImageRef(svc.Artifact.Image, svc.Artifact.Digest)
 		resolved, err := l.pullImageWithRetry(ctx, ref, nil)
 		if err != nil {
-			_ = l.setInstanceState(p.Name, 1, StateFailed, err.Error())
+			_ = l.setInstanceState(p.Name, svc.Name, 1, StateFailed, err.Error())
 			return "", fmt.Errorf("pull image %s: %w", ref, err)
 		}
-		// Verify the resolved digest matches the manifest's pin (if any).
-		if m.Artifact.Digest != "" && !strings.Contains(resolved, m.Artifact.Digest) {
-			_ = l.setInstanceState(p.Name, 1, StateFailed, "image digest mismatch")
-			return "", fmt.Errorf("image digest mismatch: pulled %s, manifest pinned %s", resolved, m.Artifact.Digest)
+		if svc.Artifact.Digest != "" && !strings.Contains(resolved, svc.Artifact.Digest) {
+			_ = l.setInstanceState(p.Name, svc.Name, 1, StateFailed, "image digest mismatch")
+			return "", fmt.Errorf("image digest mismatch: pulled %s, manifest pinned %s", resolved, svc.Artifact.Digest)
 		}
-		// Persist the resolved ref so future operations don't re-pull.
-		_ = l.store.SetImageRef(p.Name, resolved)
+		_ = l.store.SetImageRef(p.Name, svc.Name, resolved)
 		return resolved, nil
 
 	case ArtifactLXCDistro:
-		baseRef := m.Artifact.Distro + ":" + m.Artifact.Release
-		_ = l.setInstanceState(p.Name, 1, StatePulling, "")
+		baseRef := svc.Artifact.Distro + ":" + svc.Artifact.Release
+		_ = l.setInstanceState(p.Name, svc.Name, 1, StatePulling, "")
 		if _, err := l.pullImageWithRetry(ctx, baseRef, nil); err != nil {
-			_ = l.setInstanceState(p.Name, 1, StateFailed, err.Error())
+			_ = l.setInstanceState(p.Name, svc.Name, 1, StateFailed, err.Error())
 			return "", fmt.Errorf("pull distro template %s: %w", baseRef, err)
 		}
-
-		// No setup script → use the base directly.
-		if len(m.Artifact.Packages) == 0 && len(m.Artifact.Setup) == 0 {
+		if len(svc.Artifact.Packages) == 0 && len(svc.Artifact.Setup) == 0 {
 			return baseRef, nil
 		}
-
-		// Setup script flow: build a one-shot Cmd, run it, commit.
-		commitTag := SetupTemplateImage(p.Name, p.Version)
-		if err := l.runSetupScript(ctx, p, m, baseRef, commitTag); err != nil {
-			_ = l.setInstanceState(p.Name, 1, StateFailed, err.Error())
+		commitTag := SetupTemplateImage(p.Name, svc.Name, p.Version)
+		if err := l.runSetupScript(ctx, p, svc, baseRef, commitTag); err != nil {
+			_ = l.setInstanceState(p.Name, svc.Name, 1, StateFailed, err.Error())
 			return "", err
 		}
 		return commitTag, nil
 
 	default:
-		return "", fmt.Errorf("unknown artifact type %q", m.Artifact.Type)
+		return "", fmt.Errorf("unknown artifact type %q", svc.Artifact.Type)
 	}
 }
 
@@ -437,14 +524,8 @@ func (l *Lifecycle) pullImageWithRetry(ctx context.Context, ref string, onProgre
 	return "", fmt.Errorf("failed after %d attempts: %w", imagePullMaxAttempts, lastErr)
 }
 
-// runSetupScript runs the apt-install + setup commands inside a
-// one-shot container, waits for clean exit, commits the rootfs as
-// commitTag, and removes the one-shot container. The setup
-// container's logs are NOT captured here — phase 02 keeps this code
-// simple and assumes operator inspection via `docker logs` if the
-// setup fails. Phase 06 (UI) can layer log capture on top.
-func (l *Lifecycle) runSetupScript(ctx context.Context, p *PluginRow, m *Manifest, baseRef, commitTag string) error {
-	cmd := buildSetupCmd(m.Artifact.Distro, m.Artifact.Packages, m.Artifact.Setup)
+func (l *Lifecycle) runSetupScript(ctx context.Context, p *PluginRow, svc *Service, baseRef, commitTag string) error {
+	cmd := buildSetupCmd(svc.Artifact.Distro, svc.Artifact.Packages, svc.Artifact.Setup)
 
 	createReq := runtime.CreateContainerRequest{
 		Image: baseRef,
@@ -452,21 +533,19 @@ func (l *Lifecycle) runSetupScript(ctx context.Context, p *PluginRow, m *Manifes
 		Labels: map[string]string{
 			runtime.PluginManagedLabel: "true",
 			runtime.PluginNameLabel:    p.Name,
+			runtime.PluginServiceLabel: svc.Name,
 			"io.smoothnas.role":        "setup",
 		},
 		HostConfig: runtime.HostConfig{
 			RestartPolicy: runtime.RestartPolicy{Name: "no"},
 		},
 	}
-	setupName := "smoothnas-plugin-setup-" + p.Name
+	setupName := "smoothnas-plugin-setup-" + p.Name + "-" + svc.Name
 	resp, err := l.rt.CreateContainer(ctx, setupName, createReq)
 	if err != nil {
 		return fmt.Errorf("create setup container: %w", err)
 	}
-	// Best-effort cleanup whatever happens.
 	defer func() {
-		// Use a fresh context so cleanup runs even if the parent
-		// context was cancelled mid-flow.
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = l.removeContainerWithCleanup(cleanupCtx, resp.ID, true)
@@ -482,10 +561,6 @@ func (l *Lifecycle) runSetupScript(ctx context.Context, p *PluginRow, m *Manifes
 	if exit != 0 {
 		return fmt.Errorf("setup script exited %d", exit)
 	}
-
-	// Commit. The repo argument is the image name without the tag;
-	// our SetupTemplateImage helper returns "<repo>:<tag>" so split
-	// here.
 	repo, tag := splitImageTag(commitTag)
 	if _, err := l.rt.CommitContainer(ctx, resp.ID, repo, tag); err != nil {
 		return fmt.Errorf("commit setup container: %w", err)
@@ -493,14 +568,9 @@ func (l *Lifecycle) runSetupScript(ctx context.Context, p *PluginRow, m *Manifes
 	return nil
 }
 
-// buildSetupCmd composes the sh -c argument that installs packages and
-// then runs each setup line. Distro selects the package manager; we
-// support apt (debian/ubuntu) and apk (alpine) in v1. Other distros
-// pass through as-is and rely on the setup script to handle install.
 func buildSetupCmd(distro string, packages, setup []string) string {
 	var b strings.Builder
 	b.WriteString("set -ex\n")
-
 	if len(packages) > 0 {
 		switch distro {
 		case "ubuntu", "debian":
@@ -514,7 +584,6 @@ func buildSetupCmd(distro string, packages, setup []string) string {
 			b.WriteString(strings.Join(packages, " "))
 			b.WriteString("\n")
 		default:
-			// Best effort; let the setup script handle it.
 			b.WriteString("# unknown distro " + distro + ": skipping package install\n")
 		}
 	}
@@ -525,7 +594,6 @@ func buildSetupCmd(distro string, packages, setup []string) string {
 	return b.String()
 }
 
-// splitImageTag splits "repo:tag" into ("repo", "tag").
 func splitImageTag(ref string) (string, string) {
 	if i := strings.LastIndex(ref, ":"); i >= 0 && !strings.Contains(ref[i:], "/") {
 		return ref[:i], ref[i+1:]
@@ -548,40 +616,124 @@ func digestPinnedImageRef(image, digest string) string {
 	return repo + "@" + digest
 }
 
-// Start brings every instance of a plugin to the running state,
-// captures each instance's bridge IP, and (when a Proxy is wired)
-// writes the per-plugin nginx route. Materialise must have been
-// called first; Start returns an error if any instance has no
-// container_id recorded.
+// --- Start / Stop --------------------------------------------------------
+
+// Start brings every service of a plugin to running, in dependency
+// (ordinal) order. Backends start first; a dependent service is recreated
+// with its discovery env resolved (sibling bridge IPs) before it starts,
+// and a dependency declared service_healthy is waited on before its
+// dependents come up. Once all services run, the nginx route (when wired)
+// is applied against the primary service.
 func (l *Lifecycle) Start(ctx context.Context, name string) error {
 	rec, err := l.store.Get(name)
 	if err != nil {
 		return err
 	}
-	for _, inst := range rec.Instances {
-		if inst.ContainerID == "" {
-			return fmt.Errorf("instance %d has no container — call Materialise first", inst.Instance)
+	manifest, err := ParseManifest([]byte(rec.Plugin.ManifestYAML))
+	if err != nil {
+		return fmt.Errorf("re-parse stored manifest: %w", err)
+	}
+	svcMap := manifestServiceMap(manifest)
+
+	var resolved *Resolved
+	if l.catalog != nil {
+		if resolved, err = Resolve(l.catalog, manifest, nil); err != nil {
+			return fmt.Errorf("resolve profiles: %w", err)
 		}
-		_ = l.setInstanceState(name, inst.Instance, StateStarting, "")
-		if err := l.rt.StartContainer(ctx, inst.ContainerID); err != nil {
-			_ = l.setInstanceState(name, inst.Instance, StateFailed, err.Error())
-			return fmt.Errorf("start instance %d: %w", inst.Instance, err)
-		}
-		// Capture the bridge IP. The container is on the bridge
-		// from create time, but the IPAM-assigned address only
-		// becomes visible once the container's network namespace
-		// is up — which is post-start. Retry briefly to handle the
-		// brief window where the daemon is still wiring it.
-		if ip, err := l.captureBridgeIP(ctx, inst.ContainerID); err != nil {
-			_ = l.setInstanceState(name, inst.Instance, StateFailed, fmt.Sprintf("bridge IP: %v", err))
-			return fmt.Errorf("capture bridge IP for instance %d: %w", inst.Instance, err)
-		} else if ip != "" {
-			_ = l.store.SetInstanceBridgeIP(name, inst.Instance, ip)
-		}
-		_ = l.setInstanceState(name, inst.Instance, StateRunning, "")
 	}
 
-	// Re-fetch so the route picks up the freshly-written bridge IPs.
+	count := rec.Plugin.InstanceCount
+	order := orderedServices(rec)
+	disc := currentDiscovery(rec, svcMap)
+
+	for _, sr := range order {
+		svc := svcMap[sr.Service]
+		if svc == nil {
+			return fmt.Errorf("stored manifest is missing service %q", sr.Service)
+		}
+
+		// Re-read so we see container IDs written by earlier iterations
+		// (and any recreate below).
+		fresh, err := l.store.Get(name)
+		if err != nil {
+			return err
+		}
+		instances := filterInstances(fresh, sr.Service)
+		vols := filterVolumes(fresh, sr.Service)
+		cfg := filterConfig(fresh, sr.Service)
+
+		// Dependents carry {{service.X.host}} tokens that could only be
+		// resolved once their dependencies started, so recreate them now
+		// with the discovery map populated by earlier services.
+		if len(svc.DependsOn) > 0 {
+			imageRef := serviceImageRef(fresh, svc)
+			for _, inst := range instances {
+				if inst.ContainerID != "" {
+					_ = l.rt.StopContainer(ctx, inst.ContainerID, DefaultStopTimeoutSeconds)
+					_ = l.removeContainerWithCleanup(ctx, inst.ContainerID, true)
+					_ = l.store.SetInstanceContainerID(name, sr.Service, inst.Instance, "")
+				}
+				payload, err := BuildCreatePayload(PayloadInputs{
+					Plugin:    &fresh.Plugin,
+					Service:   svc,
+					Instance:  inst.Instance,
+					ImageRef:  imageRef,
+					Volumes:   vols,
+					Config:    cfg,
+					Discovery: disc,
+					Profiles:  resolved,
+				})
+				if err != nil {
+					return fmt.Errorf("rebuild payload for %s/%d: %w", sr.Service, inst.Instance, err)
+				}
+				if err := l.createInstance(ctx, name, &fresh.Plugin, svc, inst.Instance, count, payload); err != nil {
+					return err
+				}
+			}
+			// Reload the freshly-created container IDs.
+			fresh, err = l.store.Get(name)
+			if err != nil {
+				return err
+			}
+			instances = filterInstances(fresh, sr.Service)
+		}
+
+		var firstIP string
+		for _, inst := range instances {
+			if inst.ContainerID == "" {
+				return fmt.Errorf("service %s instance %d has no container — call Materialise first", sr.Service, inst.Instance)
+			}
+			_ = l.setInstanceState(name, sr.Service, inst.Instance, StateStarting, "")
+			if err := l.rt.StartContainer(ctx, inst.ContainerID); err != nil {
+				_ = l.setInstanceState(name, sr.Service, inst.Instance, StateFailed, err.Error())
+				return fmt.Errorf("start %s/%d: %w", sr.Service, inst.Instance, err)
+			}
+			if ip, err := l.captureBridgeIP(ctx, inst.ContainerID); err != nil {
+				_ = l.setInstanceState(name, sr.Service, inst.Instance, StateFailed, fmt.Sprintf("bridge IP: %v", err))
+				return fmt.Errorf("capture bridge IP for %s/%d: %w", sr.Service, inst.Instance, err)
+			} else if ip != "" {
+				_ = l.store.SetInstanceBridgeIP(name, sr.Service, inst.Instance, ip)
+				if inst.Instance == 1 {
+					firstIP = ip
+				}
+			}
+			_ = l.setInstanceState(name, sr.Service, inst.Instance, StateRunning, "")
+		}
+
+		// Publish this service's endpoint for downstream dependents.
+		ep := disc[sr.Service]
+		ep.Host = firstIP
+		disc[sr.Service] = ep
+
+		// Health gate: if any later service depends on this one with
+		// service_healthy, wait for readiness before proceeding.
+		if dependedHealthy(manifest, sr.Service) {
+			if err := l.waitServiceReady(ctx, instances); err != nil {
+				return fmt.Errorf("service %s not ready: %w", sr.Service, err)
+			}
+		}
+	}
+
 	if l.proxy != nil {
 		updated, err := l.store.Get(name)
 		if err != nil {
@@ -598,9 +750,45 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 	return nil
 }
 
-// captureBridgeIP polls InspectContainerBridgeIP up to 10 times
-// (~1 s) waiting for IPAM to populate the address. This window is
-// usually <100ms but can stretch on a busy daemon.
+// dependedHealthy reports whether any service declares a service_healthy
+// dependency on target.
+func dependedHealthy(m *Manifest, target string) bool {
+	for i := range m.Services {
+		if c, ok := m.Services[i].DependsOn[target]; ok && c.Condition == DependsServiceHealthy {
+			return true
+		}
+	}
+	return false
+}
+
+// waitServiceReady waits, best-effort, for every instance of a service to
+// report Running. LXC2Docker does not surface healthcheck-command results
+// yet, so this is a readiness gate, not a true health gate.
+func (l *Lifecycle) waitServiceReady(ctx context.Context, instances []InstanceRow) error {
+	for _, inst := range instances {
+		if inst.ContainerID == "" {
+			continue
+		}
+		ready := false
+		for attempt := 0; attempt < serviceHealthMaxAttempts; attempt++ {
+			insp, err := l.rt.InspectContainer(ctx, inst.ContainerID)
+			if err == nil && insp.State.Running {
+				ready = true
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(serviceHealthRetryDelay):
+			}
+		}
+		if !ready {
+			return fmt.Errorf("instance %d did not become ready", inst.Instance)
+		}
+	}
+	return nil
+}
+
 func (l *Lifecycle) captureBridgeIP(ctx context.Context, containerID string) (string, error) {
 	for attempt := 0; attempt < 10; attempt++ {
 		ip, err := l.rt.InspectContainerBridgeIP(ctx, containerID)
@@ -619,35 +807,25 @@ func (l *Lifecycle) captureBridgeIP(ctx context.Context, containerID string) (st
 	return "", fmt.Errorf("bridge IP not assigned after 10 retries")
 }
 
-// buildPluginRoute renders the plugin record into a PluginRoute the
-// Proxy can apply. Multiple exposed ports per plugin produce
-// multiple ProxyRoute entries — first port (declaration order) gets
-// /plugins/<name>/, additional ports get /plugins/<name>/<port-name>/.
-//
-// For multi-instance plugins (count > 1), v1 routes to the first
-// instance's bridge IP only — load balancing is a future enhancement
-// and the proposal explicitly defers it. Operators wanting LB across
-// runners should run plugin-side load balancing (e.g. socat).
-//
-// Phase 07: when the manifest declared ui.embed.auth=bearer-injected,
-// every ProxyRoute carries the per-plugin bearer token so nginx
-// injects an Authorization: Bearer <token> header on each proxied
-// request — the embedded plugin sees an authenticated request from
-// the SmoothNAS side without doing its own login flow.
+// buildPluginRoute renders the plugin's primary (user-facing) service into
+// a PluginRoute. The primary service's exposed ports become the routes;
+// its instance-1 bridge IP is the upstream. Multi-instance load balancing
+// is deferred per the proposal.
 func (l *Lifecycle) buildPluginRoute(rec *PluginRecord) (PluginRoute, error) {
 	if len(rec.Instances) == 0 {
 		return PluginRoute{}, fmt.Errorf("no instances")
 	}
-	upstreamIP := rec.Instances[0].BridgeIP
+	primary := primaryService(rec)
+	upstreamIP := ""
+	for _, in := range rec.Instances {
+		if in.Service == primary && in.Instance == 1 {
+			upstreamIP = in.BridgeIP
+		}
+	}
 	if upstreamIP == "" {
-		return PluginRoute{}, fmt.Errorf("instance 1 has no bridge IP")
+		return PluginRoute{}, fmt.Errorf("primary service %q instance 1 has no bridge IP", primary)
 	}
 
-	// Pull the per-plugin bearer token so the route can inject the
-	// Authorization header. Empty token == auth=none plugin or
-	// pre-phase-07 install; ProxyRoute.AuthBearer left empty in
-	// either case. Nil store (pure-function unit tests of route
-	// building) skips the lookup entirely.
 	var token string
 	if l.store != nil {
 		t, err := l.store.GetBearerToken(rec.Plugin.Name)
@@ -663,7 +841,7 @@ func (l *Lifecycle) buildPluginRoute(rec *PluginRecord) (PluginRoute, error) {
 	}
 	first := true
 	for _, p := range rec.Ports {
-		if !p.Expose {
+		if p.Service != primary || !p.Expose {
 			continue
 		}
 		var locationPath string
@@ -682,54 +860,47 @@ func (l *Lifecycle) buildPluginRoute(rec *PluginRecord) (PluginRoute, error) {
 	return route, nil
 }
 
-// Stop signals every running instance, waiting up to
-// DefaultStopTimeoutSeconds before SIGKILL. Stopped instances stay
-// stopped; the next Start will resume them.
+// Stop signals every running instance, in reverse dependency order
+// (dependents before their backends), waiting up to
+// DefaultStopTimeoutSeconds before SIGKILL.
 func (l *Lifecycle) Stop(ctx context.Context, name string) error {
 	rec, err := l.store.Get(name)
 	if err != nil {
 		return err
 	}
+	order := orderedServices(rec)
 	var firstErr error
-	for _, inst := range rec.Instances {
-		if inst.ContainerID == "" {
-			continue
-		}
-		if err := l.rt.StopContainer(ctx, inst.ContainerID, DefaultStopTimeoutSeconds); err != nil {
-			_ = l.setInstanceState(name, inst.Instance, StateFailed, err.Error())
-			if firstErr == nil {
-				firstErr = err
+	for i := len(order) - 1; i >= 0; i-- {
+		sr := order[i]
+		for _, inst := range filterInstances(rec, sr.Service) {
+			if inst.ContainerID == "" {
+				continue
 			}
-			continue
+			if err := l.rt.StopContainer(ctx, inst.ContainerID, DefaultStopTimeoutSeconds); err != nil {
+				_ = l.setInstanceState(name, sr.Service, inst.Instance, StateFailed, err.Error())
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			_ = l.setInstanceState(name, sr.Service, inst.Instance, StateStopped, "")
 		}
-		_ = l.setInstanceState(name, inst.Instance, StateStopped, "")
 	}
 	return firstErr
 }
 
-// Restart stops then starts every instance.
+// Restart stops every service then starts the set again — going through
+// Start so discovery env and ordering are re-established.
 func (l *Lifecycle) Restart(ctx context.Context, name string) error {
-	rec, err := l.store.Get(name)
-	if err != nil {
+	if err := l.Stop(ctx, name); err != nil {
 		return err
 	}
-	for _, inst := range rec.Instances {
-		if inst.ContainerID == "" {
-			continue
-		}
-		if err := l.rt.RestartContainer(ctx, inst.ContainerID, DefaultStopTimeoutSeconds); err != nil {
-			_ = l.setInstanceState(name, inst.Instance, StateFailed, err.Error())
-			return fmt.Errorf("restart instance %d: %w", inst.Instance, err)
-		}
-		_ = l.setInstanceState(name, inst.Instance, StateRunning, "")
-	}
-	return nil
+	return l.Start(ctx, name)
 }
 
 // Demolish stops, removes, and drops the cached image for every
-// instance, and (when a Proxy is wired) removes the per-plugin
-// nginx route. Used by Uninstall. Idempotent — gone-already
-// containers, images, and nginx confs do not error.
+// (service,instance) container, and (when a Proxy is wired) removes the
+// per-plugin nginx route. Used by Uninstall. Idempotent.
 func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 	rec, err := l.store.Get(name)
 	if err != nil {
@@ -739,62 +910,55 @@ func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 		return err
 	}
 
-	// Remove the nginx route first, before the containers it points
-	// at go away. nginx will return 502 to any in-flight request
-	// either way; removing the route first means a fresh request
-	// gets a clean 404 from SmoothNAS rather than 502.
 	if l.proxy != nil {
 		if err := l.proxy.Remove(ctx, name); err != nil {
 			return fmt.Errorf("remove nginx route: %w", err)
 		}
 	}
 
-	for _, inst := range rec.Instances {
-		if inst.ContainerID == "" {
-			// No recorded ID, but a create canceled mid-flight may have
-			// left an orphan under the deterministic name. Best-effort
-			// remove it by name so uninstall/reinstall isn't wedged by a
-			// later name conflict. RemoveContainer is idempotent on 404.
-			orphan := ContainerName(rec.Plugin.Name, inst.Instance, rec.Plugin.InstanceCount)
-			_ = l.rt.RemoveContainer(ctx, orphan, true)
-			continue
+	order := orderedServices(rec)
+	for i := len(order) - 1; i >= 0; i-- {
+		sr := order[i]
+		for _, inst := range filterInstances(rec, sr.Service) {
+			if inst.ContainerID == "" {
+				// No recorded ID, but a create canceled mid-flight may have
+				// left an orphan under the deterministic name. Best-effort
+				// remove it by name so uninstall/reinstall isn't wedged by a
+				// later name conflict. RemoveContainer is idempotent on 404.
+				orphan := ContainerName(rec.Plugin.Name, sr.Service, inst.Instance, rec.Plugin.InstanceCount)
+				_ = l.rt.RemoveContainer(ctx, orphan, true)
+				continue
+			}
+			_ = l.rt.StopContainer(ctx, inst.ContainerID, DefaultStopTimeoutSeconds)
+			if err := l.removeContainerWithCleanup(ctx, inst.ContainerID, true); err != nil {
+				return fmt.Errorf("remove %s/%d container: %w", sr.Service, inst.Instance, err)
+			}
+			_ = l.store.SetInstanceContainerID(name, sr.Service, inst.Instance, "")
 		}
-		_ = l.rt.StopContainer(ctx, inst.ContainerID, DefaultStopTimeoutSeconds)
-		if err := l.removeContainerWithCleanup(ctx, inst.ContainerID, true); err != nil {
-			return fmt.Errorf("remove instance %d container: %w", inst.Instance, err)
-		}
-		_ = l.store.SetInstanceContainerID(name, inst.Instance, "")
 	}
 
-	// Drop image. For lxc-distro plugins, drop both the committed
-	// template AND don't bother with the upstream distro template
-	// — that's shared across plugins, eviction is not our call.
-	manifest, err := ParseManifest([]byte(rec.Plugin.ManifestYAML))
-	if err == nil {
-		switch manifest.Artifact.Type {
+	// Drop per-service images: OCI refs and committed lxc-distro templates.
+	for _, sr := range rec.Services {
+		switch sr.ArtifactType {
 		case ArtifactOCIImage:
-			if rec.Plugin.ImageRef != "" {
-				_ = l.rt.RemoveImage(ctx, rec.Plugin.ImageRef)
+			if sr.ImageRef != "" {
+				_ = l.rt.RemoveImage(ctx, sr.ImageRef)
 			}
 		case ArtifactLXCDistro:
-			tmpl := SetupTemplateImage(rec.Plugin.Name, rec.Plugin.Version)
-			_ = l.rt.RemoveImage(ctx, tmpl)
+			_ = l.rt.RemoveImage(ctx, SetupTemplateImage(rec.Plugin.Name, sr.Service, rec.Plugin.Version))
 		}
 	}
 	return nil
 }
 
-// Status returns the aggregate plugin state plus per-instance state
-// for the named plugin. Reads the DB; the event subscriber keeps the
-// DB in sync with the runtime, so this is fast and consistent.
+// Status returns the aggregate plugin state plus per-(service,instance)
+// state for the named plugin.
 func (l *Lifecycle) Status(ctx context.Context, name string) (*PluginRecord, error) {
 	return l.store.Get(name)
 }
 
-// ApplyRouteFor re-renders and applies the nginx route for one
-// plugin. Used by the token-rotation flow (phase 07) so a freshly-
-// issued bearer token takes effect without a full restart. No-op
-// when no Proxy is wired.
+// ApplyRouteFor re-renders and applies the nginx route for one plugin.
+// No-op when no Proxy is wired.
 func (l *Lifecycle) ApplyRouteFor(ctx context.Context, name string) error {
 	if l.proxy == nil {
 		return nil
@@ -810,20 +974,15 @@ func (l *Lifecycle) ApplyRouteFor(ctx context.Context, name string) error {
 	return l.proxy.Apply(ctx, route)
 }
 
-// StreamContainerLogs opens a follow-mode logs stream from the
-// runtime daemon for the given container. The api layer wraps the
-// returned reader as Server-Sent Events for the UI's logs view.
-// Caller is responsible for closing the returned reader.
+// StreamContainerLogs opens a follow-mode logs stream from the runtime
+// daemon for the given container.
 func (l *Lifecycle) StreamContainerLogs(ctx context.Context, containerID string) (io.ReadCloser, error) {
 	return l.rt.StreamLogs(ctx, containerID, runtime.LogsOptions{
 		Follow: true, Stdout: true, Stderr: true, Tail: "200",
 	})
 }
 
-// setInstanceState is a thin wrapper that swallows DB errors after
-// logging — lifecycle code already returns on the underlying
-// runtime error; failing to update the DB on top of that is worth
-// noting but not worth replacing the more useful error.
-func (l *Lifecycle) setInstanceState(name string, instance int, state, lastError string) error {
-	return l.store.SetInstanceState(name, instance, state, lastError)
+// setInstanceState updates one (service,instance) unit's state.
+func (l *Lifecycle) setInstanceState(name, service string, instance int, state, lastError string) error {
+	return l.store.SetInstanceState(name, service, instance, state, lastError)
 }

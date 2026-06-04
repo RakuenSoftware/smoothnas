@@ -1,0 +1,67 @@
+# aimee-server — the agent/memory broker.
+#
+# Fronts the /v1 HTTP API and owns DB1 (a self-contained, user-scoped SQLite
+# store). Runs fully standalone: only the DB1-backed endpoints are active. A
+# single-service plugin — point AIMEE_KB_API_URL at a running aimee-kb plugin to
+# additionally enable the shared/vector (DB2 + pgvector) features.
+#
+# Image: ghcr.io/rakuensoftware/aimee-server  (Dockerfile.server upstream)
+apiVersion: smoothnas.io/v1
+kind: Plugin
+metadata:
+  name: aimee-server
+  version: 0.1.0
+  description: >-
+    aimee agent/memory broker — serves the /v1 HTTP API backed by a
+    self-contained SQLite store (DB1). Runs standalone; optionally federates to
+    an aimee-kb plugin for shared/vector memory.
+  vendor: RakuenSoftware
+  homepage: https://github.com/RakuenSoftware/aimee
+services:
+  - name: aimee-server
+    artifact:
+      type: oci-image
+      # Pin to a release tag (e.g. :0.2.1) or a sha256 digest for reproducible
+      # installs. :latest tracks the newest published multi-arch manifest.
+      image: ghcr.io/rakuensoftware/aimee-server:latest
+    container:
+      # The image entrypoint binds /v1 (port + bearer from the baked aimee.yaml)
+      # and honours AIMEE_SERVER_HTTP_BIND=1 (set in the image) so the listener
+      # reaches 0.0.0.0. No command override needed.
+      restartPolicy: unless-stopped
+    volumes:
+      # DB1 (aimee.db) and server state live under AIMEE_HOME.
+      - name: home
+        mode: flat
+        bind: /var/lib/aimee
+      # Mirror tier (AIMEE_WORKSPACES_DIR): per-workspace bare mirrors +
+      # reconstructed worktrees. Large, durable, separate backup lifecycle.
+      - name: workspaces
+        mode: flat
+        bind: /var/lib/aimee-workspaces
+    ports:
+      # Authenticated JSON API (bearer required on every request) — published on
+      # the SmoothNAS host so aimee thin-clients on the network can reach it
+      # directly, matching the upstream compose `8740:8740`.
+      - name: api
+        port: 8740
+        protocol: tcp
+        expose: false
+        hostExpose: true
+    config:
+      # Optional federation to a shared-memory backend. Leave blank to run
+      # standalone (DB1 only). The base URL must NOT include the /v1 suffix.
+      - key: AIMEE_KB_API_URL
+        type: string
+        label: aimee-kb API URL
+        default: ""
+        description: >-
+          Optional. URL of a running aimee-kb /v1 endpoint (e.g.
+          http://10.0.0.5:8741) to enable shared/vector memory features. Blank =
+          standalone (SQLite-only).
+      - key: AIMEE_KB_API_BEARER_TOKEN
+        type: string
+        label: aimee-kb bearer token
+        default: ""
+        secret: true
+        description: Optional bearer token presented to the configured aimee-kb endpoint.

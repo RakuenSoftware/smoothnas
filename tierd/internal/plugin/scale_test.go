@@ -209,7 +209,7 @@ func TestScale_Up_RunningPlugin_StartsNewInstances(t *testing.T) {
 		t.Fatalf("materialise: %v", err)
 	}
 	for i := 1; i <= 2; i++ {
-		if err := store.SetInstanceState("gh-runner", i, StateRunning, ""); err != nil {
+		if err := store.SetInstanceState("gh-runner", "gh-runner", i, StateRunning, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -328,8 +328,8 @@ func TestStore_AddRemoveInstanceRows_RoundTrip(t *testing.T) {
 	}
 
 	// Add instances 3 + 4 with a per-volume host path each.
-	if err := store.AddInstanceRows("gh-runner", 4, []int{3, 4}, map[string]map[int]string{
-		"workspace": {3: "/x/instance-3/workspace", 4: "/x/instance-4/workspace"},
+	if err := store.AddInstanceRows("gh-runner", 4, []int{3, 4}, map[string]map[string]map[int]string{
+		"gh-runner": {"workspace": {3: "/x/instance-3/workspace", 4: "/x/instance-4/workspace"}},
 	}); err != nil {
 		t.Fatalf("add: %v", err)
 	}

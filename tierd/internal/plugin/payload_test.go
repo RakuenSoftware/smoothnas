@@ -20,9 +20,20 @@ func TestContainerName(t *testing.T) {
 		{"x", 7, 7, "x-7"},
 	}
 	for _, tc := range cases {
-		if got := ContainerName(tc.plugin, tc.inst, tc.count); got != tc.want {
+		// Single-service plugins use the plugin name as the service name.
+		if got := ContainerName(tc.plugin, tc.plugin, tc.inst, tc.count); got != tc.want {
 			t.Errorf("ContainerName(%q,%d,%d) = %q want %q", tc.plugin, tc.inst, tc.count, got, tc.want)
 		}
+	}
+}
+
+func TestContainerName_MultiService(t *testing.T) {
+	// An extra service suffixes the service name onto the plugin base.
+	if got := ContainerName("aimee-kb", "postgres", 1, 1); got != "aimee-kb-postgres" {
+		t.Errorf("ContainerName multi-service = %q want aimee-kb-postgres", got)
+	}
+	if got := ContainerName("aimee-kb", "postgres", 2, 3); got != "aimee-kb-postgres-2" {
+		t.Errorf("ContainerName multi-service+replica = %q want aimee-kb-postgres-2", got)
 	}
 }
 
@@ -53,8 +64,11 @@ func TestSetupHash_DifferentInputsDifferentHashes(t *testing.T) {
 }
 
 func TestSetupTemplateImage(t *testing.T) {
-	if got := SetupTemplateImage("py-app", "0.1.0"); got != "smoothnas-plugin-py-app:0.1.0" {
-		t.Errorf("SetupTemplateImage = %q", got)
+	if got := SetupTemplateImage("py-app", "py-app", "0.1.0"); got != "smoothnas-plugin-py-app:0.1.0" {
+		t.Errorf("SetupTemplateImage single-service = %q", got)
+	}
+	if got := SetupTemplateImage("stack", "builder", "0.1.0"); got != "smoothnas-plugin-stack-builder:0.1.0" {
+		t.Errorf("SetupTemplateImage multi-service = %q", got)
 	}
 }
 
@@ -63,18 +77,20 @@ func TestSetupTemplateImage(t *testing.T) {
 func fakePayloadInputs(t *testing.T, fixture string) PayloadInputs {
 	t.Helper()
 	m := mustParse(t, fixture)
+	svc := &m.Services[0]
 
 	plugin := PluginRow{
 		Name:          m.Metadata.Name,
 		Version:       m.Metadata.Version,
-		ArtifactType:  m.Artifact.Type,
+		ArtifactType:  svc.Artifact.Type,
 		InstanceCount: m.EffectiveCount(),
 	}
 
-	volumes := make([]VolumeRow, 0, len(m.Volumes))
-	for _, v := range m.Volumes {
+	volumes := make([]VolumeRow, 0, len(svc.Volumes))
+	for _, v := range svc.Volumes {
 		row := VolumeRow{
 			PluginName:  m.Metadata.Name,
+			Service:     svc.Name,
 			Name:        v.Name,
 			Mode:        v.Mode,
 			Slot:        v.Slot,
@@ -93,10 +109,11 @@ func fakePayloadInputs(t *testing.T, fixture string) PayloadInputs {
 		volumes = append(volumes, row)
 	}
 
-	config := make([]ConfigRow, 0, len(m.Config))
-	for _, c := range m.Config {
+	config := make([]ConfigRow, 0, len(svc.Config))
+	for _, c := range svc.Config {
 		config = append(config, ConfigRow{
 			PluginName: m.Metadata.Name,
+			Service:    svc.Name,
 			Key:        c.Key,
 			Value:      c.Default,
 		})
@@ -104,7 +121,7 @@ func fakePayloadInputs(t *testing.T, fixture string) PayloadInputs {
 
 	return PayloadInputs{
 		Plugin:   &plugin,
-		Manifest: m,
+		Service:  svc,
 		Instance: 1,
 		ImageRef: "ghcr.io/example/foo@sha256:" + strings.Repeat("a", 64),
 		Volumes:  volumes,
@@ -164,7 +181,7 @@ func TestBuildCreatePayload_LlamaSingleInstance(t *testing.T) {
 
 func TestBuildCreatePayload_HostExposePorts(t *testing.T) {
 	in := fakePayloadInputs(t, "llama.yaml")
-	in.Manifest.Ports = []Port{
+	in.Service.Ports = []Port{
 		{Name: "http", Port: 8080, Protocol: "tcp", Expose: true},
 		{Name: "wolf-control", Port: 47989, Protocol: "tcp", HostExpose: true},
 		{Name: "wolf-stream", Port: 47998, Protocol: "udp", HostExpose: true},
@@ -193,7 +210,7 @@ func TestBuildCreatePayload_HostExposePorts(t *testing.T) {
 
 func TestBuildCreatePayload_SelectedNVIDIAGPURewritesProfileDevice(t *testing.T) {
 	in := fakePayloadInputs(t, "llama.yaml")
-	in.Manifest.Config = append(in.Manifest.Config, ConfigField{
+	in.Service.Config = append(in.Service.Config, ConfigField{
 		Key:       "SMOOTHNAS_GPU",
 		Type:      ConfigTypeGPU,
 		GPUVendor: GPUVendorNVIDIA,
@@ -227,7 +244,7 @@ func TestBuildCreatePayload_SelectedNVIDIAGPURewritesProfileDevice(t *testing.T)
 
 func TestBuildCreatePayload_SelectedDRIGPURewritesProfileDevice(t *testing.T) {
 	in := fakePayloadInputs(t, "llama.yaml")
-	in.Manifest.Config = append(in.Manifest.Config, ConfigField{
+	in.Service.Config = append(in.Service.Config, ConfigField{
 		Key:       "SMOOTHNAS_GPU",
 		Type:      ConfigTypeGPU,
 		GPUVendor: GPUVendorAMD,
@@ -257,7 +274,7 @@ func TestBuildCreatePayload_SelectedDRIGPURewritesProfileDevice(t *testing.T) {
 
 func TestBuildCreatePayload_RejectsInvalidSelectedGPU(t *testing.T) {
 	in := fakePayloadInputs(t, "llama.yaml")
-	in.Manifest.Config = append(in.Manifest.Config, ConfigField{
+	in.Service.Config = append(in.Service.Config, ConfigField{
 		Key:       "SMOOTHNAS_GPU",
 		Type:      ConfigTypeGPU,
 		GPUVendor: GPUVendorNVIDIA,
@@ -271,7 +288,7 @@ func TestBuildCreatePayload_RejectsInvalidSelectedGPU(t *testing.T) {
 
 func TestBuildCreatePayload_ExpandsCommandConfigValues(t *testing.T) {
 	in := fakePayloadInputs(t, "llama.yaml")
-	in.Manifest.Container.Command = []string{"--model", "${MODEL_PATH}", "--ctx-size", "$CTX_SIZE", "--keep", "${UNKNOWN}"}
+	in.Service.Container.Command = []string{"--model", "${MODEL_PATH}", "--ctx-size", "$CTX_SIZE", "--keep", "${UNKNOWN}"}
 	in.Config = append(in.Config, ConfigRow{PluginName: "llama-cpp", Key: "CTX_SIZE", Value: "131072"})
 
 	got, err := BuildCreatePayload(in)
@@ -286,7 +303,7 @@ func TestBuildCreatePayload_ExpandsCommandConfigValues(t *testing.T) {
 
 func TestBuildCreatePayload_AppliesConfigurableMemoryLimit(t *testing.T) {
 	in := fakePayloadInputs(t, "llama.yaml")
-	in.Manifest.Container.Resources.Memory = "${MEMORY_LIMIT}"
+	in.Service.Container.Resources.Memory = "${MEMORY_LIMIT}"
 	in.Config = append(in.Config, ConfigRow{PluginName: "llama-cpp", Key: "MEMORY_LIMIT", Value: "64GiB"})
 
 	got, err := BuildCreatePayload(in)
@@ -300,7 +317,7 @@ func TestBuildCreatePayload_AppliesConfigurableMemoryLimit(t *testing.T) {
 
 func TestBuildCreatePayload_AppliesConfigurableCPULimit(t *testing.T) {
 	in := fakePayloadInputs(t, "llama.yaml")
-	in.Manifest.Container.Resources.CPU = "${CPU_LIMIT}"
+	in.Service.Container.Resources.CPU = "${CPU_LIMIT}"
 	in.Config = append(in.Config, ConfigRow{PluginName: "llama-cpp", Key: "CPU_LIMIT", Value: "1.5"})
 
 	got, err := BuildCreatePayload(in)
@@ -314,7 +331,7 @@ func TestBuildCreatePayload_AppliesConfigurableCPULimit(t *testing.T) {
 
 func TestBuildCreatePayload_ManifestMemoryOverridesProfileMemory(t *testing.T) {
 	in := fakePayloadInputs(t, "llama.yaml")
-	in.Manifest.Container.Resources.Memory = "64GiB"
+	in.Service.Container.Resources.Memory = "64GiB"
 	in.Profiles = &Resolved{Memory: 32 << 30, Env: map[string]string{}}
 
 	got, err := BuildCreatePayload(in)
@@ -328,7 +345,7 @@ func TestBuildCreatePayload_ManifestMemoryOverridesProfileMemory(t *testing.T) {
 
 func TestBuildCreatePayload_InvalidMemoryLimitFails(t *testing.T) {
 	in := fakePayloadInputs(t, "llama.yaml")
-	in.Manifest.Container.Resources.Memory = "64XB"
+	in.Service.Container.Resources.Memory = "64XB"
 
 	_, err := BuildCreatePayload(in)
 	if err == nil || !strings.Contains(err.Error(), "container.resources.memory") {
@@ -338,7 +355,7 @@ func TestBuildCreatePayload_InvalidMemoryLimitFails(t *testing.T) {
 
 func TestBuildCreatePayload_InvalidCPULimitFails(t *testing.T) {
 	in := fakePayloadInputs(t, "llama.yaml")
-	in.Manifest.Container.Resources.CPU = "fast"
+	in.Service.Container.Resources.CPU = "fast"
 
 	_, err := BuildCreatePayload(in)
 	if err == nil || !strings.Contains(err.Error(), "container.resources.cpu") {
