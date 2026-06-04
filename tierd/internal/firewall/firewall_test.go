@@ -142,6 +142,9 @@ func TestGenerateRulesetStructure(t *testing.T) {
 	if !strings.Contains(ruleset, `ct state established,related oifname "veth0" accept`) {
 		t.Error("missing plugin bridge return-traffic rule")
 	}
+	if !strings.Contains(ruleset, `ct status dnat oifname "veth0" accept`) {
+		t.Error("missing inbound rule for DNAT'd hostExpose plugin ports")
+	}
 	if !strings.Contains(ruleset, "iif lo accept") {
 		t.Error("missing loopback rule")
 	}
