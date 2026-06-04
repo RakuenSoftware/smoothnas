@@ -183,7 +183,10 @@ resolve_appliance_artifacts() {
     done
 
     prepare_smoothfs_source
-    SMOOTHFS_VERSION=$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)"$/\1/p' "${SMOOTHFS_SOURCE_DIR}/dkms.conf" | head -1)
+    # Tolerate a trailing comment after the value (release-please annotates the
+    # line as: PACKAGE_VERSION="X.Y.Z" # x-release-please-version), so match the
+    # quoted value and ignore anything after the closing quote.
+    SMOOTHFS_VERSION=$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)".*/\1/p' "${SMOOTHFS_SOURCE_DIR}/dkms.conf" | head -1)
     if [ -z "$SMOOTHFS_VERSION" ]; then
         echo "ERROR: Unable to determine smoothfs PACKAGE_VERSION from ${SMOOTHFS_SOURCE_DIR}/dkms.conf."
         exit 1
