@@ -114,9 +114,15 @@ func TestGenerateRulesetAllProtocols(t *testing.T) {
 func TestGenerateRulesetStructure(t *testing.T) {
 	ruleset := GenerateRuleset(map[string]bool{})
 
-	// Should have proper nftables structure.
-	if !strings.Contains(ruleset, "flush ruleset") {
-		t.Error("missing flush ruleset")
+	// Should have proper nftables structure. tierd must scope its apply
+	// to its own table (not `flush ruleset`) so the plugin runtime's
+	// nat/filter tables — including the veth_nat DNAT rules that publish
+	// hostExpose ports — survive a firewall re-apply.
+	if strings.Contains(ruleset, "flush ruleset") {
+		t.Error("must not flush the whole ruleset; that wipes the runtime's DNAT table")
+	}
+	if !strings.Contains(ruleset, "delete table inet filter") {
+		t.Error("missing scoped replace of table inet filter")
 	}
 	if !strings.Contains(ruleset, "table inet filter") {
 		t.Error("missing table inet filter")
