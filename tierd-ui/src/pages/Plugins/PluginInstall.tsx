@@ -564,6 +564,12 @@ function buildCatalogEntries(repo: CatalogRepository, release: {
 
 function displayPluginName(name: string): string {
   switch (name) {
+    case 'aimee-server':
+      return 'aimee server';
+    case 'aimee-kb':
+      return 'aimee knowledge base';
+    case 'aimee-combined':
+      return 'aimee server + kb';
     case 'gh-runner':
       return 'GitHub Actions runner';
     case 'llama-cpp':

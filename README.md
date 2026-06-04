@@ -238,3 +238,18 @@ make build
 ## Project Pitch, In One Sentence
 
 SmoothNAS is for operators who want a storage appliance that feels polished from the browser and honest from the shell.
+
+## License
+
+SmoothNAS is **dual-licensed**:
+
+- **Open source:** the [GNU Affero General Public License, version 3 or
+  later](LICENSE) (`AGPL-3.0-or-later`). Because SmoothNAS is operated over
+  a network, AGPL §13 applies — if you run a modified version and expose it
+  to users over a network, you must offer them the corresponding source.
+- **Alternative commercial license:** available for closed-source,
+  embedded, or hosted use that the AGPL does not fit. Terms can be
+  discussed — contact **jbailes@gmail.com**.
+
+See [LICENSING.md](LICENSING.md) for the full dual-licensing terms and
+[NOTICE](NOTICE) for required third-party software copyright notices.
