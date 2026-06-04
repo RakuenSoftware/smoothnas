@@ -105,6 +105,12 @@ func GenerateRuleset(enabledProtocols map[string]bool) string {
 	b.WriteString("        # Allow plugin bridge egress and return traffic.\n")
 	b.WriteString("        iifname \"veth0\" accept\n")
 	b.WriteString("        ct state established,related oifname \"veth0\" accept\n")
+	b.WriteString("        # Allow inbound to published plugin ports. The runtime\n")
+	b.WriteString("        # DNATs each hostExpose port onto the plugin container, so\n")
+	b.WriteString("        # accepting DNAT'd connections forwarded onto the bridge\n")
+	b.WriteString("        # exposes exactly those ports (e.g. Wolf's Moonlight ports\n")
+	b.WriteString("        # and the Wolf Den UI) without a per-port rule.\n")
+	b.WriteString("        ct status dnat oifname \"veth0\" accept\n")
 	b.WriteString("    }\n\n")
 
 	// Output chain (allow all).
