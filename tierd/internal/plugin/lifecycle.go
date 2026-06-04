@@ -196,6 +196,20 @@ func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 		containerName := ContainerName(name, inst.Instance, count)
 		_ = l.setInstanceState(name, inst.Instance, StateCreating, "")
 		resp, err := l.rt.CreateContainer(ctx, containerName, payload)
+		if err != nil && runtime.IsConflict(err) {
+			// A create that was canceled mid-flight (e.g. a slow first
+			// image pull whose context deadline expired) can leave a
+			// container under this name that we never recorded an ID for.
+			// The stale-container branch above keys off inst.ContainerID,
+			// so it never runs for such an orphan and every retry 409s —
+			// wedging the plugin until the container is removed by hand.
+			// Force-remove the name-conflicting container and retry once.
+			if rmErr := l.rt.RemoveContainer(ctx, containerName, true); rmErr != nil {
+				_ = l.setInstanceState(name, inst.Instance, StateFailed, err.Error())
+				return fmt.Errorf("remove name-conflicting container %q for instance %d: %w", containerName, inst.Instance, rmErr)
+			}
+			resp, err = l.rt.CreateContainer(ctx, containerName, payload)
+		}
 		if err != nil {
 			_ = l.setInstanceState(name, inst.Instance, StateFailed, err.Error())
 			return fmt.Errorf("create container for instance %d: %w", inst.Instance, err)
@@ -737,6 +751,12 @@ func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 
 	for _, inst := range rec.Instances {
 		if inst.ContainerID == "" {
+			// No recorded ID, but a create canceled mid-flight may have
+			// left an orphan under the deterministic name. Best-effort
+			// remove it by name so uninstall/reinstall isn't wedged by a
+			// later name conflict. RemoveContainer is idempotent on 404.
+			orphan := ContainerName(rec.Plugin.Name, inst.Instance, rec.Plugin.InstanceCount)
+			_ = l.rt.RemoveContainer(ctx, orphan, true)
 			continue
 		}
 		_ = l.rt.StopContainer(ctx, inst.ContainerID, DefaultStopTimeoutSeconds)
