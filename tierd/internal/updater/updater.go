@@ -1108,12 +1108,35 @@ func parseDKMSVersion(dkmsConf string) (string, error) {
 		if len(parts) != 2 {
 			continue
 		}
-		ver := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+		ver := dkmsConfValue(parts[1])
 		if ver != "" {
 			return ver, nil
 		}
 	}
 	return "", fmt.Errorf("PACKAGE_VERSION not found in dkms.conf")
+}
+
+// dkmsConfValue extracts the assigned value from the right-hand side of a
+// dkms.conf assignment. smoothfs annotates its version for release-please as
+//
+//	PACKAGE_VERSION="0.2.0" # x-release-please-version
+//
+// so the value is quoted and followed by an inline comment. A naive
+// quote-trim leaves "0.2.0\" # x-release-please-version", which DKMS then
+// treats as a (broken) version string. Return the contents of the first
+// quoted span and ignore anything after it; fall back to stripping an inline
+// comment for bare values.
+func dkmsConfValue(rhs string) string {
+	rhs = strings.TrimSpace(rhs)
+	if len(rhs) > 0 && (rhs[0] == '"' || rhs[0] == '\'') {
+		if end := strings.IndexByte(rhs[1:], rhs[0]); end >= 0 {
+			return rhs[1 : 1+end]
+		}
+	}
+	if i := strings.IndexByte(rhs, '#'); i >= 0 {
+		rhs = rhs[:i]
+	}
+	return strings.Trim(strings.TrimSpace(rhs), `"'`)
 }
 
 // readSmoothfsVersionFromTar opens a smoothfs-src.tar.gz and extracts the

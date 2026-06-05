@@ -130,7 +130,11 @@ jobs:
         id: smoothfs_ref
         run: |
           set -euo pipefail
-          REF="$(grep '^SMOOTHFS_REPO_REF=' iso/build-iso.sh | grep -oE '[0-9a-f]{40}' | head -n1)"
+          # Extract the pinned default from `SMOOTHFS_REPO_REF="${SMOOTHFS_REPO_REF:-<ref>}"`.
+          # <ref> may be a release tag (e.g. v0.2.1) or a 40-char commit SHA;
+          # build-iso.sh checks out either, and this value is propagated verbatim
+          # as the manifest smoothfs_ref.
+          REF="$(grep -oE 'SMOOTHFS_REPO_REF:-[^}]+' iso/build-iso.sh | head -n1 | sed 's/.*:-//')"
           [ -n "$REF" ] || { echo "Could not extract SMOOTHFS_REPO_REF from iso/build-iso.sh" >&2; exit 1; }
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
           echo "Pinned to smoothfs ref: $REF"
