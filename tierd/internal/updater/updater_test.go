@@ -1360,6 +1360,25 @@ func TestParseDKMSVersion(t *testing.T) {
 	}
 }
 
+func TestSmoothfsVersionMalformed(t *testing.T) {
+	cases := map[string]bool{
+		"0.2.1":                              false,
+		"0.1.0":                              false,
+		"0.2.0":                              false,
+		"kernel-6.19.12-smoothkernel-x86_64": false,
+		"":                                   false,
+		`0.2.1" # x-release-please-version`:  true,
+		`0.2.0" # x-release-please-version`:  true,
+		"0.2.1 ":                             true,
+		"0.2.1#c":                            true,
+	}
+	for name, want := range cases {
+		if got := smoothfsVersionMalformed(name); got != want {
+			t.Errorf("smoothfsVersionMalformed(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
 func TestReadSmoothfsVersionFromTar(t *testing.T) {
 	// Build a minimal tar.gz with a dkms.conf at the root.
 	dir := t.TempDir()
