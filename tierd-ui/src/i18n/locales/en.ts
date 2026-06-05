@@ -1302,6 +1302,7 @@ const en: LanguageTranslations = {
   'plugins.install.preview.config': 'Config keys',
   'plugins.install.preview.instances': 'Instances',
   'plugins.install.preview.empty': '—',
+  'plugins.install.preview.service': 'Service: {{name}}',
   'plugins.install.tiers.heading': 'Choose tier instances',
   'plugins.install.tiers.description': 'Each tier-bound volume needs a tier to live on. Tier-bound preflight runs against your choices and blocks install on any error.',
   'plugins.install.tiers.noTierBound': 'This plugin has no tier-bound volumes — nothing to choose here.',
