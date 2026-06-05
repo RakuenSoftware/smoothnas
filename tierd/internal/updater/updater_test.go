@@ -1332,6 +1332,13 @@ func TestParseDKMSVersion(t *testing.T) {
 		{`PACKAGE_NAME=smoothfs` + "\n" + `PACKAGE_VERSION=1.2.3` + "\n", "1.2.3", false},
 		{`PACKAGE_VERSION="2.0.0"`, "2.0.0", false},
 		{`PACKAGE_VERSION='3.1.4'`, "3.1.4", false},
+		// Real smoothfs format: quoted value with a release-please inline
+		// comment. Regression for the bug where the comment leaked into the
+		// version and produced a broken DKMS entry.
+		{`PACKAGE_VERSION="0.2.1" # x-release-please-version`, "0.2.1", false},
+		{`PACKAGE_NAME="smoothfs"` + "\n" + `PACKAGE_VERSION="0.2.1" # x-release-please-version` + "\n", "0.2.1", false},
+		{`PACKAGE_VERSION=0.2.1 # bare with comment`, "0.2.1", false},
+		{`PACKAGE_VERSION = "1.0.0"`, "1.0.0", false},
 		{`# comment` + "\n" + `PACKAGE_NAME=smoothfs`, "", true},
 		{``, "", true},
 	}
