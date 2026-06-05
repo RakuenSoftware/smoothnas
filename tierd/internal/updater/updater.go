@@ -1240,6 +1240,38 @@ func extractTarGzTo(tarPath, destDir string) error {
 //
 // Failures are propagated to the caller; callers should log and treat them
 // as non-fatal so the rest of the update (tierd binary + UI) still applies.
+// smoothfsVersionMalformed reports whether a DKMS version directory name is
+// not a usable version — i.e. it contains characters (quotes, whitespace, or
+// '#') that the pre-fix parseDKMSVersion bug leaked from the release-please
+// annotation `PACKAGE_VERSION="0.2.1" # x-release-please-version`. Clean
+// versions like "0.2.1" and the "kernel-*" install symlink are left alone.
+func smoothfsVersionMalformed(name string) bool {
+	if name == "" || strings.HasPrefix(name, "kernel-") {
+		return false
+	}
+	return strings.ContainsAny(name, "\"' #\t")
+}
+
+// cleanupMalformedSmoothfsDKMS removes smoothfs DKMS trees and their /usr/src
+// source directories whose version component is malformed (see
+// smoothfsVersionMalformed). No-op when none are present.
+func cleanupMalformedSmoothfsDKMS() {
+	const dkmsRoot = "/var/lib/dkms/smoothfs"
+	entries, err := os.ReadDir(dkmsRoot)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !smoothfsVersionMalformed(name) {
+			continue
+		}
+		log.Printf("updater: smoothfs: removing malformed DKMS entry %q", name)
+		os.RemoveAll(filepath.Join(dkmsRoot, name))
+		os.RemoveAll("/usr/src/smoothfs-" + name)
+	}
+}
+
 func ensureSmoothfsModule(srcTarPath, ref string) error {
 	if ref == "" {
 		return nil
@@ -1254,6 +1286,12 @@ func ensureSmoothfsModule(srcTarPath, ref string) error {
 	if err != nil {
 		return fmt.Errorf("read smoothfs version: %w", err)
 	}
+
+	// Remove any malformed DKMS trees left by the pre-fix parseDKMSVersion
+	// bug, which used a version like `0.2.1" # x-release-please-version`. The
+	// embedded quote made `make M=/var/lib/dkms/smoothfs/<ver>/build` a shell
+	// syntax error, so those builds always failed and the dirs accumulated.
+	cleanupMalformedSmoothfsDKMS()
 
 	kernelOut, err := exec.Command("uname", "-r").Output()
 	if err != nil {
