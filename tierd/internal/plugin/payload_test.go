@@ -243,6 +243,12 @@ func TestBuildCreatePayload_SelectedNVIDIAGPURewritesProfileDevice(t *testing.T)
 }
 
 func TestBuildCreatePayload_SelectedDRIGPURewritesProfileDevice(t *testing.T) {
+	// Isolate the render-node rewrite from live sysfs: primary-card-node
+	// resolution is covered separately by the test below.
+	orig := primaryCardNode
+	primaryCardNode = func(string) string { return "" }
+	t.Cleanup(func() { primaryCardNode = orig })
+
 	in := fakePayloadInputs(t, "llama.yaml")
 	in.Service.Config = append(in.Service.Config, ConfigField{
 		Key:       "SMOOTHNAS_GPU",
@@ -269,6 +275,63 @@ func TestBuildCreatePayload_SelectedDRIGPURewritesProfileDevice(t *testing.T) {
 	}
 	if got.Labels["io.smoothnas.lxc.raw.1"] != "lxc.mount.entry = /dev/dri/renderD129 dev/dri/renderD129 none bind,optional,create=file 0 0" {
 		t.Fatalf("raw DRI mount = %q", got.Labels["io.smoothnas.lxc.raw.1"])
+	}
+}
+
+func TestBuildCreatePayload_SelectedDRIGPUAlsoExposesPrimaryCardNode(t *testing.T) {
+	orig := primaryCardNode
+	primaryCardNode = func(render string) string {
+		if render == "/dev/dri/renderD129" {
+			return "/dev/dri/card1"
+		}
+		return ""
+	}
+	t.Cleanup(func() { primaryCardNode = orig })
+
+	in := fakePayloadInputs(t, "llama.yaml")
+	in.Service.Config = append(in.Service.Config, ConfigField{
+		Key:       "SMOOTHNAS_GPU",
+		Type:      ConfigTypeGPU,
+		GPUVendor: GPUVendorAMD,
+	})
+	in.Config = append(in.Config, ConfigRow{Key: "SMOOTHNAS_GPU", Value: "/dev/dri/renderD129"})
+	in.Profiles = &Resolved{
+		Devices: []ProfileDevice{
+			{Path: "/dev/dri", CgroupPermissions: "rwm"},
+		},
+		LXCRaw: []string{
+			"lxc.cgroup2.devices.allow = c 226:* rwm",
+			"lxc.mount.entry = /dev/dri dev/dri none bind,optional,create=dir 0 0",
+		},
+	}
+
+	got, err := BuildCreatePayload(in)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	// Both the selected render node and its primary card node must be
+	// passed through as devices — Wolf needs the primary node to drive
+	// the GPU in app containers.
+	devicePaths := map[string]bool{}
+	for _, d := range got.HostConfig.Devices {
+		devicePaths[d.PathOnHost] = true
+	}
+	if !devicePaths["/dev/dri/renderD129"] || !devicePaths["/dev/dri/card1"] {
+		t.Fatalf("expected render + card node devices, got %+v", got.HostConfig.Devices)
+	}
+
+	// And the raw mount entries should carry both nodes.
+	var raws []string
+	for k, v := range got.Labels {
+		if strings.HasPrefix(k, "io.smoothnas.lxc.raw.") {
+			raws = append(raws, v)
+		}
+	}
+	joined := strings.Join(raws, "\n")
+	if !strings.Contains(joined, "lxc.mount.entry = /dev/dri/renderD129 dev/dri/renderD129") ||
+		!strings.Contains(joined, "lxc.mount.entry = /dev/dri/card1 dev/dri/card1") {
+		t.Fatalf("expected render + card node raw mounts, got:\n%s", joined)
 	}
 }
 

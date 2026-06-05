@@ -133,6 +133,20 @@ func drmCardNode(sysDevice string) string {
 	return filepath.Join("/dev/dri", filepath.Base(matches[0]))
 }
 
+// PrimaryCardNode returns the primary DRM node (/dev/dri/cardN) that shares a
+// physical GPU with the given render node (/dev/dri/renderDM), or "" if it
+// can't be resolved. Compositors such as games-on-whales Wolf enumerate a GPU
+// from its primary node; passing only the render node leaves them unable to
+// drive the device — Wolf logs "doesn't have a primary node" and exposes no
+// GPU to the app containers it launches.
+func PrimaryCardNode(renderNode string) string {
+	node := filepath.Base(renderNode)
+	if !strings.HasPrefix(node, "renderD") {
+		return ""
+	}
+	return drmCardNode(filepath.Join("/sys/class/drm", node, "device"))
+}
+
 func pciAddress(sysDevice string) string {
 	resolved, err := filepath.EvalSymlinks(sysDevice)
 	if err != nil {
