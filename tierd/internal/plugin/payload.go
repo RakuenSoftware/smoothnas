@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	gpupkg "github.com/JBailes/SmoothNAS/tierd/internal/gpu"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/runtime"
 )
 
@@ -233,17 +234,18 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 		// Devices: profile-contributed mappings.
 		seenDevices := map[string]bool{}
 		for _, d := range in.Profiles.Devices {
-			d = gpu.rewriteDevice(d)
-			deviceKey := d.Path + "\x00" + cgroupPerms(d.CgroupPermissions)
-			if seenDevices[deviceKey] {
-				continue
+			for _, rd := range gpu.rewriteDevices(d) {
+				deviceKey := rd.Path + "\x00" + cgroupPerms(rd.CgroupPermissions)
+				if seenDevices[deviceKey] {
+					continue
+				}
+				seenDevices[deviceKey] = true
+				host.Devices = append(host.Devices, runtime.DeviceMapping{
+					PathOnHost:        rd.Path,
+					PathInContainer:   rd.Path,
+					CgroupPermissions: cgroupPerms(rd.CgroupPermissions),
+				})
 			}
-			seenDevices[deviceKey] = true
-			host.Devices = append(host.Devices, runtime.DeviceMapping{
-				PathOnHost:        d.Path,
-				PathInContainer:   d.Path,
-				CgroupPermissions: cgroupPerms(d.CgroupPermissions),
-			})
 		}
 		host.CapAdd = append([]string(nil), in.Profiles.CapAdd...)
 		if in.Profiles.PidsLimit != 0 {
@@ -373,7 +375,18 @@ func cgroupPerms(p string) string {
 type gpuSelection struct {
 	Vendor string
 	Path   string
+	// CardPath is the primary DRM node (/dev/dri/cardN) sibling of an
+	// AMD/Intel render-node selection, or "" if there is none/unresolved.
+	// It is exposed alongside the render node because compositors (e.g.
+	// Wolf's gamescope/sway app containers) need the primary node to drive
+	// the GPU — the render node alone is not enough.
+	CardPath string
 }
+
+// primaryCardNode resolves a render node to its sibling primary DRM card
+// node. Overridable in tests. Returns "" when unresolvable (e.g. a build
+// host without that GPU), in which case only the render node is exposed.
+var primaryCardNode = gpupkg.PrimaryCardNode
 
 func selectedGPU(config []ConfigField, env map[string]string) (gpuSelection, error) {
 	for _, f := range config {
@@ -390,6 +403,9 @@ func selectedGPU(config []ConfigField, env map[string]string) (gpuSelection, err
 		}
 		if !gpu.valid() {
 			return gpuSelection{}, fmt.Errorf("config %s: invalid GPU device %q for vendor %q", f.Key, path, f.GPUVendor)
+		}
+		if gpu.Vendor == GPUVendorAMD || gpu.Vendor == GPUVendorIntel {
+			gpu.CardPath = primaryCardNode(gpu.Path)
 		}
 		return gpu, nil
 	}
@@ -420,9 +436,13 @@ func (g gpuSelection) valid() bool {
 	}
 }
 
-func (g gpuSelection) rewriteDevice(d ProfileDevice) ProfileDevice {
+// rewriteDevices maps a profile device against the GPU selection. It returns
+// a slice because narrowing the AMD/Intel /dev/dri tree down to the selected
+// render node must also re-add that GPU's primary card node — otherwise the
+// container loses the primary DRM node and GPU-driving compositors break.
+func (g gpuSelection) rewriteDevices(d ProfileDevice) []ProfileDevice {
 	if g.Path == "" {
-		return d
+		return []ProfileDevice{d}
 	}
 	switch g.Vendor {
 	case GPUVendorNVIDIA:
@@ -431,10 +451,14 @@ func (g gpuSelection) rewriteDevice(d ProfileDevice) ProfileDevice {
 		}
 	case GPUVendorAMD, GPUVendorIntel:
 		if d.Path == "/dev/dri" || isDRIRenderPath(d.Path) {
-			d.Path = g.Path
+			out := []ProfileDevice{{Path: g.Path, CgroupPermissions: d.CgroupPermissions}}
+			if g.CardPath != "" {
+				out = append(out, ProfileDevice{Path: g.CardPath, CgroupPermissions: d.CgroupPermissions})
+			}
+			return out
 		}
 	}
-	return d
+	return []ProfileDevice{d}
 }
 
 func (g gpuSelection) rewriteRawConfig(raw []string) []string {
@@ -444,33 +468,42 @@ func (g gpuSelection) rewriteRawConfig(raw []string) []string {
 	out := make([]string, 0, len(raw))
 	seen := map[string]bool{}
 	for _, line := range raw {
-		next := g.rewriteRawLine(line)
-		if seen[next] {
-			continue
+		for _, next := range g.rewriteRawLine(line) {
+			if seen[next] {
+				continue
+			}
+			seen[next] = true
+			out = append(out, next)
 		}
-		seen[next] = true
-		out = append(out, next)
 	}
 	return out
 }
 
-func (g gpuSelection) rewriteRawLine(line string) string {
+// rewriteRawLine rewrites a single lxc raw-config directive against the GPU
+// selection. A /dev/dri mount entry for an AMD/Intel selection expands to two
+// entries — the selected render node and its primary card node — so the
+// container keeps the primary DRM node.
+func (g gpuSelection) rewriteRawLine(line string) []string {
 	if g.Path == "" || !strings.HasPrefix(line, "lxc.mount.entry = ") {
-		return line
+		return []string{line}
 	}
 	switch g.Vendor {
 	case GPUVendorNVIDIA:
 		fields := strings.Fields(line)
 		if len(fields) >= 4 && isNVIDIAGPUPath(fields[2]) {
-			return lxcDeviceMountLine(g.Path)
+			return []string{lxcDeviceMountLine(g.Path)}
 		}
 	case GPUVendorAMD, GPUVendorIntel:
 		fields := strings.Fields(line)
 		if len(fields) >= 4 && (fields[2] == "/dev/dri" || isDRIRenderPath(fields[2])) {
-			return lxcDeviceMountLine(g.Path)
+			lines := []string{lxcDeviceMountLine(g.Path)}
+			if g.CardPath != "" {
+				lines = append(lines, lxcDeviceMountLine(g.CardPath))
+			}
+			return lines
 		}
 	}
-	return line
+	return []string{line}
 }
 
 func lxcDeviceMountLine(path string) string {
