@@ -832,3 +832,35 @@ func (f *fakeModelRuntime) EnsurePluginBridge(context.Context) (string, error) {
 func (f *fakeModelRuntime) InspectContainerBridgeIP(context.Context, string) (string, error) {
 	return "172.28.0.2", nil
 }
+
+// TestDetachRequest_SurvivesClientDisconnect guards the fix for long-running
+// lifecycle ops being cancelled when the HTTP client (or the nginx proxy in
+// front of tierd) disconnects: detachRequest must drop the request's
+// cancellation/deadline while preserving request-scoped values, so a
+// materialise/install/scale runs to completion instead of stranding the plugin
+// in a partial state.
+func TestDetachRequest_SurvivesClientDisconnect(t *testing.T) {
+	type ctxKey struct{}
+	parent, cancel := context.WithCancel(context.WithValue(context.Background(), ctxKey{}, "req-42"))
+	r := httptest.NewRequest(http.MethodPost, "/api/plugins/install", nil).WithContext(parent)
+
+	detached := detachRequest(r)
+
+	// Client/proxy gives up and disconnects.
+	cancel()
+
+	if err := detached.Err(); err != nil {
+		t.Fatalf("detached context cancelled by client disconnect: %v", err)
+	}
+	select {
+	case <-detached.Done():
+		t.Fatal("detached context Done() fired after client disconnect")
+	default:
+	}
+	if _, ok := detached.Deadline(); ok {
+		t.Fatal("detached context unexpectedly carries a deadline")
+	}
+	if got := detached.Value(ctxKey{}); got != "req-42" {
+		t.Fatalf("request-scoped value not preserved: got %v, want req-42", got)
+	}
+}

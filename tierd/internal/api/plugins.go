@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,20 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/gpu"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
 )
+
+// detachRequest returns a context derived from the request that is NOT
+// cancelled when the HTTP client goes away (a closed connection or, in front
+// of tierd, an nginx proxy_read_timeout). Long-running, mutating lifecycle
+// operations — install/update materialise+start, the lifecycle verbs, and
+// scale — must run to completion even when the caller has stopped waiting:
+// otherwise the disconnect cancels the operation mid-flight and leaves the
+// plugin in a partial/degraded state (e.g. images pulled but containers never
+// created, or some services up and others "created"). Request-scoped values
+// are preserved; only cancellation and any deadline are dropped. Read-only and
+// streaming handlers keep using r.Context() so they still abort on disconnect.
+func detachRequest(r *http.Request) context.Context {
+	return context.WithoutCancel(r.Context())
+}
 
 // PluginsHandler exposes the plugin subsystem over HTTP. Mirrors
 // the surface tierd-cli already has + the SSE log/event streams the
@@ -518,11 +533,12 @@ func (h *PluginsHandler) install(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.lifecycle != nil {
-		if err := h.lifecycle.Materialise(r.Context(), rec.Plugin.Name); err != nil {
+		opCtx := detachRequest(r)
+		if err := h.lifecycle.Materialise(opCtx, rec.Plugin.Name); err != nil {
 			jsonErrorCoded(w, fmt.Sprintf("autostart materialise: %v", err), http.StatusInternalServerError, "plugins.lifecycle_failed")
 			return
 		}
-		if err := h.lifecycle.Start(r.Context(), rec.Plugin.Name); err != nil {
+		if err := h.lifecycle.Start(opCtx, rec.Plugin.Name); err != nil {
 			jsonErrorCoded(w, fmt.Sprintf("autostart start: %v", err), http.StatusInternalServerError, "plugins.lifecycle_failed")
 			return
 		}
@@ -584,12 +600,13 @@ func (h *PluginsHandler) update(w http.ResponseWriter, r *http.Request, name str
 	}
 
 	if h.lifecycle != nil {
-		if err := h.lifecycle.Materialise(r.Context(), name); err != nil {
+		opCtx := detachRequest(r)
+		if err := h.lifecycle.Materialise(opCtx, name); err != nil {
 			jsonErrorCoded(w, fmt.Sprintf("update materialise: %v", err), http.StatusInternalServerError, "plugins.lifecycle_failed")
 			return
 		}
 		if wasRunning {
-			if err := h.lifecycle.Start(r.Context(), name); err != nil {
+			if err := h.lifecycle.Start(opCtx, name); err != nil {
 				jsonErrorCoded(w, fmt.Sprintf("update start: %v", err), http.StatusInternalServerError, "plugins.lifecycle_failed")
 				return
 			}
@@ -609,7 +626,9 @@ func (h *PluginsHandler) lifecycleVerb(w http.ResponseWriter, r *http.Request, n
 		jsonErrorCoded(w, "runtime not configured", http.StatusServiceUnavailable, "plugins.runtime_unavailable")
 		return
 	}
-	ctx := r.Context()
+	// Detached so a client/proxy disconnect can't cancel a materialise or
+	// restart partway through and strand the plugin in a partial state.
+	ctx := detachRequest(r)
 	var err error
 	switch verb {
 	case "materialise", "materialize":
@@ -858,7 +877,7 @@ func (h *PluginsHandler) scaleInstances(w http.ResponseWriter, r *http.Request, 
 		jsonInvalidRequestBody(w)
 		return
 	}
-	res, err := h.lifecycle.Scale(r.Context(), name, req.Count)
+	res, err := h.lifecycle.Scale(detachRequest(r), name, req.Count)
 	if err != nil {
 		switch {
 		case errors.Is(err, plugin.ErrPluginNotFound):
