@@ -72,7 +72,7 @@ func TestEnsureLegacyFSTabEntryIdempotent(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 fstab line, got %d: %q", len(lines), string(data))
 	}
-	want := "tank/tierd/media/HDD /mnt/.tierd-backing/media/HDD zfs defaults,nofail,x-systemd.requires=zfs-import.service,x-systemd.after=zfs-import.service 0 0"
+	want := "tank/tierd/media/HDD /mnt/.tierd-backing/media/HDD zfs defaults,nofail,x-systemd.requires=zfs-import.target,x-systemd.after=zfs-import.target 0 0"
 	if lines[0] != want {
 		t.Fatalf("fstab line = %q, want %q", lines[0], want)
 	}
@@ -96,7 +96,7 @@ func TestEnsureLegacyFSTabEntryUpgradesExistingEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fstab: %v", err)
 	}
-	want := "tank/tierd/media/HDD /mnt/.tierd-backing/media/HDD zfs defaults,nofail,x-systemd.requires=zfs-import.service,x-systemd.after=zfs-import.service 0 0"
+	want := "tank/tierd/media/HDD /mnt/.tierd-backing/media/HDD zfs defaults,nofail,x-systemd.requires=zfs-import.target,x-systemd.after=zfs-import.target 0 0"
 	if got := strings.TrimSpace(string(data)); got != want {
 		t.Fatalf("fstab line = %q, want %q", got, want)
 	}
@@ -126,5 +126,31 @@ func TestRemoveLegacyFSTabEntryRemovesMatchingDatasetAndMount(t *testing.T) {
 	want := "tank/other /mnt/other zfs defaults 0 0"
 	if got != want {
 		t.Fatalf("remaining fstab = %q, want %q", got, want)
+	}
+}
+
+func TestLegacyFSTabEntryUsesImportTargetNotMaskedService(t *testing.T) {
+	entry := legacyFSTabEntry("tank/tierd/media/HDD", "/mnt/.tierd-backing/media/HDD")
+
+	// OpenZFS masks zfs-import.service; depending on it makes the mount (and
+	// the smoothfs union that requires it) un-startable at boot.
+	if strings.Contains(entry, "zfs-import.service") {
+		t.Fatalf("entry depends on the package-masked zfs-import.service: %q", entry)
+	}
+	for _, want := range []string{
+		"tank/tierd/media/HDD",
+		"/mnt/.tierd-backing/media/HDD",
+		"zfs",
+		"nofail",
+		"x-systemd.requires=zfs-import.target",
+		"x-systemd.after=zfs-import.target",
+	} {
+		if !strings.Contains(entry, want) {
+			t.Errorf("entry missing %q: %q", want, entry)
+		}
+	}
+	// Sanity: a well-formed fstab line has 6 whitespace-separated fields.
+	if got := len(strings.Fields(entry)); got != 6 {
+		t.Errorf("entry has %d fields, want 6: %q", got, entry)
 	}
 }
