@@ -165,15 +165,65 @@ type ghAsset struct {
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
+// maxHTTPAttempts bounds retries for transient GitHub failures. GitHub's
+// release-download edge intermittently returns 5xx (e.g. a 504 gateway
+// timeout that clears on retry); without this, a single blip aborts the
+// whole update.
+const maxHTTPAttempts = 4
+
+// transientStatus reports whether an HTTP status code is worth retrying.
+func transientStatus(code int) bool {
+	switch code {
+	case http.StatusTooManyRequests, // 429
+		http.StatusInternalServerError, // 500
+		http.StatusBadGateway,          // 502
+		http.StatusServiceUnavailable,  // 503
+		http.StatusGatewayTimeout:      // 504
+		return true
+	}
+	return false
+}
+
+func drainAndClose(body io.ReadCloser) {
+	io.Copy(io.Discard, body)
+	body.Close()
+}
+
+// doWithRetry issues the request built by newReq and retries transient
+// failures (network errors and 429/5xx) with linear backoff. The request is
+// rebuilt each attempt so it carries a fresh body. A successful response
+// (including non-transient non-200 statuses, which the caller turns into its
+// own error) is returned for the caller to close.
+func doWithRetry(newReq func() (*http.Request, error)) (*http.Response, error) {
+	var lastErr error
+	for attempt := 1; attempt <= maxHTTPAttempts; attempt++ {
+		req, err := newReq()
+		if err != nil {
+			return nil, err
+		}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+		} else if transientStatus(resp.StatusCode) {
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			drainAndClose(resp.Body)
+		} else {
+			return resp, nil
+		}
+		if attempt < maxHTTPAttempts {
+			log.Printf("updater: transient HTTP failure (attempt %d/%d): %v; retrying", attempt, maxHTTPAttempts, lastErr)
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+		}
+	}
+	return nil, lastErr
+}
+
 func fetchReleases(baseURL, repoOwner, repoName string, authenticated bool) ([]ghRelease, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=100", baseURL, repoOwner, repoName)
 
-	req, err := newGitHubRequest(http.MethodGet, url, "application/vnd.github+json", authenticated)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := httpClient.Do(req)
+	resp, err := doWithRetry(func() (*http.Request, error) {
+		return newGitHubRequest(http.MethodGet, url, "application/vnd.github+json", authenticated)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("fetch releases: %w", err)
 	}
@@ -320,12 +370,9 @@ func findAsset(assets []ghAsset, name string) *ghAsset {
 
 // downloadFile downloads a URL to a local file path.
 func downloadFile(url, destPath string) error {
-	req, err := newPublicGitHubRequest(http.MethodGet, url, "")
-	if err != nil {
-		return err
-	}
-
-	resp, err := httpClient.Do(req)
+	resp, err := doWithRetry(func() (*http.Request, error) {
+		return newPublicGitHubRequest(http.MethodGet, url, "")
+	})
 	if err != nil {
 		return fmt.Errorf("download %s: %w", url, err)
 	}
@@ -357,32 +404,22 @@ func downloadAsset(asset *ghAsset, destPath string, authenticated bool) error {
 		return fmt.Errorf("asset not found")
 	}
 
+	// Default to the public browser_download_url; switch to the authenticated
+	// API asset URL only for the private channel when a token is configured.
 	url := asset.BrowserDownloadURL
-	var (
-		req *http.Request
-		err error
-	)
+	accept := ""
+	useAuth := false
 	if authenticated && asset.URL != "" {
 		if token := readGitHubToken(); token != "" {
-			req, err = newAuthenticatedGitHubRequest(http.MethodGet, asset.URL, "application/octet-stream")
-			if err != nil {
-				return err
-			}
 			url = asset.URL
-		} else {
-			req, err = newPublicGitHubRequest(http.MethodGet, url, "")
-			if err != nil {
-				return err
-			}
-		}
-	} else {
-		req, err = newPublicGitHubRequest(http.MethodGet, url, "")
-		if err != nil {
-			return err
+			accept = "application/octet-stream"
+			useAuth = true
 		}
 	}
 
-	resp, err := httpClient.Do(req)
+	resp, err := doWithRetry(func() (*http.Request, error) {
+		return newGitHubRequest(http.MethodGet, url, accept, useAuth)
+	})
 	if err != nil {
 		return fmt.Errorf("download %s: %w", url, err)
 	}
