@@ -217,9 +217,25 @@ func isAlreadyMounted(path string) bool {
 	return err == nil
 }
 
+// legacyFSTabEntry builds the /etc/fstab line for a ZFS backing tier mounted
+// in legacy (kernel-controlled) mode.
+//
+// The ordering/requirement targets zfs-import.target, NOT zfs-import.service.
+// OpenZFS ships `zfs-import.service` masked (a symlink to /dev/null) — it is a
+// placeholder, and the real import is performed by zfs-import-cache.service /
+// zfs-import-scan.service, aggregated under zfs-import.target. Depending on the
+// masked unit makes this .mount permanently un-startable at boot, and the
+// smoothfs union mount that requires this backing then fails too — which aborts
+// every plugin whose volume lives on the pool (observed on a box after its
+// first reboot onto a new kernel). tierd imports the managed pool itself on
+// every boot (ensureZPoolImported, by-id), so ordering after the never-masked
+// zfs-import.target is sufficient and correct.
+func legacyFSTabEntry(dataset, mountPoint string) string {
+	return fmt.Sprintf("%s %s zfs defaults,nofail,x-systemd.requires=zfs-import.target,x-systemd.after=zfs-import.target 0 0", dataset, mountPoint)
+}
+
 func ensureLegacyFSTabEntry(dataset, mountPoint string) error {
-	entry := fmt.Sprintf("%s %s zfs defaults,nofail,x-systemd.requires=zfs-import.service,x-systemd.after=zfs-import.service 0 0", dataset, mountPoint)
-	return upsertLegacyFSTabEntry(dataset, mountPoint, entry)
+	return upsertLegacyFSTabEntry(dataset, mountPoint, legacyFSTabEntry(dataset, mountPoint))
 }
 
 func upsertLegacyFSTabEntry(source, mountPoint, entry string) error {
