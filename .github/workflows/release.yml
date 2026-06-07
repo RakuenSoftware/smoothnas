@@ -473,7 +473,8 @@ jobs:
             "runtime_arm64_sha256": "${RUNTIME_ARM64_SHA}",
             "ui_sha256": "${UI_SHA}",
             "smoothfs_ref": "${{ needs.meta.outputs.smoothfs_ref }}",
-            "smoothfs_src_sha256": "${SMOOTHFS_SRC_SHA}"
+            "smoothfs_src_sha256": "${SMOOTHFS_SRC_SHA}",
+            "smoothkernel_tag": "${{ needs.meta.outputs.smoothkernel_tag }}"
           }
           EOFM
           ls -lh dist/

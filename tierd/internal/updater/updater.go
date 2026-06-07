@@ -87,6 +87,7 @@ type Manifest struct {
 	UISHA           string `json:"ui_sha256"`
 	SmoothfsRef     string `json:"smoothfs_ref,omitempty"`
 	SmoothfsSrcSHA  string `json:"smoothfs_src_sha256,omitempty"`
+	SmoothkernelTag string `json:"smoothkernel_tag,omitempty"`
 }
 
 // TierdSHAForArch returns the manifest's SHA-256 for the given GOARCH,
@@ -643,6 +644,20 @@ func (u *Updater) doApply() error {
 		}
 	}
 
+	// Install the pinned SmoothKernel (and its matching OpenZFS stack) if the
+	// box isn't already on it. Non-fatal: a kernel-download failure must not
+	// break the tierd update. When a kernel is installed we reboot to activate
+	// it instead of just restarting services.
+	rebootRequired := false
+	if manifest.SmoothkernelTag != "" {
+		u.setStage("installing kernel")
+		if installed, err := ensureSmoothKernel(u.githubBaseURL, manifest.SmoothkernelTag, runtime.GOARCH); err != nil {
+			log.Printf("updater: smoothkernel install failed (non-fatal): %v", err)
+		} else if installed {
+			rebootRequired = true
+		}
+	}
+
 	// Clean up staging directory.
 	os.RemoveAll(stagingDir)
 
@@ -651,10 +666,27 @@ func (u *Updater) doApply() error {
 	u.cachedStatus = nil
 	u.mu.Unlock()
 
-	// Restart. Set the stage first, then sleep long enough for the frontend
-	// to poll at least once more and see "restarting" before the process
-	// dies. Without the sleep the new process starts with stage="idle" and
-	// the frontend reports "Update process stopped unexpectedly".
+	return u.restartOrReboot(rebootRequired, runtimeUpdated, firewallUpdated)
+}
+
+// restartOrReboot finishes an apply. When a new kernel was installed it
+// reboots the host (which activates the kernel and brings every service back
+// up); otherwise it restarts the runtime (if changed) and tierd in place.
+//
+// The stage is set before the delay so the frontend polls at least once more
+// and sees "restarting"/"rebooting" before the process dies — without it the
+// new process starts at stage="idle" and the UI reports "Update process
+// stopped unexpectedly".
+func (u *Updater) restartOrReboot(rebootRequired, runtimeUpdated, firewallUpdated bool) error {
+	if rebootRequired {
+		u.setStage("rebooting")
+		time.Sleep(4 * time.Second)
+		if out, err := execCommand("systemctl", "reboot").CombinedOutput(); err != nil {
+			return fmt.Errorf("reboot: %s: %w", strings.TrimSpace(string(out)), err)
+		}
+		return nil
+	}
+
 	u.setStage("restarting")
 	time.Sleep(4 * time.Second)
 	if runtimeUpdated || firewallUpdated {
@@ -785,22 +817,23 @@ func (u *Updater) doManualApply(manifestData, binaryData, uiData, runtimeBinaryD
 		}
 	}
 
+	rebootRequired := false
+	if manifest.SmoothkernelTag != "" {
+		u.setStage("installing kernel")
+		if installed, err := ensureSmoothKernel(u.githubBaseURL, manifest.SmoothkernelTag, runtime.GOARCH); err != nil {
+			log.Printf("updater: smoothkernel install failed (non-fatal): %v", err)
+		} else if installed {
+			rebootRequired = true
+		}
+	}
+
 	os.RemoveAll(stagingDir)
 
 	u.mu.Lock()
 	u.cachedStatus = nil
 	u.mu.Unlock()
 
-	u.setStage("restarting")
-	time.Sleep(4 * time.Second)
-	if runtimeUpdated || firewallUpdated {
-		if out, err := execCommand("systemctl", "restart", "smoothnas-runtime.service").CombinedOutput(); err != nil {
-			return fmt.Errorf("restart smoothnas-runtime: %s: %w", strings.TrimSpace(string(out)), err)
-		}
-	}
-	exec.Command("systemctl", "restart", "tierd.service").Start()
-
-	return nil
+	return u.restartOrReboot(rebootRequired, runtimeUpdated, firewallUpdated)
 }
 
 func refreshHostFirewall() bool {
