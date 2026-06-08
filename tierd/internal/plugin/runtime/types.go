@@ -73,15 +73,9 @@ type CreateContainerResponse struct {
 // reads. Lifecycle code uses State + NetworkSettings; reconciliation
 // uses ID + Name + Labels.
 type ContainerInspect struct {
-	ID    string `json:"Id"`
-	Name  string `json:"Name"`  // includes leading "/"
-	Image string `json:"Image"` // resolved image ref
-	// HostnamePath is the host-side path of the container's
-	// /etc/hostname (…/rootfs/etc/hostname under LXC2Docker). tierd
-	// derives the sibling /etc/hosts path from it to write name→IP
-	// records: LXC2Docker has no embedded DNS and does not manage
-	// /etc/hosts, so the rootfs file is tierd's to populate.
-	HostnamePath    string                   `json:"HostnamePath"`
+	ID              string                   `json:"Id"`
+	Name            string                   `json:"Name"`  // includes leading "/"
+	Image           string                   `json:"Image"` // resolved image ref
 	State           ContainerState           `json:"State"`
 	Config          ContainerConfig          `json:"Config"`
 	HostConfig      HostConfig               `json:"HostConfig"`

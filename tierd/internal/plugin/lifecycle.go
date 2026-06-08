@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"reflect"
 	"sort"
 	"strings"
@@ -705,16 +704,6 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 			if inst.ContainerID == "" {
 				return fmt.Errorf("service %s instance %d has no container — call Materialise first", sr.Service, inst.Instance)
 			}
-			// Seed this container's /etc/hosts before it starts so its
-			// first outbound dial (e.g. the kb's DB2 connect to
-			// {{service.postgres.host}}) resolves the sibling name —
-			// dependencies started in earlier iterations have already
-			// recorded their bridge IPs. Soft-fail: the periodic
-			// reconciler sweep retries, so a transient write error must
-			// not block the start.
-			if err := l.seedInstanceHosts(ctx, fresh, count, inst.ContainerID); err != nil {
-				log.Printf("plugin start: seed /etc/hosts for %s/%s/%d: %v", name, sr.Service, inst.Instance, err)
-			}
 			_ = l.setInstanceState(name, sr.Service, inst.Instance, StateStarting, "")
 			if err := l.rt.StartContainer(ctx, inst.ContainerID); err != nil {
 				_ = l.setInstanceState(name, sr.Service, inst.Instance, StateFailed, err.Error())
@@ -814,23 +803,6 @@ func (l *Lifecycle) captureBridgeIP(ctx context.Context, containerID string) (st
 		}
 	}
 	return "", fmt.Errorf("bridge IP not assigned after 10 retries")
-}
-
-// seedInstanceHosts writes the plugin's current name→IP records into a
-// just-created container's /etc/hosts before it starts, so its first
-// dial resolves a sibling name even though LXC2Docker has no DNS. The
-// records come from siblings' already-recorded bridge IPs; the
-// reconciler's periodic sweep keeps them fresh thereafter.
-func (l *Lifecycle) seedInstanceHosts(ctx context.Context, rec *PluginRecord, count int, containerID string) error {
-	d, err := l.rt.InspectContainer(ctx, containerID)
-	if err != nil {
-		return err
-	}
-	path := containerHostsPath(d)
-	if path == "" {
-		return fmt.Errorf("no HostnamePath for container %s", shortID(containerID))
-	}
-	return writeHostsFile(path, d.HostnamePath, renderEtcHosts(pluginHostEntries(rec, count)))
 }
 
 // buildPluginRoute renders the plugin's primary (user-facing) service into
