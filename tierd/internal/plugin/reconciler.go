@@ -111,37 +111,7 @@ func (r *Reconciler) Sync(ctx context.Context) error {
 			shortID(id), pluginName)
 	}
 
-	// Refresh every managed container's /etc/hosts so name-based
-	// discovery resolves the current bridge IPs right after startup.
-	if err := syncManagedHosts(ctx, r.rt); err != nil {
-		log.Printf("plugin reconcile: hosts sync: %v", err)
-	}
-
 	return nil
-}
-
-// RunHostsSync periodically rewrites every managed container's
-// /etc/hosts so a sibling that drifted to a new bridge IP is resolved
-// without recreating the dependent. LXC2Docker has no embedded DNS, so
-// this loop is what makes name-based service discovery durable across
-// restarts and reboots. Runs until ctx is cancelled; launch from a
-// goroutine at tierd startup alongside WatchEvents.
-func (r *Reconciler) RunHostsSync(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		interval = HostsResyncInterval
-	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			if err := syncManagedHosts(ctx, r.rt); err != nil {
-				log.Printf("plugin hosts sync: %v", err)
-			}
-		}
-	}
 }
 
 // WatchEvents subscribes to the daemon's event stream and updates
