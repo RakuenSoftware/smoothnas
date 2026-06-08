@@ -382,6 +382,7 @@ func setupPluginRuntime(pluginStore *plugin.Store, catalog *plugin.Catalog) (*pl
 
 	watchCtx, stopWatch := context.WithCancel(context.Background())
 	go reconciler.WatchEvents(watchCtx)
+	go reconciler.RunHostsSync(watchCtx, 0)
 	go runRuntimeLXCCleanupLoop(watchCtx, lifecycle)
 	go func() {
 		if err := lifecycle.AutostartAll(context.Background()); err != nil {
