@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -95,6 +96,11 @@ var (
 	enabledProtocolsForExports = firewall.GetEnabledProtocols
 	writeNFSExports            = nfs.WriteExports
 	writeSMBConfig             = smb.WriteConfigWithOptions
+	enableSMBService           = smb.EnableService
+	disableSMBService          = smb.DisableService
+	disableNFSService          = nfs.DisableService
+	enableISCSIService         = iscsi.EnableService
+	disableISCSIService        = iscsi.DisableService
 	inspectLUNPin              = iscsi.InspectLUNPin
 	quiesceISCSITarget         = iscsi.QuiesceTarget
 	resumeISCSITarget          = iscsi.ResumeTarget
@@ -102,6 +108,30 @@ var (
 
 const smbCompatibilityModeConfigKey = "smb.compatibility_mode"
 const defaultTierDataDirName = "storage"
+
+// Config keys recording the operator's desired enable/disable state for each
+// sharing protocol. tierd treats these as the source of truth and re-applies
+// them at boot (see ReapplySharingServices), because systemd service
+// enablement is not reliably restored across a reboot on the appliance.
+const (
+	smbEnabledConfigKey   = "smb.enabled"
+	nfsEnabledConfigKey   = "nfs.enabled"
+	iscsiEnabledConfigKey = "iscsi.enabled"
+)
+
+// protocolEnabledConfigKey maps a protocol name to the config key holding its
+// desired enable state. Returns "" for an unknown protocol.
+func protocolEnabledConfigKey(proto string) string {
+	switch proto {
+	case "smb":
+		return smbEnabledConfigKey
+	case "nfs":
+		return nfsEnabledConfigKey
+	case "iscsi":
+		return iscsiEnabledConfigKey
+	}
+	return ""
+}
 
 func NewSharingHandler(store *db.Store) *SharingHandler {
 	return &SharingHandler{
@@ -130,6 +160,42 @@ func ReconcileSharingConfig(store *db.Store) error {
 		return fmt.Errorf("recover active-lun move intents: %w", err)
 	}
 	return nil
+}
+
+// ReapplySharingServices re-enables the SMB, NFS, and iSCSI daemons that the
+// operator previously turned on, reading the desired state persisted by
+// toggleProtocol. systemd service enablement is not reliably restored across a
+// reboot on the appliance (and nfs-kernel-server in particular only starts once
+// the tier mounts it exports appear, late in boot), so tierd treats its own DB
+// as the source of truth and re-applies the desired state at startup — the same
+// pattern used for spindown timers and the network bond policy.
+//
+// Protocols left at their default (never enabled) are not touched, so they keep
+// the installer's disabled baseline. It is meant to run in a background
+// goroutine after ReconcileSharingConfig has regenerated smb.conf and
+// /etc/exports; failures are logged and never block startup.
+func ReapplySharingServices(store *db.Store) {
+	if enabled, err := store.GetBoolConfig(smbEnabledConfigKey, false); err != nil {
+		log.Printf("sharing: read smb enabled state: %v", err)
+	} else if enabled {
+		if err := enableSMBService(); err != nil {
+			log.Printf("sharing: re-enable smb on boot: %v", err)
+		}
+	}
+	if enabled, err := store.GetBoolConfig(nfsEnabledConfigKey, false); err != nil {
+		log.Printf("sharing: read nfs enabled state: %v", err)
+	} else if enabled {
+		if err := enableNFSServiceForExports(true); err != nil {
+			log.Printf("sharing: re-enable nfs on boot: %v", err)
+		}
+	}
+	if enabled, err := store.GetBoolConfig(iscsiEnabledConfigKey, false); err != nil {
+		log.Printf("sharing: read iscsi enabled state: %v", err)
+	} else if enabled {
+		if err := enableISCSIService(); err != nil {
+			log.Printf("sharing: re-enable iscsi on boot: %v", err)
+		}
+	}
 }
 
 // Route dispatches sharing requests.
@@ -217,26 +283,35 @@ func (h *SharingHandler) toggleProtocol(w http.ResponseWriter, r *http.Request, 
 				serverError(w, err)
 				return
 			}
-			err = smb.EnableService()
+			err = enableSMBService()
 		case "nfs":
-			err = nfs.EnableService(true)
+			err = enableNFSServiceForExports(true)
 		case "iscsi":
-			err = iscsi.EnableService()
+			err = enableISCSIService()
 		}
 	} else {
 		switch proto {
 		case "smb":
-			err = smb.DisableService()
+			err = disableSMBService()
 		case "nfs":
-			err = nfs.DisableService()
+			err = disableNFSService()
 		case "iscsi":
-			err = iscsi.DisableService()
+			err = disableISCSIService()
 		}
 	}
 
 	if err != nil {
 		serverError(w, err)
 		return
+	}
+
+	// Persist the desired state so it survives a reboot: ReapplySharingServices
+	// re-enables it at startup. Best-effort — a failure here leaves the live
+	// service correct but means the state may not be restored on next boot.
+	if key := protocolEnabledConfigKey(proto); key != "" {
+		if perr := h.store.SetBoolConfig(key, req.Enabled); perr != nil {
+			log.Printf("sharing: persist %s enabled=%t: %v", proto, req.Enabled, perr)
+		}
 	}
 
 	enabled := firewall.GetEnabledProtocols()
