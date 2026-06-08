@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"reflect"
 	"sort"
 	"strings"
@@ -174,9 +175,13 @@ func serviceImageRef(rec *PluginRecord, svc *Service) string {
 	return svc.Artifact.Distro + ":" + svc.Artifact.Release
 }
 
-// currentDiscovery seeds the discovery map from whatever bridge IPs are
-// already recorded (instance 1 per service) plus each service's declared
-// ports. Start overwrites the host as each service is (re)started.
+// currentDiscovery seeds the discovery map with each service's stable
+// bridge hostname (the container name) and declared ports. The host is
+// the container name rather than an IP: LXC2Docker has no embedded DNS,
+// so tierd writes /etc/hosts records (name→current IP) into every
+// managed container and lets the kernel resolver close the gap. Using
+// the name keeps a dependent's injected env (e.g. AIMEE_DB2_URL) valid
+// across a backend's IP drift without recreating the dependent.
 func currentDiscovery(rec *PluginRecord, svcMap map[string]*Service) map[string]ServiceEndpoint {
 	disc := map[string]ServiceEndpoint{}
 	for _, sr := range rec.Services {
@@ -184,11 +189,9 @@ func currentDiscovery(rec *PluginRecord, svcMap map[string]*Service) map[string]
 		if svc == nil {
 			continue
 		}
-		ep := ServiceEndpoint{Ports: map[string]int{}}
-		for _, in := range rec.Instances {
-			if in.Service == sr.Service && in.Instance == 1 {
-				ep.Host = in.BridgeIP
-			}
+		ep := ServiceEndpoint{
+			Host:  ContainerName(rec.Plugin.Name, sr.Service, 1, rec.Plugin.InstanceCount),
+			Ports: map[string]int{},
 		}
 		for _, p := range svc.Ports {
 			ep.Ports[p.Name] = p.Port
@@ -698,10 +701,19 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 			instances = filterInstances(fresh, sr.Service)
 		}
 
-		var firstIP string
 		for _, inst := range instances {
 			if inst.ContainerID == "" {
 				return fmt.Errorf("service %s instance %d has no container — call Materialise first", sr.Service, inst.Instance)
+			}
+			// Seed this container's /etc/hosts before it starts so its
+			// first outbound dial (e.g. the kb's DB2 connect to
+			// {{service.postgres.host}}) resolves the sibling name —
+			// dependencies started in earlier iterations have already
+			// recorded their bridge IPs. Soft-fail: the periodic
+			// reconciler sweep retries, so a transient write error must
+			// not block the start.
+			if err := l.seedInstanceHosts(ctx, fresh, count, inst.ContainerID); err != nil {
+				log.Printf("plugin start: seed /etc/hosts for %s/%s/%d: %v", name, sr.Service, inst.Instance, err)
 			}
 			_ = l.setInstanceState(name, sr.Service, inst.Instance, StateStarting, "")
 			if err := l.rt.StartContainer(ctx, inst.ContainerID); err != nil {
@@ -713,17 +725,14 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 				return fmt.Errorf("capture bridge IP for %s/%d: %w", sr.Service, inst.Instance, err)
 			} else if ip != "" {
 				_ = l.store.SetInstanceBridgeIP(name, sr.Service, inst.Instance, ip)
-				if inst.Instance == 1 {
-					firstIP = ip
-				}
 			}
 			_ = l.setInstanceState(name, sr.Service, inst.Instance, StateRunning, "")
 		}
 
-		// Publish this service's endpoint for downstream dependents.
-		ep := disc[sr.Service]
-		ep.Host = firstIP
-		disc[sr.Service] = ep
+		// disc already carries this service's stable bridge name (set by
+		// currentDiscovery); downstream dependents resolve it via the
+		// /etc/hosts records tierd maintains, so there's no per-start IP
+		// to republish here.
 
 		// Health gate: if any later service depends on this one with
 		// service_healthy, wait for readiness before proceeding.
@@ -805,6 +814,23 @@ func (l *Lifecycle) captureBridgeIP(ctx context.Context, containerID string) (st
 		}
 	}
 	return "", fmt.Errorf("bridge IP not assigned after 10 retries")
+}
+
+// seedInstanceHosts writes the plugin's current name→IP records into a
+// just-created container's /etc/hosts before it starts, so its first
+// dial resolves a sibling name even though LXC2Docker has no DNS. The
+// records come from siblings' already-recorded bridge IPs; the
+// reconciler's periodic sweep keeps them fresh thereafter.
+func (l *Lifecycle) seedInstanceHosts(ctx context.Context, rec *PluginRecord, count int, containerID string) error {
+	d, err := l.rt.InspectContainer(ctx, containerID)
+	if err != nil {
+		return err
+	}
+	path := containerHostsPath(d)
+	if path == "" {
+		return fmt.Errorf("no HostnamePath for container %s", shortID(containerID))
+	}
+	return writeHostsFile(path, d.HostnamePath, renderEtcHosts(pluginHostEntries(rec, count)))
 }
 
 // buildPluginRoute renders the plugin's primary (user-facing) service into

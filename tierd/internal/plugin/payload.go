@@ -88,7 +88,11 @@ type PayloadInputs struct {
 }
 
 // ServiceEndpoint is a sibling service's reachable address on the plugin
-// bridge (LXC2Docker has no embedded DNS, so discovery is by injected IP).
+// bridge. Host is the sibling's stable container name (e.g.
+// "aimee-kb-postgres"), not an IP: LXC2Docker has no embedded DNS, so
+// tierd maintains /etc/hosts records (name→current IP) in every managed
+// container and the name resolves there. Keying discovery on the name
+// means a dependent's injected env survives a backend's IP drift.
 type ServiceEndpoint struct {
 	Host  string
 	Ports map[string]int // port name → container port
