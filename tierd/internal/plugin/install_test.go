@@ -675,3 +675,23 @@ func itoa(n int) string {
 	}
 	return string(buf[i:])
 }
+
+func TestTierPluginRoot(t *testing.T) {
+	tests := []struct {
+		name, host, plugin, want string
+	}{
+		{"single-service shared", "/mnt/media/.plugins/llama-cpp/models", "llama-cpp", "/mnt/media/.plugins/llama-cpp"},
+		{"multi-service shared", "/mnt/media/.plugins/aimee-kb/postgres/pgdata", "aimee-kb", "/mnt/media/.plugins/aimee-kb"},
+		{"multi-service per-instance", "/mnt/media/.plugins/aimee-kb/kb/home/instance-2/home", "aimee-kb", "/mnt/media/.plugins/aimee-kb"},
+		{"trailing slash", "/mnt/media/.plugins/aimee-kb/embedder/models/", "aimee-kb", "/mnt/media/.plugins/aimee-kb"},
+		{"marker absent", "/var/lib/smoothnas/plugins/aimee-kb/kb/home", "aimee-kb", ""},
+		{"empty host", "", "aimee-kb", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tierPluginRoot(tt.host, tt.plugin); got != tt.want {
+				t.Fatalf("tierPluginRoot(%q,%q) = %q, want %q", tt.host, tt.plugin, got, tt.want)
+			}
+		})
+	}
+}

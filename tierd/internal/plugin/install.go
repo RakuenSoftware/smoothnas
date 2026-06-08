@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // DefaultPluginsRoot is the on-disk parent for flat-mode plugin
@@ -355,7 +356,7 @@ func (i *Installer) Uninstall(name string) error {
 				return fmt.Errorf("remove %s: %w", host, err)
 			}
 			if vol.Mode == VolumeModeTierBound {
-				if parent := tierPluginParent(host, vol.PerInstance, vol.Name); parent != "" {
+				if parent := tierPluginRoot(host, name); parent != "" {
 					tierParents[parent] = struct{}{}
 				}
 			}
@@ -397,19 +398,27 @@ func (i *Installer) resolveTierPluginParent(pluginName string, vol VolumeRow) st
 	return filepath.Join(pool.MountPoint, ".plugins", pluginName)
 }
 
-// tierPluginParent walks back from a resolved volume host path to
-// the per-plugin parent under the tier mount, so Uninstall can rm
-// it without needing to know the tier subsystem's mountpoint
-// convention. Walks back two segments for perInstance volumes
-// (.../instance-N/<vol>) and one for shared (.../<vol>).
-func tierPluginParent(hostPath string, perInstance bool, volumeName string) string {
+// tierPluginRoot returns the per-plugin directory under the tier mount
+// (".../<tierMount>/.plugins/<name>") given any volume host path beneath it,
+// so Uninstall can rm the whole plugin tree without knowing the tier
+// subsystem's mountpoint convention.
+//
+// It locates the ".plugins/<name>" marker rather than walking back a fixed
+// number of segments: the path depth varies (multi-service plugins insert a
+// service segment — ".plugins/<name>/<service>/<vol>" — and per-instance
+// volumes add an "instance-N" segment), so segment-counting left the plugin
+// directory behind for multi-service plugins, blocking reinstall preflight.
+// Returns "" if the marker isn't present.
+func tierPluginRoot(hostPath, pluginName string) string {
 	cleaned := filepath.Clean(hostPath)
-	parent := filepath.Dir(cleaned) // strips <vol>
-	if perInstance {
-		parent = filepath.Dir(parent) // strips instance-N
-	}
-	if parent == "/" || parent == "." {
+	marker := string(filepath.Separator) + ".plugins" + string(filepath.Separator) + pluginName
+	idx := strings.Index(cleaned, marker)
+	if idx < 0 {
 		return ""
 	}
-	return parent
+	root := cleaned[:idx+len(marker)]
+	if root == "/" || root == "." || root == "" {
+		return ""
+	}
+	return root
 }

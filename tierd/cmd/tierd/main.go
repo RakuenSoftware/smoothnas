@@ -115,6 +115,13 @@ func main() {
 		log.Printf("warning: could not reconcile sharing config: %v", err)
 	}
 
+	// Re-enable the SMB/NFS/iSCSI daemons the operator previously turned on.
+	// systemd enablement is not reliably restored across a reboot on the
+	// appliance, so tierd re-applies its persisted desired state — the same
+	// reason spindown timers are re-applied below. Background and best-effort
+	// (NFS waits on tier mounts) so it never delays HTTP readiness.
+	go api.ReapplySharingServices(store)
+
 	// First-boot default-bond policy: a fresh appliance gets bond0
 	// over every physical Ethernet NIC in active-backup mode, DHCPed.
 	// Once the bootstrap marker is set, this is a no-op so an
