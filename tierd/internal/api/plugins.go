@@ -76,6 +76,7 @@ func NewPluginsHandler(
 //	POST   /api/plugins/<name>/stop           lifecycle
 //	POST   /api/plugins/<name>/restart        lifecycle
 //	POST   /api/plugins/<name>/materialise    pull image + create containers
+//	POST   /api/plugins/<name>/refresh-containers pull container refs + recreate changed containers
 //	POST   /api/plugins/<name>/update         replace manifest + materialise
 //	POST   /api/plugins/<name>/models/install download model, set MODEL_PATH, start
 //	PUT    /api/plugins/<name>/config         update plugin_config
@@ -150,7 +151,7 @@ func (h *PluginsHandler) routeNamed(w http.ResponseWriter, r *http.Request, rest
 		default:
 			jsonMethodNotAllowed(w)
 		}
-	case "start", "stop", "restart", "materialise", "materialize":
+	case "start", "stop", "restart", "materialise", "materialize", "refresh-containers":
 		if r.Method != http.MethodPost {
 			jsonMethodNotAllowed(w)
 			return
@@ -295,13 +296,14 @@ func toPluginListItem(r plugin.PluginRow) pluginListItem {
 // detail returns the full PluginRecord (plugin row + per-instance
 // state + volumes + ports + config) for one plugin.
 type pluginDetail struct {
-	Plugin    pluginListItem       `json:"plugin"`
-	Services  []pluginServiceItem  `json:"services"`
-	Instances []plugin.InstanceRow `json:"instances"`
-	Volumes   []plugin.VolumeRow   `json:"volumes"`
-	Ports     []plugin.PortRow     `json:"ports"`
-	Config    []plugin.ConfigRow   `json:"config"`
-	Manifest  string               `json:"manifest"`
+	Plugin        pluginListItem           `json:"plugin"`
+	Services      []pluginServiceItem      `json:"services"`
+	Instances     []plugin.InstanceRow     `json:"instances"`
+	Volumes       []plugin.VolumeRow       `json:"volumes"`
+	Ports         []plugin.PortRow         `json:"ports"`
+	Config        []plugin.ConfigRow       `json:"config"`
+	ContainerRefs []plugin.ContainerRefRow `json:"containerRefs"`
+	Manifest      string                   `json:"manifest"`
 }
 
 // pluginServiceItem is the UI-facing view of one service in a
@@ -336,14 +338,19 @@ func toPluginDetail(rec *plugin.PluginRecord) pluginDetail {
 	if config == nil {
 		config = []plugin.ConfigRow{}
 	}
+	containerRefs := rec.ContainerRefs
+	if containerRefs == nil {
+		containerRefs = []plugin.ContainerRefRow{}
+	}
 	return pluginDetail{
-		Plugin:    toPluginListItem(rec.Plugin),
-		Services:  toPluginServiceItems(rec),
-		Instances: instances,
-		Volumes:   volumes,
-		Ports:     ports,
-		Config:    config,
-		Manifest:  rec.Plugin.ManifestYAML,
+		Plugin:        toPluginListItem(rec.Plugin),
+		Services:      toPluginServiceItems(rec),
+		Instances:     instances,
+		Volumes:       volumes,
+		Ports:         ports,
+		Config:        config,
+		ContainerRefs: containerRefs,
+		Manifest:      rec.Plugin.ManifestYAML,
 	}
 }
 
@@ -633,6 +640,8 @@ func (h *PluginsHandler) lifecycleVerb(w http.ResponseWriter, r *http.Request, n
 	switch verb {
 	case "materialise", "materialize":
 		err = h.lifecycle.Materialise(ctx, name)
+	case "refresh-containers":
+		err = h.lifecycle.RefreshContainers(ctx, name)
 	case "start":
 		err = h.lifecycle.Start(ctx, name)
 	case "stop":

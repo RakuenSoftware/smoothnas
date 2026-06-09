@@ -128,15 +128,29 @@ type ConfigRow struct {
 	Value      string
 }
 
+// ContainerRefRow is one OCI ref a service tracks independently of plugin
+// manifest releases. Ref name "primary" is the runtime image from
+// service.artifact.image; additional names come from service.containerRefs.
+type ContainerRefRow struct {
+	PluginName  string
+	Service     string
+	Name        string
+	ImageRef    string
+	Digest      string
+	ResolvedRef string
+	UpdatedAt   string
+}
+
 // PluginRecord bundles every table's view of a single plugin into
 // one structure, the shape callers usually want.
 type PluginRecord struct {
-	Plugin    PluginRow
-	Services  []ServiceRow
-	Instances []InstanceRow
-	Volumes   []VolumeRow
-	Ports     []PortRow
-	Config    []ConfigRow
+	Plugin        PluginRow
+	Services      []ServiceRow
+	Instances     []InstanceRow
+	Volumes       []VolumeRow
+	Ports         []PortRow
+	Config        []ConfigRow
+	ContainerRefs []ContainerRefRow
 }
 
 // InsertParams is the input to Insert: the validated manifest plus
@@ -344,6 +358,9 @@ func (s *Store) Insert(p InsertParams) error {
 				return fmt.Errorf("insert plugin_config[%s/%s]: %w", svc.Name, f.Key, err)
 			}
 		}
+		if err := insertContainerRefs(tx, m.Metadata.Name, svc); err != nil {
+			return err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -464,6 +481,9 @@ func (s *Store) Get(name string) (*PluginRecord, error) {
 		return nil, err
 	}
 	if rec.Config, err = s.listConfig(name); err != nil {
+		return nil, err
+	}
+	if rec.ContainerRefs, err = s.listContainerRefs(name); err != nil {
 		return nil, err
 	}
 	return rec, nil
@@ -704,6 +724,21 @@ func cloneConfig(cfg map[string]string) map[string]string {
 	return out
 }
 
+func insertContainerRefs(tx *sql.Tx, pluginName string, svc *Service) error {
+	for _, ref := range svc.EffectiveContainerRefs() {
+		imageRef := digestPinnedImageRef(ref.Image, ref.Digest)
+		if _, err := tx.Exec(
+			`INSERT INTO plugin_container_refs
+			 (plugin_name, service, ref_name, image_ref, digest, resolved_ref)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			pluginName, svc.Name, ref.Name, imageRef, sqlNullable(ref.Digest), sqlNullable(imageRef),
+		); err != nil {
+			return fmt.Errorf("insert plugin_container_refs[%s/%s]: %w", svc.Name, ref.Name, err)
+		}
+	}
+	return nil
+}
+
 // SetResolvedProfiles records the merged-profile-name list applied at
 // install/materialise time as a JSON array.
 func (s *Store) SetResolvedProfiles(name string, profileNames []string) error {
@@ -850,6 +885,9 @@ func (s *Store) UpdateManifest(name string, m *Manifest, yamlText string) error 
 	if _, err := tx.Exec(`DELETE FROM plugin_config WHERE plugin_name = ?`, name); err != nil {
 		return fmt.Errorf("delete plugin_config: %w", err)
 	}
+	if _, err := tx.Exec(`DELETE FROM plugin_container_refs WHERE plugin_name = ?`, name); err != nil {
+		return fmt.Errorf("delete plugin_container_refs: %w", err)
+	}
 	for si := range m.Services {
 		svc := &m.Services[si]
 		for _, port := range svc.Ports {
@@ -883,6 +921,9 @@ func (s *Store) UpdateManifest(name string, m *Manifest, yamlText string) error 
 			); err != nil {
 				return fmt.Errorf("insert plugin_config[%s/%s]: %w", svc.Name, field.Key, err)
 			}
+		}
+		if err := insertContainerRefs(tx, name, svc); err != nil {
+			return err
 		}
 	}
 
@@ -953,6 +994,28 @@ func (s *Store) SetImageRef(name, service, ref string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// SetContainerRefResolved records the latest resolution for one tracked OCI ref.
+func (s *Store) SetContainerRefResolved(name, service, refName, imageRef, digest, resolvedRef string) error {
+	res, err := s.db.Exec(
+		`INSERT INTO plugin_container_refs
+		 (plugin_name, service, ref_name, image_ref, digest, resolved_ref, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+		 ON CONFLICT(plugin_name, service, ref_name) DO UPDATE SET
+		     image_ref = excluded.image_ref,
+		     digest = excluded.digest,
+		     resolved_ref = excluded.resolved_ref,
+		     updated_at = datetime('now')`,
+		name, service, refName, imageRef, sqlNullable(digest), sqlNullable(resolvedRef),
+	)
+	if err != nil {
+		return fmt.Errorf("upsert plugin_container_refs[%s/%s]: %w", service, refName, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrPluginNotFound
+	}
+	return nil
 }
 
 // SetInstanceBridgeIP records the per-(service,instance) bridge IP.
@@ -1290,6 +1353,31 @@ func (s *Store) listConfig(name string) ([]ConfigRow, error) {
 	for rows.Next() {
 		var r ConfigRow
 		if err := rows.Scan(&r.PluginName, &r.Service, &r.Key, &r.Value); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) listContainerRefs(name string) ([]ContainerRefRow, error) {
+	rows, err := s.db.Query(
+		`SELECT plugin_name, service, ref_name, image_ref,
+		        COALESCE(digest, ''), COALESCE(resolved_ref, ''), updated_at
+		 FROM plugin_container_refs WHERE plugin_name = ? ORDER BY service, ref_name`,
+		name,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ContainerRefRow
+	for rows.Next() {
+		var r ContainerRefRow
+		if err := rows.Scan(
+			&r.PluginName, &r.Service, &r.Name, &r.ImageRef,
+			&r.Digest, &r.ResolvedRef, &r.UpdatedAt,
+		); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

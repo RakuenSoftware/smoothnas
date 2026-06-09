@@ -15,6 +15,7 @@ type Detail = {
   volumes: any[];
   ports: any[];
   config: any[];
+  containerRefs: any[];
   manifest: string;
 };
 
@@ -25,6 +26,7 @@ function normalizeDetail(raw: any): Detail {
     volumes: Array.isArray(raw?.volumes) ? raw.volumes : [],
     ports: Array.isArray(raw?.ports) ? raw.ports : [],
     config: Array.isArray(raw?.config) ? raw.config : [],
+    containerRefs: Array.isArray(raw?.containerRefs) ? raw.containerRefs : [],
     manifest: raw?.manifest ?? '',
   };
 }
@@ -60,6 +62,22 @@ function configKey(row: any): string {
 
 function configValue(row: any): string {
   return row?.value ?? row?.Value ?? '';
+}
+
+function refName(row: any): string {
+  return row?.name ?? row?.Name ?? '';
+}
+
+function refService(row: any): string {
+  return row?.service ?? row?.Service ?? '';
+}
+
+function refImage(row: any): string {
+  return row?.imageRef ?? row?.ImageRef ?? '';
+}
+
+function refResolved(row: any): string {
+  return row?.resolvedRef ?? row?.ResolvedRef ?? '';
 }
 
 function configMap(rows: any[]): Record<string, string> {
@@ -235,6 +253,20 @@ function OverviewTab({ detail }: { detail: Detail }) {
           <>
             <dt>{t('plugins.detail.overview.distro')}</dt>
             <dd>{p.distroSummary}</dd>
+          </>
+        )}
+        {detail.containerRefs.length > 0 && (
+          <>
+            <dt>{t('plugins.detail.overview.containerRefs')}</dt>
+            <dd>
+              <div className="plugin-ref-list">
+                {detail.containerRefs.map(ref => (
+                  <div key={`${refService(ref)}/${refName(ref)}`} className="mono truncate">
+                    {[refService(ref), refName(ref)].filter(Boolean).join('/')}: {refResolved(ref) || refImage(ref)}
+                  </div>
+                ))}
+              </div>
+            </dd>
           </>
         )}
         <dt>{t('plugins.detail.overview.instances')}</dt>

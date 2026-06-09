@@ -91,11 +91,12 @@ type Manifest struct {
 	// manifest is re-parsed on every Materialise) and third-party
 	// single-image manifests keep working. Hidden from JSON: the API and
 	// the rest of the runtime only ever see the normalized Services view.
-	LegacyArtifact  *Artifact     `json:"-" yaml:"artifact,omitempty"`
-	LegacyContainer *Container    `json:"-" yaml:"container,omitempty"`
-	LegacyVolumes   []Volume      `json:"-" yaml:"volumes,omitempty"`
-	LegacyPorts     []Port        `json:"-" yaml:"ports,omitempty"`
-	LegacyConfig    []ConfigField `json:"-" yaml:"config,omitempty"`
+	LegacyArtifact      *Artifact      `json:"-" yaml:"artifact,omitempty"`
+	LegacyContainer     *Container     `json:"-" yaml:"container,omitempty"`
+	LegacyContainerRefs []ContainerRef `json:"-" yaml:"containerRefs,omitempty"`
+	LegacyVolumes       []Volume       `json:"-" yaml:"volumes,omitempty"`
+	LegacyPorts         []Port         `json:"-" yaml:"ports,omitempty"`
+	LegacyConfig        []ConfigField  `json:"-" yaml:"config,omitempty"`
 }
 
 // Service is one container within a plugin. Artifact, container knobs,
@@ -103,15 +104,24 @@ type Manifest struct {
 // services as one lifecycle unit. Replica fan-out (instances) is
 // plugin-level and applies to every service uniformly.
 type Service struct {
-	Name      string                      `json:"name" yaml:"name"`
-	Artifact  Artifact                    `json:"artifact" yaml:"artifact"`
-	Container Container                   `json:"container,omitempty" yaml:"container,omitempty"`
-	Env       map[string]string           `json:"env,omitempty" yaml:"env,omitempty"`
-	Volumes   []Volume                    `json:"volumes,omitempty" yaml:"volumes"`
-	Ports     []Port                      `json:"ports,omitempty" yaml:"ports"`
-	Config    []ConfigField               `json:"config,omitempty" yaml:"config"`
-	DependsOn map[string]DependsCondition `json:"dependsOn,omitempty" yaml:"dependsOn,omitempty"`
-	Health    *Healthcheck                `json:"health,omitempty" yaml:"health,omitempty"`
+	Name          string                      `json:"name" yaml:"name"`
+	Artifact      Artifact                    `json:"artifact" yaml:"artifact"`
+	ContainerRefs []ContainerRef              `json:"containerRefs,omitempty" yaml:"containerRefs,omitempty"`
+	Container     Container                   `json:"container,omitempty" yaml:"container,omitempty"`
+	Env           map[string]string           `json:"env,omitempty" yaml:"env,omitempty"`
+	Volumes       []Volume                    `json:"volumes,omitempty" yaml:"volumes"`
+	Ports         []Port                      `json:"ports,omitempty" yaml:"ports"`
+	Config        []ConfigField               `json:"config,omitempty" yaml:"config"`
+	DependsOn     map[string]DependsCondition `json:"dependsOn,omitempty" yaml:"dependsOn,omitempty"`
+	Health        *Healthcheck                `json:"health,omitempty" yaml:"health,omitempty"`
+}
+
+// ContainerRef declares one OCI ref a service depends on. The service's
+// artifact.image is always available as the implicit "primary" ref.
+type ContainerRef struct {
+	Name   string `json:"name" yaml:"name"`
+	Image  string `json:"image" yaml:"image"`
+	Digest string `json:"digest,omitempty" yaml:"digest,omitempty"`
 }
 
 // DependsCondition is the start gate for one dependsOn edge. The map
@@ -270,11 +280,12 @@ func (m *Manifest) normalizeLegacy() {
 		return
 	}
 	svc := Service{
-		Name:     m.Metadata.Name,
-		Artifact: *m.LegacyArtifact,
-		Volumes:  m.LegacyVolumes,
-		Ports:    m.LegacyPorts,
-		Config:   m.LegacyConfig,
+		Name:          m.Metadata.Name,
+		Artifact:      *m.LegacyArtifact,
+		ContainerRefs: m.LegacyContainerRefs,
+		Volumes:       m.LegacyVolumes,
+		Ports:         m.LegacyPorts,
+		Config:        m.LegacyConfig,
 	}
 	if m.LegacyContainer != nil {
 		svc.Container = *m.LegacyContainer
@@ -282,6 +293,7 @@ func (m *Manifest) normalizeLegacy() {
 	m.Services = []Service{svc}
 	m.LegacyArtifact = nil
 	m.LegacyContainer = nil
+	m.LegacyContainerRefs = nil
 	m.LegacyVolumes = nil
 	m.LegacyPorts = nil
 	m.LegacyConfig = nil
@@ -374,6 +386,7 @@ func validateServices(v *ValidationError, services []Service) {
 		seenName[s.Name] = true
 
 		validateArtifact(v, prefix, &s.Artifact)
+		validateContainerRefs(v, prefix, s.ContainerRefs)
 		validateContainer(v, prefix, &s.Container, &s.Artifact, s.Config)
 		validateVolumes(v, prefix, s.Volumes)
 		validatePorts(v, prefix, s.Ports)
@@ -397,6 +410,29 @@ func validateServices(v *ValidationError, services []Service) {
 
 	if cycle := dependsCycle(services); len(cycle) > 0 {
 		v.add("services", "dependsOn graph has a cycle: %s", strings.Join(cycle, " -> "))
+	}
+}
+
+func validateContainerRefs(v *ValidationError, prefix string, refs []ContainerRef) {
+	seen := map[string]bool{"primary": true}
+	for i, r := range refs {
+		field := fmt.Sprintf("%s.containerRefs[%d]", prefix, i)
+		if !reVolumeName.MatchString(r.Name) {
+			v.add(field+".name", "must match %s", reVolumeName)
+		}
+		if r.Name == "primary" {
+			v.add(field+".name", "%q is reserved for artifact.image", r.Name)
+		}
+		if seen[r.Name] {
+			v.add(field+".name", "duplicate ref name %q", r.Name)
+		}
+		seen[r.Name] = true
+		if r.Image == "" {
+			v.add(field+".image", "is required")
+		}
+		if r.Digest != "" && !reHexDigest.MatchString(r.Digest) {
+			v.add(field+".digest", "must match %s when present", reHexDigest)
+		}
 	}
 }
 
@@ -814,6 +850,26 @@ func (s *Service) EffectiveRestartPolicy() string {
 		return RestartUnlessStopped
 	}
 	return s.Container.RestartPolicy
+}
+
+// EffectiveContainerRefs returns every OCI ref the service should track.
+// artifact.image is the implicit primary runtime ref for oci-image services;
+// containerRefs entries are auxiliary refs that can still trigger recreation
+// when their tags move.
+func (s *Service) EffectiveContainerRefs() []ContainerRef {
+	if s == nil {
+		return nil
+	}
+	refs := make([]ContainerRef, 0, len(s.ContainerRefs)+1)
+	if s.Artifact.Type == ArtifactOCIImage {
+		refs = append(refs, ContainerRef{
+			Name:   "primary",
+			Image:  s.Artifact.Image,
+			Digest: s.Artifact.Digest,
+		})
+	}
+	refs = append(refs, s.ContainerRefs...)
+	return refs
 }
 
 // DistroSummary returns a single-line description of an lxc-distro

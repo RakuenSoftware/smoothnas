@@ -653,6 +653,12 @@
   }
 }
 
+.plugin-ref-list {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
 .plugin-detail-section {
   margin-top: 24px;
 

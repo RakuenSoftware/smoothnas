@@ -370,6 +370,7 @@ export const api = {
     apiFetch<any>('POST', `/plugins/${name}/update`, req),
   uninstallPlugin: (name: string) => apiFetch<void>('DELETE', `/plugins/${name}`),
   materialisePlugin: (name: string) => apiFetch<any>('POST', `/plugins/${name}/materialise`, {}),
+  refreshPluginContainers: (name: string) => apiFetch<any>('POST', `/plugins/${name}/refresh-containers`, {}),
   startPlugin: (name: string) => apiFetch<any>('POST', `/plugins/${name}/start`, {}),
   stopPlugin: (name: string) => apiFetch<any>('POST', `/plugins/${name}/stop`, {}),
   restartPlugin: (name: string) => apiFetch<any>('POST', `/plugins/${name}/restart`, {}),

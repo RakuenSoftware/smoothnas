@@ -121,13 +121,14 @@ export default function Plugins() {
     });
   }
 
-  function lifecycle(name: string, verb: 'start' | 'stop' | 'restart' | 'materialise') {
+  function lifecycle(name: string, verb: 'start' | 'stop' | 'restart' | 'materialise' | 'refresh-containers') {
     setBusyName(name);
     setError('');
     const call =
       verb === 'start'       ? api.startPlugin :
       verb === 'stop'        ? api.stopPlugin :
       verb === 'restart'     ? api.restartPlugin :
+      verb === 'refresh-containers' ? api.refreshPluginContainers :
                                api.materialisePlugin;
     call(name)
       .then(() => refresh())
@@ -229,7 +230,7 @@ function PluginCard({
   plugin: PluginRow;
   update?: PluginUpdate;
   busy: boolean;
-  onLifecycle: (verb: 'start' | 'stop' | 'restart' | 'materialise') => void;
+  onLifecycle: (verb: 'start' | 'stop' | 'restart' | 'materialise' | 'refresh-containers') => void;
   onUpdate: (manifest: string) => void;
   onUninstall: () => void;
   onConfigure: () => void;
@@ -308,6 +309,13 @@ function PluginCard({
             {t('plugins.action.update')}
           </button>
         )}
+        <button
+          className="btn"
+          disabled={busy || needsMaterialise}
+          onClick={() => onLifecycle('refresh-containers')}
+        >
+          {t('plugins.action.refreshContainers')}
+        </button>
         {needsMaterialise ? (
           <button
             className="btn primary"

@@ -34,6 +34,7 @@ type fakeRuntime struct {
 	// Behaviour knobs.
 	pullErr        error
 	pullErrs       []error
+	pullResults    []string
 	createErr      error
 	createErrs     []error // one-shot per-call errors, consumed front-to-back
 	startErr       error
@@ -102,10 +103,20 @@ func (f *fakeRuntime) PullImage(ctx context.Context, ref string, _ func(runtime.
 		if err != nil {
 			return "", err
 		}
+		if len(f.pullResults) > 0 {
+			resolved := f.pullResults[0]
+			f.pullResults = f.pullResults[1:]
+			return resolved, nil
+		}
 		return ref, nil
 	}
 	if f.pullErr != nil {
 		return "", f.pullErr
+	}
+	if len(f.pullResults) > 0 {
+		resolved := f.pullResults[0]
+		f.pullResults = f.pullResults[1:]
+		return resolved, nil
 	}
 	return ref, nil
 }
@@ -373,6 +384,64 @@ func TestLifecycle_Materialise_MultiInstance_OnePullManyCreates(t *testing.T) {
 	}
 }
 
+func TestLifecycle_RefreshContainers_RecreatesWhenAuxiliaryRefMoves(t *testing.T) {
+	yaml := []byte(`apiVersion: smoothnas.io/v1
+kind: Plugin
+metadata:
+  name: multi-ref
+  version: 0.1.0
+artifact:
+  type: oci-image
+  image: ghcr.io/example/app:latest
+containerRefs:
+  - name: helper
+    image: ghcr.io/example/helper:latest
+container:
+  command: ["/bin/app"]
+  restartPolicy: unless-stopped
+`)
+	store := openTestStore(t)
+	inst := NewInstaller(store)
+	inst.SetPluginsRoot(t.TempDir())
+	if _, err := inst.Install(yaml); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	rt := &fakeRuntime{pullResults: []string{
+		"ghcr.io/example/app@sha256:" + strings.Repeat("a", 64),
+		"ghcr.io/example/helper@sha256:" + strings.Repeat("a", 64),
+		"ghcr.io/example/app@sha256:" + strings.Repeat("a", 64),
+		"ghcr.io/example/helper@sha256:" + strings.Repeat("b", 64),
+	}}
+	lc := NewLifecycle(store, rt)
+
+	if err := lc.Materialise(context.Background(), "multi-ref"); err != nil {
+		t.Fatalf("first materialise: %v", err)
+	}
+	rec, err := store.Get("multi-ref")
+	if err != nil {
+		t.Fatalf("get first record: %v", err)
+	}
+	firstContainerID := rec.Instances[0].ContainerID
+	firstGeneration := rt.createCalls[0].Labels[containerRefsGenerationLabel]
+	if firstGeneration == "" {
+		t.Fatalf("missing container refs generation label: %+v", rt.createCalls[0].Labels)
+	}
+
+	if err := lc.RefreshContainers(context.Background(), "multi-ref"); err != nil {
+		t.Fatalf("refresh containers: %v", err)
+	}
+	if len(rt.createCalls) != 2 {
+		t.Fatalf("create calls = %d want 2 after auxiliary ref moved", len(rt.createCalls))
+	}
+	secondGeneration := rt.createCalls[1].Labels[containerRefsGenerationLabel]
+	if secondGeneration == "" || secondGeneration == firstGeneration {
+		t.Fatalf("generation label did not change: first=%q second=%q", firstGeneration, secondGeneration)
+	}
+	if !containsString(rt.removeCalls, firstContainerID) {
+		t.Fatalf("old container %q was not removed; remove calls=%v", firstContainerID, rt.removeCalls)
+	}
+}
+
 func TestLifecycle_Materialise_LXCDistro_RunsSetupAndCommits(t *testing.T) {
 	lc, rt, _ := installFixture(t, "ubuntu-python.yaml")
 	if err := lc.Materialise(context.Background(), "ubuntu-python"); err != nil {
@@ -385,7 +454,7 @@ func TestLifecycle_Materialise_LXCDistro_RunsSetupAndCommits(t *testing.T) {
 	if len(rt.commitCalls) != 1 {
 		t.Errorf("commit calls = %v", rt.commitCalls)
 	}
-	if rt.commitCalls[0] != "smoothnas-plugin-ubuntu-python:0.1.0" {
+	if !strings.HasPrefix(rt.commitCalls[0], "smoothnas-plugin-ubuntu-python:0.1.0-") {
 		t.Errorf("commit tag = %q", rt.commitCalls[0])
 	}
 	// One setup container + one real container = 2 creates.
@@ -395,6 +464,41 @@ func TestLifecycle_Materialise_LXCDistro_RunsSetupAndCommits(t *testing.T) {
 	// Setup container must have been removed.
 	if len(rt.removeCalls) == 0 {
 		t.Errorf("setup container should be removed")
+	}
+}
+
+func TestLifecycle_Materialise_LXCDistro_RebuildsWhenBaseMoves(t *testing.T) {
+	lc, rt, store := installFixture(t, "ubuntu-python.yaml")
+	rt.pullResults = []string{
+		"ubuntu@sha256:" + strings.Repeat("a", 64),
+		"ubuntu@sha256:" + strings.Repeat("b", 64),
+	}
+
+	if err := lc.Materialise(context.Background(), "ubuntu-python"); err != nil {
+		t.Fatalf("first materialise: %v", err)
+	}
+	firstImage := rt.createCalls[1].Image
+	rec, err := store.Get("ubuntu-python")
+	if err != nil {
+		t.Fatalf("get first record: %v", err)
+	}
+	firstContainerID := rec.Instances[0].ContainerID
+
+	if err := lc.Materialise(context.Background(), "ubuntu-python"); err != nil {
+		t.Fatalf("second materialise: %v", err)
+	}
+	if len(rt.commitCalls) != 2 {
+		t.Fatalf("commit calls = %v want 2 commits after base digest changed", rt.commitCalls)
+	}
+	if len(rt.createCalls) != 4 {
+		t.Fatalf("create calls = %d want 4 (setup+real twice)", len(rt.createCalls))
+	}
+	secondImage := rt.createCalls[3].Image
+	if secondImage == firstImage {
+		t.Fatalf("real container image did not change: %q", secondImage)
+	}
+	if !containsString(rt.removeCalls, firstContainerID) {
+		t.Fatalf("old real container %q was not removed; remove calls=%v", firstContainerID, rt.removeCalls)
 	}
 }
 
