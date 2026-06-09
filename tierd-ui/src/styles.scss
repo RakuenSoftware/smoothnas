@@ -230,6 +230,12 @@
     .muted {
       color: #999;
     }
+
+    .plugin-card-ref-list {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
   }
 
   .plugin-card-actions {
