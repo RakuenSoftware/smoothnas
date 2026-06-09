@@ -12,6 +12,8 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/runtime"
 )
 
+const containerRefsGenerationLabel = "io.smoothnas.container-refs.generation"
+
 // ContainerName returns the LXC2Docker container name for a given
 // (plugin, service, instance) unit. A single-service plugin (service ==
 // plugin name) keeps the bare plugin name as its base (matching operator
@@ -42,6 +44,19 @@ func SetupTemplateImage(pluginName, service, manifestVersion string) string {
 	return fmt.Sprintf("smoothnas-plugin-%s-%s:%s", pluginName, service, manifestVersion)
 }
 
+// SetupTemplateImageForBase includes the resolved distro base image in the
+// committed setup-template tag, so moving distro releases rebuild without a
+// plugin manifest release.
+func SetupTemplateImageForBase(pluginName, service, manifestVersion, baseRef string, packages, setup []string) string {
+	h := sha256.New()
+	h.Write([]byte(baseRef))
+	h.Write([]byte{'\n'})
+	h.Write([]byte(SetupHash(packages, setup)))
+	sum := hex.EncodeToString(h.Sum(nil))
+	base := SetupTemplateImage(pluginName, service, manifestVersion)
+	return base + "-" + sum[:12]
+}
+
 // SetupHash is a content hash over the lxc-distro setup inputs
 // (packages + setup script lines). Stored alongside the plugin row
 // (or kept in-memory in tests) so the lifecycle can decide "is the
@@ -70,12 +85,13 @@ func SetupHash(packages, setup []string) string {
 // from the database except the ImageRef, which the lifecycle layer
 // passes in after it resolves the pull.
 type PayloadInputs struct {
-	Plugin   *PluginRow
-	Service  *Service // the manifest service this container realises
-	Instance int
-	ImageRef string      // resolved by Materialise; e.g. "ghcr.io/...@sha256:..."
-	Volumes  []VolumeRow // this service's volumes, expanded with per-instance host paths
-	Config   []ConfigRow // this service's config, already merged with manifest defaults
+	Plugin                  *PluginRow
+	Service                 *Service // the manifest service this container realises
+	Instance                int
+	ImageRef                string // resolved by Materialise; e.g. "ghcr.io/...@sha256:..."
+	ContainerRefsGeneration string
+	Volumes                 []VolumeRow // this service's volumes, expanded with per-instance host paths
+	Config                  []ConfigRow // this service's config, already merged with manifest defaults
 	// Discovery maps sibling service name → its reachable endpoint on the
 	// plugin bridge. Used to render {{service.<name>.host}} and
 	// {{service.<name>.port.<portName>}} tokens in the service's Env.
@@ -88,7 +104,11 @@ type PayloadInputs struct {
 }
 
 // ServiceEndpoint is a sibling service's reachable address on the plugin
-// bridge (LXC2Docker has no embedded DNS, so discovery is by injected IP).
+// bridge. Host is the sibling's stable container name (e.g.
+// "aimee-kb-postgres"), not an IP: LXC2Docker has no embedded DNS, so
+// tierd maintains /etc/hosts records (name→current IP) in every managed
+// container and the name resolves there. Keying discovery on the name
+// means a dependent's injected env survives a backend's IP drift.
 type ServiceEndpoint struct {
 	Host  string
 	Ports map[string]int // port name → container port
@@ -208,6 +228,9 @@ func BuildCreatePayload(in PayloadInputs) (runtime.CreateContainerRequest, error
 		runtime.PluginVersionLabel:           in.Plugin.Version,
 		runtime.PluginInstanceLabel:          strconv.Itoa(in.Instance),
 		runtime.LXC2DockerBindMountInitLabel: "image",
+	}
+	if in.ContainerRefsGeneration != "" {
+		labels[containerRefsGenerationLabel] = in.ContainerRefsGeneration
 	}
 
 	host := runtime.HostConfig{

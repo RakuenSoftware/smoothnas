@@ -31,6 +31,29 @@ services:
       type: oci-image
       image: ghcr.io/rakuensoftware/smoothnas-plugin-wolf:0.1.0 # x-release-please-version
       # digest filled in by .github/workflows/release.yml at publish time.
+    containerRefs:
+      - name: pulse-audio
+        image: ${WOLF_PULSE_IMAGE}
+      - name: wolf-ui
+        image: ghcr.io/games-on-whales/wolf-ui:main
+      - name: firefox
+        image: ghcr.io/games-on-whales/firefox:edge
+      - name: retroarch
+        image: ghcr.io/games-on-whales/retroarch:edge
+      - name: steam
+        image: ghcr.io/games-on-whales/steam:edge
+      - name: pegasus
+        image: ghcr.io/games-on-whales/pegasus:edge
+      - name: lutris
+        image: ghcr.io/games-on-whales/lutris:edge
+      - name: prismlauncher
+        image: ghcr.io/games-on-whales/prismlauncher:edge
+      - name: xfce
+        image: ghcr.io/games-on-whales/xfce:edge
+      - name: es-de
+        image: ghcr.io/games-on-whales/es-de:edge
+      - name: kodi
+        image: ghcr.io/games-on-whales/kodi:edge
     container:
       command: []
       restartPolicy: unless-stopped

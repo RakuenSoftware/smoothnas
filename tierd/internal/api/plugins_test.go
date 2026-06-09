@@ -478,6 +478,28 @@ func TestPluginsAPI_InstallAutostartsWhenRuntimeIsWired(t *testing.T) {
 	}
 }
 
+func TestPluginsAPI_RefreshContainersEndpoint(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	rt := &fakeModelRuntime{}
+	h.lifecycle = plugin.NewLifecycle(h.store, rt)
+
+	install := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{
+		"manifest":        readManifestFixture(t, "llama.yaml"),
+		"tierAssignments": map[string]any{"default": "media"},
+	})
+	if install.Code != http.StatusCreated {
+		t.Fatalf("install status = %d body=%s", install.Code, install.Body.String())
+	}
+
+	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/llama-cpp/refresh-containers", map[string]any{})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"state"`) {
+		t.Fatalf("refresh response missing state: %s", rr.Body.String())
+	}
+}
+
 func TestPluginsAPI_InstallPreflightFailure400(t *testing.T) {
 	h, _ := newPluginsHandlerForTest(t)
 	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{

@@ -179,6 +179,43 @@ func TestStore_Insert_NormalizesEmbeddedImageDigest(t *testing.T) {
 	}
 }
 
+func TestStore_Insert_PersistsContainerRefs(t *testing.T) {
+	s := openTestStore(t)
+	m := mustParse(t, "llama.yaml")
+	m.Services[0].ContainerRefs = []ContainerRef{{
+		Name:  "sidecar",
+		Image: "ghcr.io/example/sidecar:latest",
+	}}
+
+	if err := s.Insert(InsertParams{
+		Manifest: m,
+		Paths:    pathsFor(m, "/var/lib/smoothnas/plugins"),
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	rec, err := s.Get(m.Metadata.Name)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(rec.ContainerRefs) != 2 {
+		t.Fatalf("container refs = %+v, want primary + sidecar", rec.ContainerRefs)
+	}
+	byName := map[string]ContainerRefRow{}
+	for _, ref := range rec.ContainerRefs {
+		byName[ref.Name] = ref
+	}
+	if byName["primary"].Service != "llama-cpp" || byName["sidecar"].Service != "llama-cpp" {
+		t.Fatalf("service names not recorded: %+v", rec.ContainerRefs)
+	}
+	if byName["primary"].ImageRef == "" {
+		t.Fatalf("missing primary ref: %+v", rec.ContainerRefs)
+	}
+	if byName["sidecar"].ImageRef != "ghcr.io/example/sidecar:latest" {
+		t.Fatalf("sidecar ref = %+v", byName["sidecar"])
+	}
+}
+
 func TestStore_UpdateManifestPreservesOperatorConfig(t *testing.T) {
 	s := openTestStore(t)
 	m := mustParse(t, "llama.yaml")
