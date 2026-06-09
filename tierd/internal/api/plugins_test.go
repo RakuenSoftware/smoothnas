@@ -125,6 +125,62 @@ func TestPluginsAPI_ListEmpty(t *testing.T) {
 	}
 }
 
+func TestPluginsAPI_ListIncludesContainerRefs(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	install := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{
+		"manifest":        readManifestFixture(t, "gh-runner.yaml"),
+		"tierAssignments": map[string]any{"default": "media"},
+	})
+	if install.Code != http.StatusCreated {
+		t.Fatalf("install status = %d body=%s", install.Code, install.Body.String())
+	}
+
+	rr := doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var got map[string][]pluginListItem
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got["plugins"]) != 1 {
+		t.Fatalf("plugins = %+v", got["plugins"])
+	}
+	row := got["plugins"][0]
+	if !row.ContainerUpdateAvailable {
+		t.Fatalf("containerUpdateAvailable = false, want true")
+	}
+	if len(row.ContainerRefs) != 1 {
+		t.Fatalf("container refs = %+v", row.ContainerRefs)
+	}
+	ref := row.ContainerRefs[0]
+	if ref.Service != "gh-runner" || ref.Name != "primary" {
+		t.Fatalf("container ref identity = %+v", ref)
+	}
+	if ref.ImageRef != "ghcr.io/rakuensoftware/smoothnas-plugin-gh-runner:0.1.0" {
+		t.Fatalf("container ref image = %q", ref.ImageRef)
+	}
+}
+
+func TestPluginsAPI_ContainerUpdateAvailabilityUsesOriginalRef(t *testing.T) {
+	refs := []plugin.ContainerRefRow{{
+		ImageRef:    "ghcr.io/example/app:edge",
+		Digest:      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ResolvedRef: "ghcr.io/example/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}}
+	if !hasMutableContainerRef(refs) {
+		t.Fatalf("resolved mutable tag should remain updateable")
+	}
+
+	pinned := []plugin.ContainerRefRow{{
+		ImageRef: "ghcr.io/example/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Digest:   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}}
+	if hasMutableContainerRef(pinned) {
+		t.Fatalf("digest-pinned ref should not be updateable")
+	}
+}
+
 func TestPluginsAPI_ParseReturnsManifestJSONShape(t *testing.T) {
 	h, _ := newPluginsHandlerForTest(t)
 	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/parse", map[string]any{
