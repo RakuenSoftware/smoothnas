@@ -247,17 +247,28 @@ func splitNameVerb(rest string) (name, verb string) {
 // (the raw DB row is exposed under .plugin so future fields don't
 // need a UI churn).
 type pluginListItem struct {
-	Name                 string   `json:"name"`
-	Version              string   `json:"version"`
-	State                string   `json:"state"`
-	ArtifactType         string   `json:"artifactType"`
-	ImageRef             string   `json:"imageRef,omitempty"`
-	DistroSummary        string   `json:"distroSummary,omitempty"`
-	InstanceCount        int      `json:"instanceCount"`
-	InstanceConfigurable bool     `json:"instanceConfigurable"`
-	ResolvedProfiles     []string `json:"resolvedProfiles"`
-	InstalledAt          string   `json:"installedAt"`
-	UpdatedAt            string   `json:"updatedAt"`
+	Name                     string                   `json:"name"`
+	Version                  string                   `json:"version"`
+	State                    string                   `json:"state"`
+	ArtifactType             string                   `json:"artifactType"`
+	ImageRef                 string                   `json:"imageRef,omitempty"`
+	DistroSummary            string                   `json:"distroSummary,omitempty"`
+	InstanceCount            int                      `json:"instanceCount"`
+	InstanceConfigurable     bool                     `json:"instanceConfigurable"`
+	ResolvedProfiles         []string                 `json:"resolvedProfiles"`
+	ContainerRefs            []pluginContainerRefItem `json:"containerRefs"`
+	ContainerUpdateAvailable bool                     `json:"containerUpdateAvailable"`
+	InstalledAt              string                   `json:"installedAt"`
+	UpdatedAt                string                   `json:"updatedAt"`
+}
+
+type pluginContainerRefItem struct {
+	Service     string `json:"service"`
+	Name        string `json:"name"`
+	ImageRef    string `json:"imageRef"`
+	ResolvedRef string `json:"resolvedRef,omitempty"`
+	Digest      string `json:"digest,omitempty"`
+	UpdatedAt   string `json:"updatedAt"`
 }
 
 func (h *PluginsHandler) list(w http.ResponseWriter, _ *http.Request) {
@@ -268,29 +279,64 @@ func (h *PluginsHandler) list(w http.ResponseWriter, _ *http.Request) {
 	}
 	out := make([]pluginListItem, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, toPluginListItem(r))
+		rec, err := h.store.Get(r.Name)
+		if err != nil {
+			serverError(w, err)
+			return
+		}
+		out = append(out, toPluginListItem(rec))
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"plugins": out})
 }
 
-func toPluginListItem(r plugin.PluginRow) pluginListItem {
+func toPluginListItem(rec *plugin.PluginRecord) pluginListItem {
+	r := rec.Plugin
 	profiles := r.ResolvedProfiles
 	if profiles == nil {
 		profiles = []string{}
 	}
 	return pluginListItem{
-		Name:                 r.Name,
-		Version:              r.Version,
-		State:                r.State,
-		ArtifactType:         r.ArtifactType,
-		ImageRef:             r.ImageRef,
-		DistroSummary:        r.DistroSummary,
-		InstanceCount:        r.InstanceCount,
-		InstanceConfigurable: r.InstanceConfigurable,
-		ResolvedProfiles:     profiles,
-		InstalledAt:          r.InstalledAt,
-		UpdatedAt:            r.UpdatedAt,
+		Name:                     r.Name,
+		Version:                  r.Version,
+		State:                    r.State,
+		ArtifactType:             r.ArtifactType,
+		ImageRef:                 r.ImageRef,
+		DistroSummary:            r.DistroSummary,
+		InstanceCount:            r.InstanceCount,
+		InstanceConfigurable:     r.InstanceConfigurable,
+		ResolvedProfiles:         profiles,
+		ContainerRefs:            toPluginContainerRefItems(rec.ContainerRefs),
+		ContainerUpdateAvailable: hasMutableContainerRef(rec.ContainerRefs),
+		InstalledAt:              r.InstalledAt,
+		UpdatedAt:                r.UpdatedAt,
 	}
+}
+
+func toPluginContainerRefItems(refs []plugin.ContainerRefRow) []pluginContainerRefItem {
+	if refs == nil {
+		return []pluginContainerRefItem{}
+	}
+	out := make([]pluginContainerRefItem, 0, len(refs))
+	for _, ref := range refs {
+		out = append(out, pluginContainerRefItem{
+			Service:     ref.Service,
+			Name:        ref.Name,
+			ImageRef:    ref.ImageRef,
+			ResolvedRef: ref.ResolvedRef,
+			Digest:      ref.Digest,
+			UpdatedAt:   ref.UpdatedAt,
+		})
+	}
+	return out
+}
+
+func hasMutableContainerRef(refs []plugin.ContainerRefRow) bool {
+	for _, ref := range refs {
+		if ref.ImageRef != "" && !strings.Contains(ref.ImageRef, "@sha256:") {
+			return true
+		}
+	}
+	return false
 }
 
 // detail returns the full PluginRecord (plugin row + per-instance
@@ -343,7 +389,7 @@ func toPluginDetail(rec *plugin.PluginRecord) pluginDetail {
 		containerRefs = []plugin.ContainerRefRow{}
 	}
 	return pluginDetail{
-		Plugin:        toPluginListItem(rec.Plugin),
+		Plugin:        toPluginListItem(rec),
 		Services:      toPluginServiceItems(rec),
 		Instances:     instances,
 		Volumes:       volumes,

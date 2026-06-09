@@ -20,7 +20,18 @@ type PluginRow = {
   instanceCount: number;
   instanceConfigurable: boolean;
   resolvedProfiles: string[];
+  containerRefs?: PluginContainerRef[];
+  containerUpdateAvailable?: boolean;
   installedAt: string;
+  updatedAt: string;
+};
+
+type PluginContainerRef = {
+  service: string;
+  name: string;
+  imageRef: string;
+  resolvedRef?: string;
+  digest?: string;
   updatedAt: string;
 };
 
@@ -240,6 +251,9 @@ function PluginCard({
   const isRunning = plugin.state === 'running';
   const isStopped = plugin.state === 'stopped' || plugin.state === 'installed' || plugin.state === 'failed';
   const needsMaterialise = plugin.state === 'installed';
+  const containerRefs = plugin.containerRefs ?? [];
+  const visibleContainerRefs = containerRefs.slice(0, 6);
+  const remainingContainerRefs = containerRefs.length - visibleContainerRefs.length;
 
   return (
     <div className="plugin-card">
@@ -294,6 +308,32 @@ function PluginCard({
             <dd>{plugin.distroSummary}</dd>
           </>
         )}
+        {containerRefs.length > 0 && (
+          <>
+            <dt>{t('plugins.label.containers')}</dt>
+            <dd>
+              <div className="plugin-card-ref-list">
+                {visibleContainerRefs.map(ref => {
+                  const version = containerRefVersion(ref);
+                  return (
+                    <div
+                      key={`${ref.service}/${ref.name}`}
+                      className="mono truncate"
+                      title={`${containerRefName(ref)}: ${version}`}
+                    >
+                      <span className="muted">{containerRefName(ref)}:</span> {shortContainerRef(version)}
+                    </div>
+                  );
+                })}
+                {remainingContainerRefs > 0 && (
+                  <div className="muted">
+                    {t('plugins.label.moreContainers').replace('{count}', String(remainingContainerRefs))}
+                  </div>
+                )}
+              </div>
+            </dd>
+          </>
+        )}
         <dt>{t('plugins.label.installed')}</dt>
         <dd>{plugin.installedAt}</dd>
       </dl>
@@ -309,13 +349,15 @@ function PluginCard({
             {t('plugins.action.update')}
           </button>
         )}
-        <button
-          className="btn"
-          disabled={busy || needsMaterialise}
-          onClick={() => onLifecycle('refresh-containers')}
-        >
-          {t('plugins.action.refreshContainers')}
-        </button>
+        {plugin.containerUpdateAvailable && (
+          <button
+            className="btn"
+            disabled={busy || needsMaterialise}
+            onClick={() => onLifecycle('refresh-containers')}
+          >
+            {t('plugins.action.refreshContainers')}
+          </button>
+        )}
         {needsMaterialise ? (
           <button
             className="btn primary"
@@ -378,6 +420,18 @@ function PluginCard({
 
 function isVersionGreater(candidate: string, current: string): boolean {
   return compareSemver(candidate, current) > 0;
+}
+
+function containerRefName(ref: PluginContainerRef): string {
+  return [ref.service, ref.name].filter(Boolean).join('/');
+}
+
+function containerRefVersion(ref: PluginContainerRef): string {
+  return ref.resolvedRef || ref.imageRef || '';
+}
+
+function shortContainerRef(ref: string): string {
+  return ref.replace(/sha256:([0-9a-f]{12})[0-9a-f]+/i, 'sha256:$1...');
 }
 
 function compareSemver(a: string, b: string): number {
