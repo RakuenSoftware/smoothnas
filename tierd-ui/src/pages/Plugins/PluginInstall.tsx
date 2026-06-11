@@ -9,10 +9,8 @@ import { pluginCatalogRepositories, type CatalogRepository } from '../../data/pl
 // ParsedManifest matches the JSON shape POST /api/plugins/parse
 // returns. Loose typing — the backend validates and the wizard
 // only reads a small subset.
-type ParsedManifest = {
-  apiVersion: string;
-  kind: string;
-  metadata: { name: string; version: string; description?: string; vendor?: string; homepage?: string };
+type ManifestService = {
+  name: string;
   artifact: {
     type: string;
     image?: string;
@@ -23,7 +21,30 @@ type ParsedManifest = {
     packages?: string[];
     setup?: string[];
   };
-  container: { command?: string[]; restartPolicy?: string };
+  container?: { command?: string[]; restartPolicy?: string };
+  volumes?: ManifestVolume[];
+  ports?: { name: string; port: number; protocol: string; expose: boolean; hostExpose?: boolean }[];
+  config?: ManifestConfigField[];
+};
+
+type ParsedManifest = {
+  apiVersion: string;
+  kind: string;
+  metadata: { name: string; version: string; description?: string; vendor?: string; homepage?: string };
+  services?: ManifestService[];
+  // Legacy top-level fields kept optional for back-compat with any
+  // hand-pasted old single-image manifests that bypass ParseManifest.
+  artifact?: {
+    type: string;
+    image?: string;
+    digest?: string;
+    distro?: string;
+    release?: string;
+    arch?: string;
+    packages?: string[];
+    setup?: string[];
+  };
+  container?: { command?: string[]; restartPolicy?: string };
   instances?: { count?: number; configurable?: boolean };
   volumes?: ManifestVolume[];
   ports?: { name: string; port: number; protocol: string; expose: boolean; hostExpose?: boolean }[];
@@ -31,6 +52,39 @@ type ParsedManifest = {
   profiles?: string[];
   config?: ManifestConfigField[];
 };
+
+function manifestServices(m: ParsedManifest | null | undefined): ManifestService[] {
+  if (!m) return [];
+  if (m.services && m.services.length > 0) return m.services;
+  // Defensive fallback for a hand-pasted legacy single-service manifest.
+  if (m.artifact) {
+    return [{
+      name: m.metadata?.name || 'plugin',
+      artifact: m.artifact,
+      container: m.container,
+      volumes: m.volumes,
+      ports: m.ports,
+      config: m.config,
+    }];
+  }
+  return [];
+}
+
+function allVolumes(m: ParsedManifest | null | undefined): ManifestVolume[] {
+  return manifestServices(m).flatMap(s => s.volumes ?? []);
+}
+
+function allPorts(m: ParsedManifest | null | undefined): { name: string; port: number; protocol: string; expose: boolean; hostExpose?: boolean }[] {
+  return manifestServices(m).flatMap(s => s.ports ?? []);
+}
+
+function allConfig(m: ParsedManifest | null | undefined): ManifestConfigField[] {
+  return manifestServices(m).flatMap(s => s.config ?? []);
+}
+
+function allServiceImages(m: ParsedManifest | null | undefined): string {
+  return manifestServices(m).map(s => s.artifact?.image ?? '').filter(Boolean).join(' ');
+}
 
 type ManifestVolume = {
   name: string;
@@ -152,7 +206,7 @@ export default function PluginInstall() {
   }, []);
 
   const tierBoundVolumes = useMemo(
-    () => (parsed?.volumes ?? []).filter(v => v.mode === 'tier-bound'),
+    () => allVolumes(parsed).filter(v => v.mode === 'tier-bound'),
     [parsed],
   );
 
@@ -173,7 +227,7 @@ export default function PluginInstall() {
           // Pre-fill config defaults so the configure step starts
           // with a useful baseline.
           const defaults: Record<string, string> = {};
-          for (const f of m.config ?? []) {
+          for (const f of allConfig(m)) {
             defaults[f.key] = f.default ?? '';
             if (f.type === 'gpu' && catalogGPUSelection && gpuMatchesField(f, catalogGPUSelection.vendor)) {
               defaults[f.key] = catalogGPUSelection.devicePath;
@@ -588,7 +642,7 @@ function displayPluginName(name: string): string {
 }
 
 function inferManifestVariant(assetName: string, manifest: ParsedManifest): string {
-  const raw = `${assetName} ${manifest.artifact.image ?? ''} ${(manifest.profiles ?? []).join(' ')}`.toLowerCase();
+  const raw = `${assetName} ${allServiceImages(manifest)} ${(manifest.profiles ?? []).join(' ')}`.toLowerCase();
   if (raw.includes('cpu')) return 'CPU only';
   if (raw.includes('cuda')) return 'NVIDIA CUDA';
   if (raw.includes('rocm')) return 'AMD ROCm';
@@ -600,7 +654,7 @@ function inferManifestVariant(assetName: string, manifest: ParsedManifest): stri
 }
 
 function manifestAccelerator(assetName: string, manifest: ParsedManifest): string {
-  const raw = `${assetName} ${manifest.artifact.image ?? ''} ${(manifest.profiles ?? []).join(' ')}`.toLowerCase();
+  const raw = `${assetName} ${allServiceImages(manifest)} ${(manifest.profiles ?? []).join(' ')}`.toLowerCase();
   if (raw.includes('cpu')) return 'cpu';
   if (raw.includes('cuda') || raw.includes('gpu-nvidia')) return 'nvidia';
   if (raw.includes('gpu-intel')) return 'intel';
@@ -695,7 +749,7 @@ function catalogTags(manifest: ParsedManifest, variant: string, releaseTag: stri
   if (variant) tags.add(variant);
   if ((manifest.profiles ?? []).includes('runtime-control')) tags.add('runtime');
   if ((manifest.profiles ?? []).includes('wolf-runtime')) tags.add('runtime');
-  if ((manifest.ports ?? []).some(p => p.hostExpose)) tags.add('host ports');
+  if (allPorts(manifest).some(p => p.hostExpose)) tags.add('host ports');
   if (manifest.ui?.embed) tags.add('UI');
   if (manifest.instances?.configurable || (manifest.instances?.count ?? 1) > 1) tags.add('multi-instance');
   return Array.from(tags);
@@ -712,36 +766,15 @@ function ownerFromRepo(repo: string): string {
 function PreviewStep({ manifest }: { manifest: ParsedManifest }) {
   const { t } = useI18n();
   const empty = t('plugins.install.preview.empty');
+  const services = manifestServices(manifest);
+  const showServiceHeading = services.length > 1;
+  const allKeys = Array.from(new Set(allConfig(manifest).map(c => c.key)));
   return (
     <>
       <h2>{t('plugins.install.preview.heading')}</h2>
       <dl className="wizard-fields">
         <dt>{t('plugins.label.version')}</dt>
         <dd>{manifest.metadata.name} @ {manifest.metadata.version}</dd>
-        {manifest.artifact.type === 'oci-image' && (
-          <>
-            <dt>{t('plugins.install.preview.image')}</dt>
-            <dd className="mono">
-              {manifest.artifact.image}
-              {manifest.artifact.digest ? `@${manifest.artifact.digest}` : ''}
-            </dd>
-          </>
-        )}
-        {manifest.artifact.type === 'lxc-distro' && (
-          <>
-            <dt>{t('plugins.install.preview.distro')}</dt>
-            <dd>
-              {manifest.artifact.distro}/{manifest.artifact.release}
-              {manifest.artifact.arch ? `/${manifest.artifact.arch}` : ''}
-            </dd>
-          </>
-        )}
-        {manifest.container.command && manifest.container.command.length > 0 && (
-          <>
-            <dt>{t('plugins.install.preview.command')}</dt>
-            <dd className="mono">{manifest.container.command.join(' ')}</dd>
-          </>
-        )}
         <dt>{t('plugins.install.preview.instances')}</dt>
         <dd>{manifest.instances?.count ?? 1}</dd>
         <dt>{t('plugins.install.preview.profiles')}</dt>
@@ -752,36 +785,71 @@ function PreviewStep({ manifest }: { manifest: ParsedManifest }) {
             </span>
           ) : empty}
         </dd>
-        <dt>{t('plugins.install.preview.volumes')}</dt>
-        <dd>
-          {(manifest.volumes ?? []).length > 0 ? (
-            <ul style={{ margin: 0, padding: '0 0 0 16px' }}>
-              {(manifest.volumes ?? []).map(v => (
-                <li key={v.name}>
-                  <span className="mono">{v.name}</span>
-                  {' → '}
-                  <span className="mono">{v.bind}</span>
-                  {' ('}
-                  {v.mode === 'tier-bound' ? `tier-bound, ${v.slot}` : 'flat'}
-                  {v.perInstance ? ', perInstance' : ''}
-                  {')'}
-                </li>
-              ))}
-            </ul>
-          ) : empty}
-        </dd>
-        <dt>{t('plugins.install.preview.ports')}</dt>
-        <dd>
-          {(manifest.ports ?? []).length > 0
-            ? (manifest.ports ?? []).map(p => `${p.name} (${p.port}/${p.protocol}${p.hostExpose ? ', host' : ''})`).join(', ')
-            : empty}
-        </dd>
+      </dl>
+
+      {services.map(svc => (
+        <div key={svc.name} className="wizard-preview-service">
+          {showServiceHeading && (
+            <h3 className="wizard-preview-service-heading">
+              {t('plugins.install.preview.service', { name: svc.name })}
+            </h3>
+          )}
+          <dl className="wizard-fields">
+            {svc.artifact.type === 'oci-image' && (
+              <>
+                <dt>{t('plugins.install.preview.image')}</dt>
+                <dd className="mono">
+                  {svc.artifact.image}
+                  {svc.artifact.digest ? `@${svc.artifact.digest}` : ''}
+                </dd>
+              </>
+            )}
+            {svc.artifact.type === 'lxc-distro' && (
+              <>
+                <dt>{t('plugins.install.preview.distro')}</dt>
+                <dd>
+                  {svc.artifact.distro}/{svc.artifact.release}
+                  {svc.artifact.arch ? `/${svc.artifact.arch}` : ''}
+                </dd>
+              </>
+            )}
+            {svc.container?.command && svc.container.command.length > 0 && (
+              <>
+                <dt>{t('plugins.install.preview.command')}</dt>
+                <dd className="mono">{svc.container.command.join(' ')}</dd>
+              </>
+            )}
+            <dt>{t('plugins.install.preview.volumes')}</dt>
+            <dd>
+              {(svc.volumes ?? []).length > 0 ? (
+                <ul style={{ margin: 0, padding: '0 0 0 16px' }}>
+                  {(svc.volumes ?? []).map(v => (
+                    <li key={`${svc.name}:${v.name}`}>
+                      <span className="mono">{v.name}</span>
+                      {' → '}
+                      <span className="mono">{v.bind}</span>
+                      {' ('}
+                      {v.mode === 'tier-bound' ? `tier-bound, ${v.slot}` : 'flat'}
+                      {v.perInstance ? ', perInstance' : ''}
+                      {')'}
+                    </li>
+                  ))}
+                </ul>
+              ) : empty}
+            </dd>
+            <dt>{t('plugins.install.preview.ports')}</dt>
+            <dd>
+              {(svc.ports ?? []).length > 0
+                ? (svc.ports ?? []).map(p => `${p.name} (${p.port}/${p.protocol}${p.hostExpose ? ', host' : ''})`).join(', ')
+                : empty}
+            </dd>
+          </dl>
+        </div>
+      ))}
+
+      <dl className="wizard-fields">
         <dt>{t('plugins.install.preview.config')}</dt>
-        <dd>
-          {(manifest.config ?? []).length > 0
-            ? (manifest.config ?? []).map(c => c.key).join(', ')
-            : empty}
-        </dd>
+        <dd>{allKeys.length > 0 ? allKeys.join(', ') : empty}</dd>
       </dl>
     </>
   );
@@ -957,7 +1025,7 @@ function ConfirmStep({
   profilePreview: { names?: string[] } | null;
 }) {
   const { t } = useI18n();
-  const tierBound = (manifest.volumes ?? []).filter(v => v.mode === 'tier-bound');
+  const tierBound = allVolumes(manifest).filter(v => v.mode === 'tier-bound');
   return (
     <>
       <h2>{t('plugins.install.confirm.heading')}</h2>
@@ -999,7 +1067,7 @@ function ConfirmStep({
             <dd>
               <ul style={{ margin: 0, padding: '0 0 0 16px' }}>
                 {Object.entries(configValues).map(([k, v]) => {
-                  const field = (manifest.config ?? []).find(f => f.key === k);
+                  const field = allConfig(manifest).find(f => f.key === k);
                   const display = field?.secret ? '••••••' : (v || '(empty)');
                   return (
                     <li key={k}>
