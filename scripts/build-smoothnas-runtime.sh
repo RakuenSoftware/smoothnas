@@ -23,6 +23,14 @@ fi
 git -C "$BUILD_DIR" checkout --quiet --detach FETCH_HEAD
 git -C "$BUILD_DIR" reset --quiet --hard FETCH_HEAD
 
+PATCH_DIR="${PROJECT_DIR}/runtime/patches/lxc2docker"
+if [ -d "$PATCH_DIR" ]; then
+    for patch in "$PATCH_DIR"/*.patch; do
+        [ -e "$patch" ] || continue
+        git -C "$BUILD_DIR" apply "$patch"
+    done
+fi
+
 CGO_CFLAGS="$(pkg-config --cflags lxc 2>/dev/null || true)"
 CGO_LDFLAGS="$(pkg-config --libs lxc 2>/dev/null || printf '%s' '-llxc')"
 export CGO_ENABLED=1 CGO_CFLAGS CGO_LDFLAGS
