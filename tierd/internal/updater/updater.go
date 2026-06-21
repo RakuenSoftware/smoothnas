@@ -1406,6 +1406,7 @@ func appendModulesEntryIfMissing(path, module string) error {
 var requiredPackages = []string{
 	"curl",                // Ookla repository bootstrap for speedtest CLI
 	"btrfs-progs",         // mkfs.btrfs / btrfs subvolume for filesystem arrays
+	"docker-cli",          // docker client for the LXC2Docker daemon (no docker.io daemon)
 	"fio",                 // disk benchmarks
 	"cifs-utils",          // SMB remote benchmark mounts
 	"gdisk",               // sgdisk: disk preparation before array/pool creation
