@@ -170,6 +170,7 @@ ui_status "Installing packages" "Installing SmoothNAS plugin runtime dependencie
 echo "  Installing plugin runtime dependencies..."
 DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get install -y -qq \
     lxc lxc-templates skopeo umoci rsync nftables iptables iproute2 uidmap \
+    docker-cli \
     2>/dev/null || true
 
 # OpenZFS, smoothfs, and Samba VFS DKMS builds are deferred to firstboot
