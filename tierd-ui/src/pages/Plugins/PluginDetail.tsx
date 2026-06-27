@@ -11,6 +11,7 @@ import ConfirmDialog from '../../components/ConfirmDialog/ConfirmDialog';
 // the detail page only renders a subset.
 type Detail = {
   plugin: any;
+  services: any[];
   instances: any[];
   volumes: any[];
   ports: any[];
@@ -22,6 +23,7 @@ type Detail = {
 function normalizeDetail(raw: any): Detail {
   return {
     plugin: raw?.plugin ?? {},
+    services: Array.isArray(raw?.services) ? raw.services : [],
     instances: Array.isArray(raw?.instances) ? raw.instances : [],
     volumes: Array.isArray(raw?.volumes) ? raw.volumes : [],
     ports: Array.isArray(raw?.ports) ? raw.ports : [],
@@ -187,7 +189,7 @@ export default function PluginDetail() {
       </nav>
 
       <div className="plugin-detail-pane">
-        {tab === 'overview' && <OverviewTab detail={detail} />}
+        {tab === 'overview' && <OverviewTab detail={detail} name={name!} onChanged={refresh} />}
         {tab === 'models' && <ModelsTab name={name} detail={detail} onInstalled={refresh} />}
         {tab === 'logs' && <LogsTab name={name} state={detail.plugin.state} />}
         {tab === 'config' && (
@@ -228,9 +230,26 @@ export default function PluginDetail() {
   );
 }
 
-function OverviewTab({ detail }: { detail: Detail }) {
+function OverviewTab({ detail, name, onChanged }: { detail: Detail; name: string; onChanged: () => void }) {
   const { t } = useI18n();
   const p = detail.plugin;
+  const currentPin: string =
+    (detail.services ?? []).map((s: any) => s.pinnedImage).find((v: any) => !!v) ?? '';
+  const [image, setImage] = useState(currentPin);
+  const [saving, setSaving] = useState(false);
+  const [pinMsg, setPinMsg] = useState('');
+  const savePin = (val: string) => {
+    setSaving(true);
+    setPinMsg('');
+    api
+      .setPluginImage(name, val)
+      .then(() => {
+        setPinMsg(t('plugins.detail.image.saved'));
+        onChanged();
+      })
+      .catch(e => setPinMsg(extractError(e, t('plugins.detail.image.error'))))
+      .finally(() => setSaving(false));
+  };
   return (
     <>
       <h2>{t('plugins.detail.overview.heading')}</h2>
@@ -279,6 +298,36 @@ function OverviewTab({ detail }: { detail: Detail }) {
         <dt>{t('plugins.detail.overview.updated')}</dt>
         <dd>{p.updatedAt}</dd>
       </dl>
+
+      <div className="plugin-detail-section">
+        <h3>{t('plugins.detail.image.heading')}</h3>
+        <p className="muted">{t('plugins.detail.image.help')}</p>
+        <div className="plugin-image-override">
+          <input
+            type="text"
+            className="mono"
+            value={image}
+            placeholder={t('plugins.detail.image.placeholder')}
+            onChange={e => setImage(e.target.value)}
+          />
+          <button className="btn" disabled={saving} onClick={() => savePin(image.trim())}>
+            {t('plugins.detail.image.apply')}
+          </button>
+          {currentPin && (
+            <button
+              className="btn secondary"
+              disabled={saving}
+              onClick={() => {
+                setImage('');
+                savePin('');
+              }}
+            >
+              {t('plugins.detail.image.clear')}
+            </button>
+          )}
+        </div>
+        {pinMsg && <p className="muted">{pinMsg}</p>}
+      </div>
 
       <div className="plugin-detail-section">
         <h3>{t('plugins.detail.overview.volumes')}</h3>
