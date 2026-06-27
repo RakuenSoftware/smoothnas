@@ -556,6 +556,53 @@ func TestPluginsAPI_RefreshContainersEndpoint(t *testing.T) {
 	}
 }
 
+func TestPluginsAPI_SetPinnedImageAppliesInPlace(t *testing.T) {
+	h, _ := newPluginsHandlerForTest(t)
+	rt := &fakeModelRuntime{}
+	h.lifecycle = plugin.NewLifecycle(h.store, rt)
+
+	install := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{
+		"manifest":        readManifestFixture(t, "llama.yaml"),
+		"tierAssignments": map[string]any{"default": "media"},
+	})
+	if install.Code != http.StatusCreated {
+		t.Fatalf("install status = %d body=%s", install.Code, install.Body.String())
+	}
+	createsAfterInstall := len(rt.created)
+	startsAfterInstall := len(rt.started)
+
+	const pinned = "ghcr.io/example/custom-llama:vulkan"
+	rr := doJSON(t, &routeHandler{h}, http.MethodPut, "/api/plugins/llama-cpp/image", map[string]any{
+		"image": pinned,
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("set image status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"applied":true`) {
+		t.Fatalf("response should report applied=true: %s", rr.Body.String())
+	}
+
+	// The pin must be applied in place: the running plugin is re-materialised
+	// (new container created onto the pinned image) and restarted. A plain
+	// restart would NOT re-resolve the image, so this guards the regression.
+	if len(rt.created) <= createsAfterInstall {
+		t.Fatalf("expected a new container create after pin; created=%d (was %d)", len(rt.created), createsAfterInstall)
+	}
+	if len(rt.started) <= startsAfterInstall {
+		t.Fatalf("expected a restart after pin; started=%d (was %d)", len(rt.started), startsAfterInstall)
+	}
+	last := rt.created[len(rt.created)-1]
+	if last.Image != pinned {
+		t.Fatalf("container created with image %q, want pinned %q", last.Image, pinned)
+	}
+
+	// And the pin persists in the detail view.
+	det := doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins/llama-cpp", nil)
+	if !strings.Contains(det.Body.String(), pinned) {
+		t.Fatalf("detail should report pinned image %q: %s", pinned, det.Body.String())
+	}
+}
+
 func TestPluginsAPI_InstallPreflightFailure400(t *testing.T) {
 	h, _ := newPluginsHandlerForTest(t)
 	rr := doJSON(t, &routeHandler{h}, http.MethodPost, "/api/plugins/install", map[string]any{
