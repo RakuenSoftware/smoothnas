@@ -570,23 +570,36 @@ func (l *Lifecycle) resolveContainerRefs(ctx context.Context, p *PluginRow, svc 
 	for _, c := range config {
 		env[c.Key] = c.Value
 	}
+	// Operator image pin for the primary service (survives updates -- re-applied here
+	// on every materialise). Empty when none is set.
+	pinned, err := l.store.PinnedImage(p.Name, svc.Name)
+	if err != nil {
+		return resolvedContainerRefs{}, err
+	}
 	resolvedByName := make(map[string]string, len(refs))
 	out := resolvedContainerRefs{}
 	for _, ref := range refs {
 		image := expandArg(ref.Image, env)
-		pullRef := digestPinnedImageRef(image, ref.Digest)
+		manifestDigest := ref.Digest
+		// A pinned image replaces the primary ref's manifest image; it carries its own
+		// tag/digest, so the manifest's digest pin no longer applies.
+		if ref.Name == "primary" && pinned != "" {
+			image = pinned
+			manifestDigest = ""
+		}
+		pullRef := digestPinnedImageRef(image, manifestDigest)
 		resolved, err := l.pullImageWithRetry(ctx, pullRef, nil)
 		if err != nil {
 			_ = l.setInstanceState(p.Name, svc.Name, 1, StateFailed, err.Error())
 			return out, fmt.Errorf("pull container ref %s/%s (%s): %w", svc.Name, ref.Name, pullRef, err)
 		}
-		if ref.Digest != "" && !strings.Contains(resolved, ref.Digest) {
+		if manifestDigest != "" && !strings.Contains(resolved, manifestDigest) {
 			_ = l.setInstanceState(p.Name, svc.Name, 1, StateFailed, "container ref digest mismatch")
-			return out, fmt.Errorf("container ref %s/%s digest mismatch: pulled %s, manifest pinned %s", svc.Name, ref.Name, resolved, ref.Digest)
+			return out, fmt.Errorf("container ref %s/%s digest mismatch: pulled %s, manifest pinned %s", svc.Name, ref.Name, resolved, manifestDigest)
 		}
 		digest := digestFromImageRef(resolved)
 		if digest == "" {
-			digest = ref.Digest
+			digest = manifestDigest
 		}
 		if err := l.store.SetContainerRefResolved(p.Name, svc.Name, ref.Name, pullRef, digest, resolved); err != nil {
 			return out, err

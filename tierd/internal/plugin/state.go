@@ -79,6 +79,8 @@ type ServiceRow struct {
 	DependsOn map[string]string
 	Health    *Healthcheck
 	Ordinal   int
+	// PinnedImage is the operator image override for this service ("" = none).
+	PinnedImage string
 }
 
 // InstanceRow is the in-memory image of one plugin_instances row. The
@@ -996,6 +998,50 @@ func (s *Store) SetImageRef(name, service, ref string) error {
 	return tx.Commit()
 }
 
+// SetPinnedImage sets (or clears, when image == "") the operator image pin on a
+// plugin's primary service. A pinned image is resolved and run by materialise in
+// place of the manifest's primary container ref, and -- unlike image_ref, which is
+// re-derived from the manifest on every materialise -- it survives updates and daemon
+// restarts. Resolves the primary service like SetImageRef.
+func (s *Store) SetPinnedImage(name, image string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	svc, err := primaryServiceTx(tx, name)
+	if err != nil {
+		return err
+	}
+	res, err := tx.Exec(
+		`UPDATE plugin_services SET pinned_image = ? WHERE plugin_name = ? AND service = ?`,
+		sqlNullable(image), name, svc,
+	)
+	if err != nil {
+		return fmt.Errorf("update plugin_services.pinned_image: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrPluginNotFound
+	}
+	return tx.Commit()
+}
+
+// PinnedImage returns the operator image pin for a service, or "" if none is set.
+func (s *Store) PinnedImage(name, service string) (string, error) {
+	var pin sql.NullString
+	err := s.db.QueryRow(
+		`SELECT pinned_image FROM plugin_services WHERE plugin_name = ? AND service = ?`,
+		name, service,
+	).Scan(&pin)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read plugin_services.pinned_image: %w", err)
+	}
+	return pin.String, nil
+}
+
 // SetContainerRefResolved records the latest resolution for one tracked OCI ref.
 func (s *Store) SetContainerRefResolved(name, service, refName, imageRef, digest, resolvedRef string) error {
 	res, err := s.db.Exec(
@@ -1188,7 +1234,8 @@ func (s *Store) listServices(name string) ([]ServiceRow, error) {
 	rows, err := s.db.Query(
 		`SELECT plugin_name, service, artifact_type,
 		        COALESCE(image_ref, ''), COALESCE(distro_summary, ''),
-		        COALESCE(depends_on, ''), COALESCE(health, ''), ordinal
+		        COALESCE(depends_on, ''), COALESCE(health, ''), ordinal,
+		        COALESCE(pinned_image, '')
 		 FROM plugin_services WHERE plugin_name = ? ORDER BY ordinal, service`,
 		name,
 	)
@@ -1204,6 +1251,7 @@ func (s *Store) listServices(name string) ([]ServiceRow, error) {
 			&r.PluginName, &r.Service, &r.ArtifactType,
 			&r.ImageRef, &r.DistroSummary,
 			&dependsJSON, &healthJSON, &r.Ordinal,
+			&r.PinnedImage,
 		); err != nil {
 			return nil, err
 		}
