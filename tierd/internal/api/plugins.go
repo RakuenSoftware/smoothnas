@@ -181,6 +181,12 @@ func (h *PluginsHandler) routeNamed(w http.ResponseWriter, r *http.Request, rest
 			return
 		}
 		h.updateConfig(w, r, name)
+	case "image":
+		if r.Method != http.MethodPut {
+			jsonMethodNotAllowed(w)
+			return
+		}
+		h.setPinnedImage(w, r, name)
 	case "instances":
 		switch r.Method {
 		case http.MethodGet:
@@ -359,6 +365,7 @@ type pluginServiceItem struct {
 	Name          string               `json:"name"`
 	ArtifactType  string               `json:"artifactType"`
 	ImageRef      string               `json:"imageRef,omitempty"`
+	PinnedImage   string               `json:"pinnedImage,omitempty"`
 	DistroSummary string               `json:"distroSummary,omitempty"`
 	Ordinal       int                  `json:"ordinal"`
 	DependsOn     map[string]string    `json:"dependsOn,omitempty"`
@@ -417,6 +424,7 @@ func toPluginServiceItems(rec *plugin.PluginRecord) []pluginServiceItem {
 			Name:          sr.Service,
 			ArtifactType:  sr.ArtifactType,
 			ImageRef:      sr.ImageRef,
+			PinnedImage:   sr.PinnedImage,
 			DistroSummary: sr.DistroSummary,
 			Ordinal:       sr.Ordinal,
 			DependsOn:     sr.DependsOn,
@@ -745,6 +753,44 @@ func (h *PluginsHandler) updateConfig(w http.ResponseWriter, r *http.Request, na
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"name":          name,
+		"restartNeeded": true,
+	})
+}
+
+// setPinnedImage sets (or clears, when image is empty) the operator image pin on a
+// plugin's primary service. The pin is resolved and run in place of the manifest's
+// primary container ref and persists across updates/reconciles (materialise re-applies
+// it). A restart/materialise is needed for the new image to take effect.
+type setPinnedImageRequest struct {
+	Image string `json:"image"`
+}
+
+func (h *PluginsHandler) setPinnedImage(w http.ResponseWriter, r *http.Request, name string) {
+	var req setPinnedImageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonInvalidRequestBody(w)
+		return
+	}
+	if _, err := h.store.Get(name); err != nil {
+		if errors.Is(err, plugin.ErrPluginNotFound) {
+			jsonErrorCoded(w, "plugin not found", http.StatusNotFound, "plugins.not_found")
+			return
+		}
+		serverError(w, err)
+		return
+	}
+	image := strings.TrimSpace(req.Image)
+	if err := h.store.SetPinnedImage(name, image); err != nil {
+		if errors.Is(err, plugin.ErrPluginNotFound) {
+			jsonErrorCoded(w, "plugin not found", http.StatusNotFound, "plugins.not_found")
+			return
+		}
+		serverError(w, err)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"name":          name,
+		"image":         image,
 		"restartNeeded": true,
 	})
 }
