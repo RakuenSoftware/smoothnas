@@ -240,11 +240,11 @@ function OverviewTab({ detail, name, onChanged }: { detail: Detail; name: string
   const [pinMsg, setPinMsg] = useState('');
   const savePin = (val: string) => {
     setSaving(true);
-    setPinMsg('');
+    setPinMsg(t('plugins.detail.image.applying'));
     api
       .setPluginImage(name, val)
-      .then(() => {
-        setPinMsg(t('plugins.detail.image.saved'));
+      .then(res => {
+        setPinMsg(t(res.applied ? 'plugins.detail.image.applied' : 'plugins.detail.image.saved'));
         onChanged();
       })
       .catch(e => setPinMsg(extractError(e, t('plugins.detail.image.error'))))

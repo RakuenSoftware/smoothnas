@@ -760,7 +760,12 @@ func (h *PluginsHandler) updateConfig(w http.ResponseWriter, r *http.Request, na
 // setPinnedImage sets (or clears, when image is empty) the operator image pin on a
 // plugin's primary service. The pin is resolved and run in place of the manifest's
 // primary container ref and persists across updates/reconciles (materialise re-applies
-// it). A restart/materialise is needed for the new image to take effect.
+// it).
+//
+// Setting/clearing the pin re-materialises the plugin so the new image takes effect
+// immediately (a plain restart does NOT re-resolve container refs, so it would keep
+// running the old image). If the plugin was running it is restarted onto the new
+// image; if it was stopped the pin is resolved/pulled but the plugin is left stopped.
 type setPinnedImageRequest struct {
 	Image string `json:"image"`
 }
@@ -771,7 +776,8 @@ func (h *PluginsHandler) setPinnedImage(w http.ResponseWriter, r *http.Request, 
 		jsonInvalidRequestBody(w)
 		return
 	}
-	if _, err := h.store.Get(name); err != nil {
+	rec, err := h.store.Get(name)
+	if err != nil {
 		if errors.Is(err, plugin.ErrPluginNotFound) {
 			jsonErrorCoded(w, "plugin not found", http.StatusNotFound, "plugins.not_found")
 			return
@@ -788,10 +794,31 @@ func (h *PluginsHandler) setPinnedImage(w http.ResponseWriter, r *http.Request, 
 		serverError(w, err)
 		return
 	}
+
+	// Apply the pin in place. resolveContainerRefs only runs on materialise, so without
+	// this the new image would not take effect until the next update/reconcile (a plain
+	// restart reuses the already-resolved image_ref). Detached so a client disconnect
+	// can't strand the plugin mid-swap.
+	applied := false
+	if h.lifecycle != nil {
+		opCtx := detachRequest(r)
+		wasRunning := rec.Plugin.State == plugin.StateRunning
+		if err := h.lifecycle.Materialise(opCtx, name); err != nil {
+			jsonErrorCoded(w, fmt.Sprintf("apply image pin (materialise): %v", err), http.StatusInternalServerError, "plugins.lifecycle_failed")
+			return
+		}
+		if wasRunning {
+			if err := h.lifecycle.Start(opCtx, name); err != nil {
+				jsonErrorCoded(w, fmt.Sprintf("apply image pin (start): %v", err), http.StatusInternalServerError, "plugins.lifecycle_failed")
+				return
+			}
+		}
+		applied = true
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"name":          name,
-		"image":         image,
-		"restartNeeded": true,
+		"name":    name,
+		"image":   image,
+		"applied": applied,
 	})
 }
 

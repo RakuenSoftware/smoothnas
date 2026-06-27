@@ -377,9 +377,10 @@ export const api = {
   updatePluginConfig: (name: string, config: Record<string, string>) =>
     apiFetch<any>('PUT', `/plugins/${name}/config`, { config }),
   // Operator image pin for the plugin's primary service ('' clears it). Persists
-  // across plugin updates; a restart/materialise is needed for it to take effect.
+  // across plugin updates. Setting/clearing re-materialises the plugin so the image
+  // takes effect immediately (running plugins are restarted onto the new image).
   setPluginImage: (name: string, image: string) =>
-    apiFetch<{ name: string; image: string; restartNeeded: boolean }>('PUT', `/plugins/${name}/image`, { image }),
+    apiFetch<{ name: string; image: string; applied: boolean }>('PUT', `/plugins/${name}/image`, { image }),
   installPluginModel: (name: string, req: { url: string; filename?: string; sha256?: string; temperature?: number; start?: boolean }) =>
     apiFetch<{ jobId: string; tag: string }>('POST', `/plugins/${name}/models/install`, req),
   rotatePluginToken: (name: string) =>
