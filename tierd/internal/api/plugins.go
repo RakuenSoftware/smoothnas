@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/gpu"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
 )
 
 // detachRequest returns a context derived from the request that is NOT
@@ -196,6 +198,12 @@ func (h *PluginsHandler) routeNamed(w http.ResponseWriter, r *http.Request, rest
 		default:
 			jsonMethodNotAllowed(w)
 		}
+	case "services":
+		if r.Method != http.MethodGet {
+			jsonMethodNotAllowed(w)
+			return
+		}
+		h.composeServices(w, r, name)
 	case "logs":
 		if r.Method != http.MethodGet {
 			jsonMethodNotAllowed(w)
@@ -232,6 +240,12 @@ func (h *PluginsHandler) listGPUs(w http.ResponseWriter, _ *http.Request) {
 // through to the regular install path which will surface the parse
 // error properly.
 func manifestNameForDuplicateCheck(yamlText string) (string, error) {
+	// plugins-11: a compose-format plugin's name is the compose top-level name:,
+	// not metadata.name — detect it so the friendly duplicate-409 fires for
+	// compose installs too (InstallWithOptions still catches dupes regardless).
+	if compose.IsComposeFormat([]byte(yamlText)) {
+		return compose.ProjectName([]byte(yamlText)), nil
+	}
 	m, err := plugin.ParseManifest([]byte(yamlText))
 	if err != nil {
 		return "", err
@@ -900,6 +914,26 @@ func (h *PluginsHandler) streamLogs(w http.ResponseWriter, r *http.Request, name
 		serverError(w, err)
 		return
 	}
+	// Compose plugins have no tierd-tracked container; serve the aggregated
+	// `compose logs` tail (text/plain, no follow) instead of the container SSE
+	// stream. Streaming follow for compose is a follow-up (Phase 4).
+	if rec.Plugin.ArtifactType == plugin.ArtifactCompose {
+		tail := 200
+		if v := r.URL.Query().Get("tail"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				tail = n
+			}
+		}
+		out, err := h.lifecycle.ComposeLogs(r.Context(), name, tail)
+		if err != nil {
+			jsonErrorCoded(w, err.Error(), http.StatusBadGateway, "plugins.logs_unavailable")
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write(out)
+		return
+	}
+
 	// v1 streams instance 1's logs only. Multi-instance plugins
 	// (gh-runner) get a per-instance picker in phase 6d.
 	if len(rec.Instances) == 0 || rec.Instances[0].ContainerID == "" {
@@ -963,6 +997,46 @@ type listInstancesResponse struct {
 // endpoint keeps the UI's Instances tab from having to refetch the
 // whole detail (manifest + volumes + ports + config + …) just to
 // render a small table.
+// composeServiceView is one service row for the UI (Phase 4).
+type composeServiceView struct {
+	Service string              `json:"service"`
+	State   string              `json:"state"`
+	Health  string              `json:"health,omitempty"`
+	Ports   []compose.Publisher `json:"ports,omitempty"`
+}
+
+type composeServicesResponse struct {
+	Plugin   string               `json:"plugin"`
+	Overall  string               `json:"overall"`
+	Services []composeServiceView `json:"services"`
+}
+
+// composeServices returns the live per-service `compose ps` for a compose plugin
+// (Phase 4: the data the UI renders — project rollup + each service's
+// state/health/published ports).
+func (h *PluginsHandler) composeServices(w http.ResponseWriter, r *http.Request, name string) {
+	if h.lifecycle == nil {
+		jsonErrorCoded(w, "plugin runtime unavailable", http.StatusServiceUnavailable, "plugins.runtime_unavailable")
+		return
+	}
+	status, err := h.lifecycle.ComposeServices(r.Context(), name)
+	if err != nil {
+		if errors.Is(err, plugin.ErrPluginNotFound) {
+			jsonErrorCoded(w, "plugin not found", http.StatusNotFound, "plugins.not_found")
+			return
+		}
+		jsonErrorCoded(w, err.Error(), http.StatusBadRequest, "plugins.not_compose")
+		return
+	}
+	out := composeServicesResponse{Plugin: name, Overall: string(status.Overall)}
+	for _, e := range status.Services {
+		out.Services = append(out.Services, composeServiceView{
+			Service: e.Service, State: e.State, Health: e.Health, Ports: e.Publishers,
+		})
+	}
+	_ = json.NewEncoder(w).Encode(out)
+}
+
 func (h *PluginsHandler) listInstances(w http.ResponseWriter, _ *http.Request, name string) {
 	rec, err := h.store.Get(name)
 	if err != nil {

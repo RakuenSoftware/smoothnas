@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/runtime"
 )
 
@@ -77,6 +78,8 @@ type Lifecycle struct {
 	lxcPath string
 	proxy   ProxyManager
 	catalog *Catalog
+	backend *compose.Backend // plugins-11: compose-format plugins route here
+	tier    TierProvider     // plugins-11 Phase 2: compose tiered-volume resolution
 }
 
 // NewLifecycle constructs a Lifecycle around an existing Store and a
@@ -90,6 +93,181 @@ func (l *Lifecycle) SetProxy(p ProxyManager) { l.proxy = p }
 
 // SetCatalog attaches the profile catalog.
 func (l *Lifecycle) SetCatalog(c *Catalog) { l.catalog = c }
+
+// SetComposeBackend attaches the compose backend (plugins-11). When set,
+// compose-format plugins route their Materialise/Start/Demolish through it
+// instead of the manifest BuildCreatePayload path.
+func (l *Lifecycle) SetComposeBackend(b *compose.Backend) { l.backend = b }
+
+// SetTierProvider attaches the tier subsystem so compose plugins' x-smoothnas
+// tiered volumes resolve to smoothfs host paths (Phase 2).
+func (l *Lifecycle) SetTierProvider(tp TierProvider) { l.tier = tp }
+
+// ComposeServices returns the live per-service `compose ps` for a compose plugin
+// (the project rollup plus each service's state/health/published ports) — the
+// data a UI renders. Errors for a non-compose plugin (Phase 4).
+func (l *Lifecycle) ComposeServices(ctx context.Context, name string) (compose.Status, error) {
+	rec, err := l.store.Get(name)
+	if err != nil {
+		return compose.Status{}, err
+	}
+	if !l.isCompose(rec) {
+		return compose.Status{}, fmt.Errorf("plugin %q is not a compose plugin", name)
+	}
+	return l.backend.Status(ctx, l.composeSpec(rec))
+}
+
+// ComposeLogs returns the tail of a compose plugin's aggregated logs (Phase 4).
+func (l *Lifecycle) ComposeLogs(ctx context.Context, name string, tail int) ([]byte, error) {
+	rec, err := l.store.Get(name)
+	if err != nil {
+		return nil, err
+	}
+	if !l.isCompose(rec) {
+		return nil, fmt.Errorf("plugin %q is not a compose plugin", name)
+	}
+	return l.backend.Logs(ctx, l.composeSpec(rec), tail)
+}
+
+// composeSpecResolved builds the compose ProjectSpec with x-smoothnas tiered
+// volumes resolved to smoothfs host binds (mechanism B). Used at Materialise
+// (write time); the rewritten compose is what gets written to disk, so
+// Start/Stop/Status run against the bound project. Resolution errors (missing/
+// unhealthy tier) block Materialise before any container is created.
+func (l *Lifecycle) composeSpecResolved(rec *PluginRecord) (compose.ProjectSpec, error) {
+	yamlBytes := []byte(rec.Plugin.ManifestYAML)
+	// Phase-5 (gh-runner): expand x-smoothnas.instances services into N discrete
+	// per-instance services BEFORE tiered-volume resolution, so each instance's
+	// _work volume resolves + pins independently (data-safe across scale).
+	specs, err := compose.ScalableServices(yamlBytes)
+	if err != nil {
+		return compose.ProjectSpec{}, err
+	}
+	if len(specs) > 0 {
+		counts := map[string]int{}
+		for _, s := range specs {
+			counts[s.Service] = rec.Plugin.InstanceCount
+		}
+		if yamlBytes, err = compose.ExpandInstances(yamlBytes, counts); err != nil {
+			return compose.ProjectSpec{}, err
+		}
+	}
+	tvols, err := compose.TieredVolumes(yamlBytes)
+	if err != nil {
+		return compose.ProjectSpec{}, err
+	}
+	if len(tvols) > 0 {
+		binds, err := l.resolveAndPinComposeVolumes(rec.Plugin.Name, tvols)
+		if err != nil {
+			return compose.ProjectSpec{}, err
+		}
+		if yamlBytes, err = compose.RewriteTieredBinds(yamlBytes, binds); err != nil {
+			return compose.ProjectSpec{}, err
+		}
+	}
+	return compose.SpecFromSingle(rec.Plugin.Name, string(yamlBytes), nil), nil
+}
+
+// isCompose reports whether a stored plugin is compose-format and a backend is
+// wired to handle it. It trusts the ArtifactCompose stamp set at install time
+// (every plugin gets a definitive artifact type), so it does no per-call YAML
+// re-parse and can never misroute a manifest plugin whose YAML looks compose-y.
+func (l *Lifecycle) isCompose(rec *PluginRecord) bool {
+	return l.backend != nil && rec.Plugin.ArtifactType == ArtifactCompose
+}
+
+// composeSpec builds the compose ProjectSpec from a stored compose plugin. The
+// stored "manifest" is the raw compose project; the tierd plugin name is the
+// compose -p project name. (Operator config -> .env is a follow-up slice.)
+func (l *Lifecycle) composeSpec(rec *PluginRecord) compose.ProjectSpec {
+	return compose.SpecFromSingle(rec.Plugin.Name, rec.Plugin.ManifestYAML, nil)
+}
+
+// syncComposeState refreshes a compose plugin's CACHED state from compose ps (the
+// source of truth) after an op — best-effort. `compose up`/`stop` returning nil
+// doesn't prove the rollup, so we read the real state rather than assume
+// running/stopped. Status reads this cache (a per-read `compose ps` would spawn an
+// unbounded subprocess per UI poll); a periodic reconcile sweep to catch
+// out-of-band drift is a follow-up.
+func (l *Lifecycle) syncComposeState(ctx context.Context, name string, rec *PluginRecord) {
+	if st, err := l.backend.Status(ctx, l.composeSpec(rec)); err == nil {
+		_ = l.store.SetPluginState(name, composeOverallToState(st.Overall))
+	}
+}
+
+// ReconcileComposeStates refreshes every compose plugin's cached state from
+// compose ps. The event-based reconciler only tracks io.smoothnas-labelled
+// containers; compose plugins carry com.docker.compose labels, so a periodic
+// sweep keeps their cached state fresh against out-of-band changes (a container
+// crash/restart outside a tierd op). No-op when no backend is wired.
+func (l *Lifecycle) ReconcileComposeStates(ctx context.Context) error {
+	if l.backend == nil {
+		return nil
+	}
+	rows, err := l.store.List()
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if row.ArtifactType != ArtifactCompose {
+			continue
+		}
+		rec, err := l.store.Get(row.Name)
+		if err != nil {
+			continue
+		}
+		l.syncComposeState(ctx, row.Name, rec)
+	}
+	return nil
+}
+
+// resolveAndPinComposeVolumes resolves each tiered volume to its host path and
+// PINS the placement on first materialise. On a later materialise it reuses the
+// pinned path and REFUSES a silent retier (the compose now points at a different
+// tier) — a compose edit never relocates tiered data; an explicit REPIN (a
+// follow-up operator verb) is required.
+func (l *Lifecycle) resolveAndPinComposeVolumes(plugin string, tvols []compose.TieredVolume) (map[string]string, error) {
+	pins, err := l.store.GetComposeVolumePins(plugin)
+	if err != nil {
+		return nil, err
+	}
+	binds := map[string]string{}
+	for _, tv := range tvols {
+		resolved, err := ResolveComposeTierVolumes(l.tier, plugin, []compose.TieredVolume{tv})
+		if err != nil {
+			return nil, err
+		}
+		cur := resolved[tv.Name]
+		if pin, ok := pins[tv.Name]; ok {
+			if pin.HostPath != cur {
+				return nil, fmt.Errorf("volume %q is pinned to %q (tier %q); the compose now requests tier %q -> %q. "+
+					"A compose edit will not silently relocate tiered data — an explicit retier is required",
+					tv.Name, pin.HostPath, pin.Pool, tv.Tier, cur)
+			}
+			binds[tv.Name] = pin.HostPath
+			continue
+		}
+		if err := l.store.PinComposeVolume(plugin, tv.Name, tv.Tier, cur, tv.MinSize); err != nil {
+			return nil, err
+		}
+		binds[tv.Name] = cur
+	}
+	return binds, nil
+}
+
+// composeOverallToState maps a compose-project rollup to a tierd plugin state.
+func composeOverallToState(o compose.Overall) string {
+	switch o {
+	case compose.StateRunning:
+		return StateRunning
+	case compose.StateDegraded:
+		return StateDegraded
+	case compose.StateFailed:
+		return StateFailed
+	default:
+		return StateStopped
+	}
+}
 
 // SetLXCPath attaches the smoothnas-runtime LXC root used for container
 // backing directories. Pass an empty string to disable filesystem cleanup.
@@ -215,6 +393,16 @@ func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 	rec, err := l.store.Get(name)
 	if err != nil {
 		return err
+	}
+	if l.isCompose(rec) {
+		if err := l.checkComposeHostPortConflicts(name, rec.Plugin.ManifestYAML); err != nil {
+			return err
+		}
+		spec, err := l.composeSpecResolved(rec)
+		if err != nil {
+			return err
+		}
+		return l.backend.Materialise(ctx, spec)
 	}
 	manifest, err := ParseManifest([]byte(rec.Plugin.ManifestYAML))
 	if err != nil {
@@ -347,14 +535,69 @@ func (l *Lifecycle) checkHostPortConflicts(name string, rec *PluginRecord) error
 		if err != nil {
 			return fmt.Errorf("load %q for host-port conflict check: %w", o.Name, err)
 		}
-		for _, p := range orec.Ports {
-			if !p.HostExpose {
-				continue
-			}
-			if _, clash := want[hostPortKey(p.ContainerPort, p.Protocol)]; clash {
-				return fmt.Errorf("host port %s is already published by plugin %q (service %q); "+
+		for key, svc := range otherHostPortKeys(orec) {
+			if _, clash := want[key]; clash {
+				return fmt.Errorf("host port %s is already published by plugin %q (%s); "+
 					"two plugins cannot host-expose the same port — change one of them",
-					hostPortKey(p.ContainerPort, p.Protocol), o.Name, p.Service)
+					key, o.Name, svc)
+			}
+		}
+	}
+	return nil
+}
+
+// otherHostPortKeys returns the host-published port keys (port/proto -> a service
+// or "compose" descriptor) for an installed plugin, unified across the manifest
+// (hostExpose) and compose (ports:) forms so the guard is cross-type.
+func otherHostPortKeys(orec *PluginRecord) map[string]string {
+	keys := map[string]string{}
+	if orec.Plugin.ArtifactType == ArtifactCompose {
+		ports, _ := compose.HostPorts([]byte(orec.Plugin.ManifestYAML))
+		for _, h := range ports {
+			keys[h.Key()] = "compose"
+		}
+		return keys
+	}
+	for _, p := range orec.Ports {
+		if p.HostExpose {
+			keys[hostPortKey(p.ContainerPort, p.Protocol)] = "service " + p.Service
+		}
+	}
+	return keys
+}
+
+// checkComposeHostPortConflicts is the compose-plugin analogue of
+// checkHostPortConflicts: it parses the candidate's fixed published ports and
+// rejects a collision with any other installed plugin (manifest or compose)
+// before `compose up`, turning a silent DNAT shadow into a clear error.
+func (l *Lifecycle) checkComposeHostPortConflicts(name, composeYAML string) error {
+	mine, err := compose.HostPorts([]byte(composeYAML))
+	if err != nil {
+		return fmt.Errorf("parse candidate ports: %w", err)
+	}
+	if len(mine) == 0 {
+		return nil
+	}
+	want := map[string]bool{}
+	for _, h := range mine {
+		want[h.Key()] = true
+	}
+	others, err := l.store.List()
+	if err != nil {
+		return fmt.Errorf("list plugins for host-port conflict check: %w", err)
+	}
+	for _, o := range others {
+		if o.Name == name {
+			continue
+		}
+		orec, err := l.store.Get(o.Name)
+		if err != nil {
+			return fmt.Errorf("load %q for host-port conflict check: %w", o.Name, err)
+		}
+		for key, svc := range otherHostPortKeys(orec) {
+			if want[key] {
+				return fmt.Errorf("host port %s is already published by plugin %q (%s); "+
+					"change one of them", key, o.Name, svc)
 			}
 		}
 	}
@@ -430,6 +673,13 @@ func (l *Lifecycle) RefreshContainers(ctx context.Context, name string) error {
 	rec, err := l.store.Get(name)
 	if err != nil {
 		return err
+	}
+	if l.isCompose(rec) {
+		// compose owns container discovery; a refresh is just a re-up.
+		if err := l.Materialise(ctx, name); err != nil {
+			return err
+		}
+		return l.Start(ctx, name)
 	}
 	wasRunning := rec.Plugin.State == StateRunning
 	if err := l.Materialise(ctx, name); err != nil {
@@ -821,6 +1071,21 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if l.isCompose(rec) {
+		spec := l.composeSpec(rec)
+		secrets, err := l.store.GetComposeSecrets(name)
+		if err != nil {
+			return err
+		}
+		if len(secrets) > 0 {
+			spec.SecretEnv = secrets // injected into the `up` subprocess env for ${KEY}
+		}
+		if err := l.backend.Start(ctx, spec); err != nil {
+			return err
+		}
+		l.syncComposeState(ctx, name, rec) // cache the ACTUAL rollup, not optimistic running
+		return nil
+	}
 	manifest, err := ParseManifest([]byte(rec.Plugin.ManifestYAML))
 	if err != nil {
 		return fmt.Errorf("re-parse stored manifest: %w", err)
@@ -1058,6 +1323,13 @@ func (l *Lifecycle) Stop(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if l.isCompose(rec) {
+		if err := l.backend.Stop(ctx, l.composeSpec(rec)); err != nil {
+			return err
+		}
+		l.syncComposeState(ctx, name, rec) // real rollup (a partial stop isn't fully stopped)
+		return nil
+	}
 	order := orderedServices(rec)
 	var firstErr error
 	for i := len(order) - 1; i >= 0; i-- {
@@ -1098,6 +1370,9 @@ func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 			return nil
 		}
 		return err
+	}
+	if l.isCompose(rec) {
+		return l.backend.Teardown(ctx, l.composeSpec(rec), false)
 	}
 
 	if l.proxy != nil {
@@ -1163,6 +1438,10 @@ func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 // Status returns the aggregate plugin state plus per-(service,instance)
 // state for the named plugin.
 func (l *Lifecycle) Status(ctx context.Context, name string) (*PluginRecord, error) {
+	// Reads the cached state, which is kept in sync from compose ps at each op
+	// (Start/Stop) for compose plugins. A per-read `compose ps` would spawn an
+	// unbounded subprocess per UI poll; a periodic reconcile sweep for out-of-band
+	// drift is a follow-up. (Manifest plugins are unchanged.)
 	return l.store.Get(name)
 }
 
@@ -1175,6 +1454,9 @@ func (l *Lifecycle) ApplyRouteFor(ctx context.Context, name string) error {
 	rec, err := l.store.Get(name)
 	if err != nil {
 		return err
+	}
+	if l.isCompose(rec) {
+		return nil // compose plugins don't register an nginx UI route
 	}
 	route, err := l.buildPluginRoute(rec)
 	if err != nil {

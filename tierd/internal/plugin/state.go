@@ -443,6 +443,52 @@ func marshalHealth(h *Healthcheck) (sql.NullString, error) {
 	return sql.NullString{String: string(b), Valid: true}, nil
 }
 
+// InsertCompose inserts a MINIMAL plugins row for a compose-format plugin
+// (plugins-11). Unlike Insert it creates no plugin_services/volumes/tiers rows:
+// a compose plugin's services, volumes, and lifecycle are owned by docker
+// compose, and the reconciler (which iterates plugin_instances) skips it
+// because it has none. The raw compose project is stamped separately via
+// SetManifestYAML. Returns ErrPluginExists on a duplicate name.
+func (s *Store) InsertCompose(name, version string) error {
+	if name == "" {
+		return fmt.Errorf("plugin.InsertCompose: empty name")
+	}
+	if version == "" {
+		version = "0.0.0"
+	}
+	placeholder := fmt.Sprintf("# compose plugin %s\n", name)
+	res, err := s.db.Exec(
+		`INSERT INTO plugins
+		 (name, version, state, manifest, artifact_type,
+		  image_ref, distro_summary, instance_count, instance_configurable)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		name, version, StateInstalled, placeholder, ArtifactCompose,
+		sqlNullable(""), sqlNullable(""), 1, 0,
+	)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return ErrPluginExists
+		}
+		return fmt.Errorf("insert compose plugin: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return fmt.Errorf("insert compose plugin: expected 1 row, got %d", n)
+	}
+	return nil
+}
+
+// SetPluginState sets the plugin-level state column directly. Used for compose
+// plugins (plugins-11), whose state is the compose-project rollup (compose ps)
+// rather than a plugin_instances aggregate. A best-effort cache write — compose
+// ps stays the source of truth.
+func (s *Store) SetPluginState(name, state string) error {
+	_, err := s.db.Exec(
+		`UPDATE plugins SET state = ?, updated_at = datetime('now') WHERE name = ?`,
+		state, name,
+	)
+	return err
+}
+
 // SetManifestYAML overwrites the stored raw manifest bytes for a plugin.
 func (s *Store) SetManifestYAML(name string, yaml string) error {
 	if yaml == "" {
@@ -1449,4 +1495,94 @@ func isUniqueViolation(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "UNIQUE constraint failed: plugins.name")
+}
+
+// ComposeVolumePin is a compose plugin's pinned tier placement for one volume.
+type ComposeVolumePin struct {
+	Volume   string
+	Pool     string
+	HostPath string
+	MinSize  string
+}
+
+// GetComposeVolumePins returns the pinned tier placements for a compose plugin,
+// keyed by volume name (empty map when none).
+func (s *Store) GetComposeVolumePins(plugin string) (map[string]ComposeVolumePin, error) {
+	rows, err := s.db.Query(
+		`SELECT volume_name, pool, host_path, COALESCE(min_size,'')
+		 FROM plugin_compose_volumes WHERE plugin_name = ?`, plugin)
+	if err != nil {
+		return nil, fmt.Errorf("get compose volume pins: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]ComposeVolumePin{}
+	for rows.Next() {
+		var p ComposeVolumePin
+		if err := rows.Scan(&p.Volume, &p.Pool, &p.HostPath, &p.MinSize); err != nil {
+			return nil, err
+		}
+		out[p.Volume] = p
+	}
+	return out, rows.Err()
+}
+
+// PinComposeVolume records a volume's tier placement. First write wins (INSERT OR
+// IGNORE) — the placement is immutable via this path; a retier is an explicit
+// REPIN operation (a follow-up), so a compose edit can never silently relocate data.
+func (s *Store) PinComposeVolume(plugin, volume, pool, hostPath, minSize string) error {
+	_, err := s.db.Exec(
+		`INSERT OR IGNORE INTO plugin_compose_volumes
+		 (plugin_name, volume_name, pool, host_path, min_size) VALUES (?, ?, ?, ?, ?)`,
+		plugin, volume, pool, hostPath, sqlNullable(minSize))
+	if err != nil {
+		return fmt.Errorf("pin compose volume: %w", err)
+	}
+	return nil
+}
+
+// SetComposeInstances sets a compose plugin's instance count + configurability
+// (seeded from x-smoothnas.instances at install; updated by Scale). Materialise
+// expands the scalable service to this many per-instance services.
+func (s *Store) SetComposeInstances(name string, count int, configurable bool) error {
+	cfg := 0
+	if configurable {
+		cfg = 1
+	}
+	if _, err := s.db.Exec(
+		`UPDATE plugins SET instance_count = ?, instance_configurable = ?, updated_at = datetime('now') WHERE name = ?`,
+		count, cfg, name); err != nil {
+		return fmt.Errorf("set compose instances: %w", err)
+	}
+	return nil
+}
+
+// SetComposeSecret stores (upsert) a compose plugin's secret env value. Kept out
+// of the compose file + any compose-loaded .env; injected into the `compose up`
+// subprocess env at start so compose resolves ${key}.
+func (s *Store) SetComposeSecret(plugin, key, value string) error {
+	if _, err := s.db.Exec(
+		`INSERT INTO plugin_compose_secrets (plugin_name, key, value) VALUES (?, ?, ?)
+		 ON CONFLICT(plugin_name, key) DO UPDATE SET value = excluded.value`,
+		plugin, key, value); err != nil {
+		return fmt.Errorf("set compose secret: %w", err)
+	}
+	return nil
+}
+
+// GetComposeSecrets returns a compose plugin's secret env (key->value), empty if none.
+func (s *Store) GetComposeSecrets(plugin string) (map[string]string, error) {
+	rows, err := s.db.Query(`SELECT key, value FROM plugin_compose_secrets WHERE plugin_name = ?`, plugin)
+	if err != nil {
+		return nil, fmt.Errorf("get compose secrets: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
 }

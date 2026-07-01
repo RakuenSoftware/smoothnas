@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // Errors specific to instance scaling. Wired into the API layer so the
@@ -74,6 +76,9 @@ func (l *Lifecycle) Scale(ctx context.Context, name string, target int) (*ScaleR
 	}
 	if !rec.Plugin.InstanceConfigurable {
 		return nil, ErrPluginNotConfigurable
+	}
+	if l.isCompose(rec) {
+		return l.scaleCompose(ctx, rec, target)
 	}
 	current := rec.Plugin.InstanceCount
 
@@ -519,4 +524,82 @@ func (s *Store) RemoveInstanceRows(name string, newCount int, removedInstances [
 	}
 
 	return tx.Commit()
+}
+
+// composeScaleLocks serializes scale (regenerate compose + reconcile up) per
+// plugin, so two concurrent scales can't half-write the project (roundtable).
+var composeScaleLocks sync.Map // plugin name -> *sync.Mutex
+
+func pluginScaleLock(name string) *sync.Mutex {
+	mu, _ := composeScaleLocks.LoadOrStore(name, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
+
+// scaleCompose changes a compose plugin's instance count: validate against the
+// scalable service's min/max, update the count, re-materialise (which regenerates
+// the expanded N-service compose), then `up --remove-orphans` to reconcile —
+// starting new per-instance services and removing scaled-down ones. Scaled-down
+// instances' tier-bound _work binds persist (pins retained), so scaling back up
+// reuses the same data. Serialized per-plugin.
+func (l *Lifecycle) scaleCompose(ctx context.Context, rec *PluginRecord, target int) (*ScaleResult, error) {
+	name := rec.Plugin.Name
+	mu := pluginScaleLock(name)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Re-read under the lock.
+	rec, err := l.store.Get(name)
+	if err != nil {
+		return nil, err
+	}
+	current := rec.Plugin.InstanceCount
+	if target == current {
+		return &ScaleResult{From: current, To: target, NoOp: true}, nil
+	}
+	specs, err := compose.ScalableServices([]byte(rec.Plugin.ManifestYAML))
+	if err != nil {
+		return nil, err
+	}
+	if len(specs) == 0 {
+		return nil, fmt.Errorf("plugin %q has no scalable (x-smoothnas.instances) service", name)
+	}
+	sp := specs[0]
+	if sp.Min > 0 && target < sp.Min {
+		return nil, fmt.Errorf("scale target %d is below the declared min %d", target, sp.Min)
+	}
+	if sp.Max > 0 && target > sp.Max {
+		return nil, fmt.Errorf("scale target %d is above the declared max %d", target, sp.Max)
+	}
+
+	if err := l.store.SetComposeInstances(name, target, true); err != nil {
+		return nil, err
+	}
+	if err := l.Materialise(ctx, name); err != nil {
+		_ = l.store.SetComposeInstances(name, current, true) // roll the count back
+		return nil, fmt.Errorf("scale materialise: %w", err)
+	}
+	rec2, err := l.store.Get(name)
+	if err != nil {
+		return nil, err
+	}
+	spec := l.composeSpec(rec2)
+	if secrets, err := l.store.GetComposeSecrets(name); err == nil && len(secrets) > 0 {
+		spec.SecretEnv = secrets
+	}
+	if err := l.backend.StartScaled(ctx, spec); err != nil {
+		return nil, fmt.Errorf("scale reconcile up: %w", err)
+	}
+	l.syncComposeState(ctx, name, rec2)
+
+	res := &ScaleResult{From: current, To: target}
+	if target > current {
+		for i := current + 1; i <= target; i++ {
+			res.Added = append(res.Added, i)
+		}
+	} else {
+		for i := target + 1; i <= current; i++ {
+			res.Removed = append(res.Removed, i)
+		}
+	}
+	return res, nil
 }

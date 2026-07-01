@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
 )
 
 // DefaultPluginsRoot is the on-disk parent for flat-mode plugin
@@ -119,6 +121,13 @@ func (i *Installer) Install(yamlBytes []byte) (*PluginRecord, error) {
 // Returns *ValidationError on field-level manifest problems.
 // Returns *PreflightError when phase-03 preflight rejects a volume.
 func (i *Installer) InstallWithOptions(yamlBytes []byte, opts InstallOptions) (*PluginRecord, error) {
+	// plugins-11: a compose-format plugin is a docker-compose project, not a
+	// smoothnas manifest — store it raw and let the compose Backend own its
+	// lifecycle. This bypasses the manifest/tier-preflight/volume machinery.
+	if compose.IsComposeFormat(yamlBytes) {
+		return i.installCompose(yamlBytes, opts.Tiers, opts.Config)
+	}
+
 	m, err := ParseManifest(yamlBytes)
 	if err != nil {
 		return nil, err
@@ -196,6 +205,71 @@ func (i *Installer) InstallWithOptions(yamlBytes []byte, opts InstallOptions) (*
 	}
 
 	return i.store.Get(m.Metadata.Name)
+}
+
+// installCompose stores a compose-format plugin (plugins-11). The project name
+// is the compose top-level `name:` (required — it's also the compose -p project
+// name). No tier preflight / volume resolution / plugin_services rows: compose
+// owns those. Lifecycle routes it to the compose Backend by artifact type.
+func (i *Installer) installCompose(yamlBytes []byte, tiers TierAssignments, config map[string]string) (*PluginRecord, error) {
+	name := compose.ProjectName(yamlBytes)
+	if name == "" {
+		return nil, fmt.Errorf("compose plugin: set a top-level `name:` (used as the compose project name)")
+	}
+	// Install-time tier override: bake the operator's tier choices into the
+	// stored compose so an x-smoothnas volume can ship a default pool and be
+	// remapped to the operator's pool without editing the file. (x-smoothnas.tier
+	// is a literal parsed before compose ${} substitution, so it can't be an env
+	// var — the override closes that portability gap.)
+	tvols, err := compose.TieredVolumes(yamlBytes)
+	if err != nil {
+		return nil, fmt.Errorf("compose plugin: %w", err)
+	}
+	if len(tvols) > 0 {
+		overrides := map[string]string{}
+		for _, tv := range tvols {
+			if t := tiers.Resolve("", tv.Name); t != "" {
+				overrides[tv.Name] = t
+			}
+		}
+		if yamlBytes, err = compose.SetVolumeTiers(yamlBytes, overrides); err != nil {
+			return nil, err
+		}
+	}
+	if err := i.store.InsertCompose(name, ""); err != nil {
+		return nil, err
+	}
+	if err := i.store.SetManifestYAML(name, string(yamlBytes)); err != nil {
+		return nil, fmt.Errorf("store compose project: %w", err)
+	}
+	// A compose plugin scales via a service-level x-smoothnas.instances block;
+	// seed the declared count + mark it configurable so materialise expands to N
+	// per-instance services and Scale can adjust it. (One scalable service for now.)
+	if specs, err := compose.ScalableServices(yamlBytes); err == nil && len(specs) > 0 {
+		// One scalable service per plugin (the count is plugin-scoped). Reject
+		// more than one rather than silently managing only the first.
+		if len(specs) > 1 {
+			return nil, fmt.Errorf("compose plugin %q declares %d scalable services (x-smoothnas.instances); only one is supported", name, len(specs))
+		}
+		if err := i.store.SetComposeInstances(name, specs[0].Count, true); err != nil {
+			return nil, err
+		}
+	}
+	// Secret env values (declared via top-level x-smoothnas.secrets) go to the
+	// secret store, NOT the compose file / a .env / plugin_config — at `up` tierd
+	// injects them into the subprocess env so compose resolves ${key}.
+	if keys, err := compose.SecretKeys(yamlBytes); err == nil {
+		for _, k := range keys {
+			// Store when the operator supplied the key at all (an explicit empty
+			// value is honoured, not silently dropped).
+			if v, ok := config[k]; ok {
+				if err := i.store.SetComposeSecret(name, k, v); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	return i.store.Get(name)
 }
 
 // PreflightError wraps a failed PreflightResult so callers can

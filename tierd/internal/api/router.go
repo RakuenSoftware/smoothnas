@@ -80,6 +80,7 @@ func newRouterFull(store *db.Store, version string, startTime time.Time, history
 	pluginInstaller.SetTierProvider(store, plugin.StatAvail)
 	if pluginLifecycle != nil {
 		pluginInstaller.SetDemolisher(pluginLifecycle)
+		pluginLifecycle.SetTierProvider(store) // Phase 2: resolve compose x-smoothnas tiered volumes
 	}
 	pluginsHandler := NewPluginsHandler(pluginStore, pluginInstaller, pluginLifecycle, pluginCatalog, store)
 	zfsHandler := NewZFSHandler(store)

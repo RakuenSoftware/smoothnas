@@ -25,6 +25,7 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/network"
 	"github.com/JBailes/SmoothNAS/tierd/internal/nfs"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
 	pluginruntime "github.com/JBailes/SmoothNAS/tierd/internal/plugin/runtime"
 	"github.com/JBailes/SmoothNAS/tierd/internal/smart"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tier"
@@ -372,6 +373,9 @@ func setupPluginRuntime(pluginStore *plugin.Store, catalog *plugin.Catalog) (*pl
 	if catalog != nil {
 		lifecycle.SetCatalog(catalog)
 	}
+	// plugins-11: drive compose-format plugins as real docker-compose projects
+	// against the same runtime socket, materialised under /var/lib/smoothnas/compose.
+	lifecycle.SetComposeBackend(compose.NewBackend(compose.New(socketPath, nil), "/var/lib/smoothnas/compose"))
 
 	reconciler := plugin.NewReconciler(pluginStore, rt)
 	syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -383,12 +387,34 @@ func setupPluginRuntime(pluginStore *plugin.Store, catalog *plugin.Catalog) (*pl
 	watchCtx, stopWatch := context.WithCancel(context.Background())
 	go reconciler.WatchEvents(watchCtx)
 	go runRuntimeLXCCleanupLoop(watchCtx, lifecycle)
+	go runComposeReconcileLoop(watchCtx, lifecycle)
 	go func() {
 		if err := lifecycle.AutostartAll(context.Background()); err != nil {
 			log.Printf("plugin runtime autostart: %v", err)
 		}
 	}()
 	return lifecycle, stopWatch
+}
+
+// composeReconcileInterval is how often compose plugins' cached state is
+// refreshed from compose ps (they're invisible to the event-based reconciler).
+const composeReconcileInterval = 15 * time.Second
+
+// runComposeReconcileLoop periodically syncs compose plugins' cached state from
+// compose ps so out-of-band container changes are reflected without an operator op.
+func runComposeReconcileLoop(ctx context.Context, lifecycle *plugin.Lifecycle) {
+	for {
+		timer := time.NewTimer(composeReconcileInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if err := lifecycle.ReconcileComposeStates(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("compose state reconcile: %v", err)
+		}
+	}
 }
 
 func runRuntimeLXCCleanupLoop(ctx context.Context, lifecycle *plugin.Lifecycle) {
