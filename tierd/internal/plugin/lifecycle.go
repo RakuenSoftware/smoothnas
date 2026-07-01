@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/runtime"
 )
 
@@ -77,6 +78,7 @@ type Lifecycle struct {
 	lxcPath string
 	proxy   ProxyManager
 	catalog *Catalog
+	backend *compose.Backend // plugins-11: compose-format plugins route here
 }
 
 // NewLifecycle constructs a Lifecycle around an existing Store and a
@@ -90,6 +92,25 @@ func (l *Lifecycle) SetProxy(p ProxyManager) { l.proxy = p }
 
 // SetCatalog attaches the profile catalog.
 func (l *Lifecycle) SetCatalog(c *Catalog) { l.catalog = c }
+
+// SetComposeBackend attaches the compose backend (plugins-11). When set,
+// compose-format plugins route their Materialise/Start/Demolish through it
+// instead of the manifest BuildCreatePayload path.
+func (l *Lifecycle) SetComposeBackend(b *compose.Backend) { l.backend = b }
+
+// isCompose reports whether a stored plugin is compose-format and a backend is
+// wired to handle it.
+func (l *Lifecycle) isCompose(rec *PluginRecord) bool {
+	return l.backend != nil && (rec.Plugin.ArtifactType == ArtifactCompose ||
+		compose.IsComposeFormat([]byte(rec.Plugin.ManifestYAML)))
+}
+
+// composeSpec builds the compose ProjectSpec from a stored compose plugin. The
+// stored "manifest" is the raw compose project; the tierd plugin name is the
+// compose -p project name. (Operator config -> .env is a follow-up slice.)
+func (l *Lifecycle) composeSpec(rec *PluginRecord) compose.ProjectSpec {
+	return compose.SpecFromSingle(rec.Plugin.Name, rec.Plugin.ManifestYAML, nil)
+}
 
 // SetLXCPath attaches the smoothnas-runtime LXC root used for container
 // backing directories. Pass an empty string to disable filesystem cleanup.
@@ -215,6 +236,9 @@ func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 	rec, err := l.store.Get(name)
 	if err != nil {
 		return err
+	}
+	if l.isCompose(rec) {
+		return l.backend.Materialise(ctx, l.composeSpec(rec))
 	}
 	manifest, err := ParseManifest([]byte(rec.Plugin.ManifestYAML))
 	if err != nil {
@@ -821,6 +845,9 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if l.isCompose(rec) {
+		return l.backend.Start(ctx, l.composeSpec(rec))
+	}
 	manifest, err := ParseManifest([]byte(rec.Plugin.ManifestYAML))
 	if err != nil {
 		return fmt.Errorf("re-parse stored manifest: %w", err)
@@ -1098,6 +1125,9 @@ func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 			return nil
 		}
 		return err
+	}
+	if l.isCompose(rec) {
+		return l.backend.Teardown(ctx, l.composeSpec(rec), false)
 	}
 
 	if l.proxy != nil {

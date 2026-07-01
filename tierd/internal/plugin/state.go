@@ -443,6 +443,40 @@ func marshalHealth(h *Healthcheck) (sql.NullString, error) {
 	return sql.NullString{String: string(b), Valid: true}, nil
 }
 
+// InsertCompose inserts a MINIMAL plugins row for a compose-format plugin
+// (plugins-11). Unlike Insert it creates no plugin_services/volumes/tiers rows:
+// a compose plugin's services, volumes, and lifecycle are owned by docker
+// compose, and the reconciler (which iterates plugin_instances) skips it
+// because it has none. The raw compose project is stamped separately via
+// SetManifestYAML. Returns ErrPluginExists on a duplicate name.
+func (s *Store) InsertCompose(name, version string) error {
+	if name == "" {
+		return fmt.Errorf("plugin.InsertCompose: empty name")
+	}
+	if version == "" {
+		version = "0.0.0"
+	}
+	placeholder := fmt.Sprintf("# compose plugin %s\n", name)
+	res, err := s.db.Exec(
+		`INSERT INTO plugins
+		 (name, version, state, manifest, artifact_type,
+		  image_ref, distro_summary, instance_count, instance_configurable)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		name, version, StateInstalled, placeholder, ArtifactCompose,
+		sqlNullable(""), sqlNullable(""), 1, 0,
+	)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return ErrPluginExists
+		}
+		return fmt.Errorf("insert compose plugin: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return fmt.Errorf("insert compose plugin: expected 1 row, got %d", n)
+	}
+	return nil
+}
+
 // SetManifestYAML overwrites the stored raw manifest bytes for a plugin.
 func (s *Store) SetManifestYAML(name string, yaml string) error {
 	if yaml == "" {

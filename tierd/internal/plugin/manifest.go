@@ -21,6 +21,10 @@ const Kind = "Plugin"
 const (
 	ArtifactOCIImage  = "oci-image"
 	ArtifactLXCDistro = "lxc-distro"
+	// ArtifactCompose marks a compose-format plugin (plugins-11): its
+	// "manifest" is a docker-compose project, its services/volumes/lifecycle
+	// are owned by docker compose, and it has no plugin_services rows.
+	ArtifactCompose = "compose"
 )
 
 // Volume modes.
