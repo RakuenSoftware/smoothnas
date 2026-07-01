@@ -387,12 +387,34 @@ func setupPluginRuntime(pluginStore *plugin.Store, catalog *plugin.Catalog) (*pl
 	watchCtx, stopWatch := context.WithCancel(context.Background())
 	go reconciler.WatchEvents(watchCtx)
 	go runRuntimeLXCCleanupLoop(watchCtx, lifecycle)
+	go runComposeReconcileLoop(watchCtx, lifecycle)
 	go func() {
 		if err := lifecycle.AutostartAll(context.Background()); err != nil {
 			log.Printf("plugin runtime autostart: %v", err)
 		}
 	}()
 	return lifecycle, stopWatch
+}
+
+// composeReconcileInterval is how often compose plugins' cached state is
+// refreshed from compose ps (they're invisible to the event-based reconciler).
+const composeReconcileInterval = 15 * time.Second
+
+// runComposeReconcileLoop periodically syncs compose plugins' cached state from
+// compose ps so out-of-band container changes are reflected without an operator op.
+func runComposeReconcileLoop(ctx context.Context, lifecycle *plugin.Lifecycle) {
+	for {
+		timer := time.NewTimer(composeReconcileInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if err := lifecycle.ReconcileComposeStates(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("compose state reconcile: %v", err)
+		}
+	}
 }
 
 func runRuntimeLXCCleanupLoop(ctx context.Context, lifecycle *plugin.Lifecycle) {
