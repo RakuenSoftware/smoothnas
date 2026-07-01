@@ -197,6 +197,12 @@ func (h *PluginsHandler) routeNamed(w http.ResponseWriter, r *http.Request, rest
 		default:
 			jsonMethodNotAllowed(w)
 		}
+	case "services":
+		if r.Method != http.MethodGet {
+			jsonMethodNotAllowed(w)
+			return
+		}
+		h.composeServices(w, r, name)
 	case "logs":
 		if r.Method != http.MethodGet {
 			jsonMethodNotAllowed(w)
@@ -970,6 +976,46 @@ type listInstancesResponse struct {
 // endpoint keeps the UI's Instances tab from having to refetch the
 // whole detail (manifest + volumes + ports + config + …) just to
 // render a small table.
+// composeServiceView is one service row for the UI (Phase 4).
+type composeServiceView struct {
+	Service string              `json:"service"`
+	State   string              `json:"state"`
+	Health  string              `json:"health,omitempty"`
+	Ports   []compose.Publisher `json:"ports,omitempty"`
+}
+
+type composeServicesResponse struct {
+	Plugin   string               `json:"plugin"`
+	Overall  string               `json:"overall"`
+	Services []composeServiceView `json:"services"`
+}
+
+// composeServices returns the live per-service `compose ps` for a compose plugin
+// (Phase 4: the data the UI renders — project rollup + each service's
+// state/health/published ports).
+func (h *PluginsHandler) composeServices(w http.ResponseWriter, r *http.Request, name string) {
+	if h.lifecycle == nil {
+		jsonErrorCoded(w, "plugin runtime unavailable", http.StatusServiceUnavailable, "plugins.runtime_unavailable")
+		return
+	}
+	status, err := h.lifecycle.ComposeServices(r.Context(), name)
+	if err != nil {
+		if errors.Is(err, plugin.ErrPluginNotFound) {
+			jsonErrorCoded(w, "plugin not found", http.StatusNotFound, "plugins.not_found")
+			return
+		}
+		jsonErrorCoded(w, err.Error(), http.StatusBadRequest, "plugins.not_compose")
+		return
+	}
+	out := composeServicesResponse{Plugin: name, Overall: string(status.Overall)}
+	for _, e := range status.Services {
+		out.Services = append(out.Services, composeServiceView{
+			Service: e.Service, State: e.State, Health: e.Health, Ports: e.Publishers,
+		})
+	}
+	_ = json.NewEncoder(w).Encode(out)
+}
+
 func (h *PluginsHandler) listInstances(w http.ResponseWriter, _ *http.Request, name string) {
 	rec, err := h.store.Get(name)
 	if err != nil {
