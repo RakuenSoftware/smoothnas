@@ -10,6 +10,7 @@ import (
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/gpu"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
 )
 
 // detachRequest returns a context derived from the request that is NOT
@@ -232,6 +233,12 @@ func (h *PluginsHandler) listGPUs(w http.ResponseWriter, _ *http.Request) {
 // through to the regular install path which will surface the parse
 // error properly.
 func manifestNameForDuplicateCheck(yamlText string) (string, error) {
+	// plugins-11: a compose-format plugin's name is the compose top-level name:,
+	// not metadata.name — detect it so the friendly duplicate-409 fires for
+	// compose installs too (InstallWithOptions still catches dupes regardless).
+	if compose.IsComposeFormat([]byte(yamlText)) {
+		return compose.ProjectName([]byte(yamlText)), nil
+	}
 	m, err := plugin.ParseManifest([]byte(yamlText))
 	if err != nil {
 		return "", err

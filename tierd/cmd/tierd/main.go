@@ -25,6 +25,7 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/network"
 	"github.com/JBailes/SmoothNAS/tierd/internal/nfs"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
 	pluginruntime "github.com/JBailes/SmoothNAS/tierd/internal/plugin/runtime"
 	"github.com/JBailes/SmoothNAS/tierd/internal/smart"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tier"
@@ -372,6 +373,9 @@ func setupPluginRuntime(pluginStore *plugin.Store, catalog *plugin.Catalog) (*pl
 	if catalog != nil {
 		lifecycle.SetCatalog(catalog)
 	}
+	// plugins-11: drive compose-format plugins as real docker-compose projects
+	// against the same runtime socket, materialised under /var/lib/smoothnas/compose.
+	lifecycle.SetComposeBackend(compose.NewBackend(compose.New(socketPath, nil), "/var/lib/smoothnas/compose"))
 
 	reconciler := plugin.NewReconciler(pluginStore, rt)
 	syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)

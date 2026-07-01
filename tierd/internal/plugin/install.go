@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
 )
 
 // DefaultPluginsRoot is the on-disk parent for flat-mode plugin
@@ -119,6 +121,13 @@ func (i *Installer) Install(yamlBytes []byte) (*PluginRecord, error) {
 // Returns *ValidationError on field-level manifest problems.
 // Returns *PreflightError when phase-03 preflight rejects a volume.
 func (i *Installer) InstallWithOptions(yamlBytes []byte, opts InstallOptions) (*PluginRecord, error) {
+	// plugins-11: a compose-format plugin is a docker-compose project, not a
+	// smoothnas manifest — store it raw and let the compose Backend own its
+	// lifecycle. This bypasses the manifest/tier-preflight/volume machinery.
+	if compose.IsComposeFormat(yamlBytes) {
+		return i.installCompose(yamlBytes)
+	}
+
 	m, err := ParseManifest(yamlBytes)
 	if err != nil {
 		return nil, err
@@ -196,6 +205,24 @@ func (i *Installer) InstallWithOptions(yamlBytes []byte, opts InstallOptions) (*
 	}
 
 	return i.store.Get(m.Metadata.Name)
+}
+
+// installCompose stores a compose-format plugin (plugins-11). The project name
+// is the compose top-level `name:` (required — it's also the compose -p project
+// name). No tier preflight / volume resolution / plugin_services rows: compose
+// owns those. Lifecycle routes it to the compose Backend by artifact type.
+func (i *Installer) installCompose(yamlBytes []byte) (*PluginRecord, error) {
+	name := compose.ProjectName(yamlBytes)
+	if name == "" {
+		return nil, fmt.Errorf("compose plugin: set a top-level `name:` (used as the compose project name)")
+	}
+	if err := i.store.InsertCompose(name, ""); err != nil {
+		return nil, err
+	}
+	if err := i.store.SetManifestYAML(name, string(yamlBytes)); err != nil {
+		return nil, fmt.Errorf("store compose project: %w", err)
+	}
+	return i.store.Get(name)
 }
 
 // PreflightError wraps a failed PreflightResult so callers can
