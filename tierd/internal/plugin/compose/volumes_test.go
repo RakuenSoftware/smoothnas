@@ -26,17 +26,25 @@ volumes:
 	}
 }
 
-func TestBindOverride(t *testing.T) {
-	out, err := BindOverride(map[string]string{"data": "/mnt/fast/app/data"})
+func TestRewriteTieredBinds(t *testing.T) {
+	y := "name: app\nservices:\n  web:\n    image: nginx\n    volumes:\n      - \"data:/var/data:ro\"\n      - \"cache:/cache\"\n" +
+		"volumes:\n  data:\n    x-smoothnas: { tier: fast }\n  cache: {}\n"
+	out, err := RewriteTieredBinds([]byte(y), map[string]string{"data": "/mnt/fast/app/data"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"driver: local", "type: none", "o: bind", "device: /mnt/fast/app/data", "com.smoothnas.tiered"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("override missing %q:\n%s", want, out)
-		}
+	so := string(out)
+	if !strings.Contains(so, "/mnt/fast/app/data:/var/data:ro") {
+		t.Fatalf("data mount not rewritten to bind:\n%s", so)
 	}
-	if s, _ := BindOverride(nil); s != "" {
-		t.Fatalf("empty binds => empty override, got %q", s)
+	if !strings.Contains(so, "cache:/cache") {
+		t.Fatalf("non-tiered mount should be untouched:\n%s", so)
+	}
+	if strings.Contains(so, "x-smoothnas") {
+		t.Fatalf("tiered volume def should be dropped from top-level volumes:\n%s", so)
+	}
+	// no-op passthrough
+	if b, _ := RewriteTieredBinds([]byte(y), nil); string(b) != y {
+		t.Fatal("nil binds must passthrough unchanged")
 	}
 }

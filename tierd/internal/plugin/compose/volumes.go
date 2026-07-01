@@ -3,6 +3,7 @@ package compose
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -47,39 +48,78 @@ func TieredVolumes(composeYAML []byte) ([]TieredVolume, error) {
 	return out, nil
 }
 
-// BindOverride renders a compose OVERRIDE file that redefines each named volume
-// as a local bind to its resolved smoothfs host path (mechanism A). Layered as
-// `-f base -f override`, it leaves the plugin's base compose untouched. The
-// `com.smoothnas.tiered` label marks the volume so uninstall can refuse `-v`
-// (tiered data is tierd-owned, not deleted by compose down). binds maps volume
-// name -> resolved host path.
-func BindOverride(binds map[string]string) (string, error) {
+// RewriteTieredBinds rewrites a compose project so services mounting a tiered
+// named volume instead bind-mount its resolved smoothfs host path (mechanism B),
+// and drops those volumes from the top-level `volumes:` map. This is the form
+// LXC2Docker honors: its `local` volume driver ignores driver_opts device= (a
+// named volume always mounts at <volumeRoot>/<name>), whereas a service bind
+// mount uses the host source path directly. binds maps volume name -> host path.
+func RewriteTieredBinds(composeYAML []byte, binds map[string]string) ([]byte, error) {
 	if len(binds) == 0 {
-		return "", nil
+		return composeYAML, nil
 	}
-	type driverOpts struct {
-		Type   string `yaml:"type"`
-		O      string `yaml:"o"`
-		Device string `yaml:"device"`
+	var doc map[string]any
+	if err := yaml.Unmarshal(composeYAML, &doc); err != nil {
+		return nil, fmt.Errorf("compose: parse for bind rewrite: %w", err)
 	}
-	type vol struct {
-		Driver     string            `yaml:"driver"`
-		DriverOpts driverOpts        `yaml:"driver_opts"`
-		Labels     map[string]string `yaml:"labels"`
-	}
-	doc := struct {
-		Volumes map[string]vol `yaml:"volumes"`
-	}{Volumes: map[string]vol{}}
-	for name, host := range binds {
-		doc.Volumes[name] = vol{
-			Driver:     "local",
-			DriverOpts: driverOpts{Type: "none", O: "bind", Device: host},
-			Labels:     map[string]string{"com.smoothnas.tiered": "true"},
+	if services, ok := doc["services"].(map[string]any); ok {
+		for _, sv := range services {
+			sm, ok := sv.(map[string]any)
+			if !ok {
+				continue
+			}
+			vols, ok := sm["volumes"].([]any)
+			if !ok {
+				continue
+			}
+			for i, v := range vols {
+				switch m := v.(type) {
+				case string:
+					vols[i] = rewriteShortMount(m, binds)
+				case map[string]any:
+					rewriteLongMount(m, binds)
+				}
+			}
 		}
 	}
-	b, err := yaml.Marshal(doc)
-	if err != nil {
-		return "", fmt.Errorf("compose: render bind override: %w", err)
+	// The tiered volumes are now binds; drop their top-level named-volume defs so
+	// compose doesn't also create an (unused, wrong-location) managed volume.
+	if topVols, ok := doc["volumes"].(map[string]any); ok {
+		for name := range binds {
+			delete(topVols, name)
+		}
+		if len(topVols) == 0 {
+			delete(doc, "volumes")
+		}
 	}
-	return string(b), nil
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("compose: render rewritten project: %w", err)
+	}
+	return out, nil
+}
+
+// rewriteShortMount turns "vol:/target[:opts]" into "hostpath:/target[:opts]"
+// when vol is a tiered volume; leaves other mounts untouched.
+func rewriteShortMount(s string, binds map[string]string) string {
+	parts := strings.SplitN(s, ":", 2)
+	if len(parts) < 2 {
+		return s // no target -> not a named-volume mount we rewrite
+	}
+	if host, ok := binds[parts[0]]; ok {
+		return host + ":" + parts[1]
+	}
+	return s
+}
+
+// rewriteLongMount converts a long-form {type: volume, source: vol, ...} mount to
+// a bind on the resolved host path when source is a tiered volume.
+func rewriteLongMount(m map[string]any, binds map[string]string) {
+	src, _ := m["source"].(string)
+	host, ok := binds[src]
+	if !ok {
+		return
+	}
+	m["type"] = "bind"
+	m["source"] = host
 }
