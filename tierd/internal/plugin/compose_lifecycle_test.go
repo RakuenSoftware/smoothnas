@@ -213,3 +213,26 @@ func TestLifecycle_ComposeTieredVolumePinGuardsRetier(t *testing.T) {
 		t.Fatalf("expected retier refusal, got %v", err)
 	}
 }
+
+// TestLifecycle_ComposeServices returns the live per-service compose ps (Phase 4).
+func TestLifecycle_ComposeServices(t *testing.T) {
+	store := openTestStore(t)
+	if _, err := NewInstaller(store).Install([]byte("name: app\nservices:\n  web:\n    image: nginx\n")); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	r := &recRunner{psOut: []byte(`{"Name":"app-web-1","Service":"web","State":"running","Health":"healthy"}`)}
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", r), t.TempDir()))
+
+	st, err := lc.ComposeServices(context.Background(), "app")
+	if err != nil {
+		t.Fatalf("services: %v", err)
+	}
+	if string(st.Overall) != "running" || len(st.Services) != 1 || st.Services[0].Service != "web" {
+		t.Fatalf("status=%+v", st)
+	}
+	// manifest (non-compose) plugin errors.
+	if _, err := lc.ComposeServices(context.Background(), "does-not-exist"); err == nil {
+		t.Fatal("expected error for unknown/non-compose plugin")
+	}
+}

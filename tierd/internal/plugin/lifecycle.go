@@ -103,6 +103,20 @@ func (l *Lifecycle) SetComposeBackend(b *compose.Backend) { l.backend = b }
 // tiered volumes resolve to smoothfs host paths (Phase 2).
 func (l *Lifecycle) SetTierProvider(tp TierProvider) { l.tier = tp }
 
+// ComposeServices returns the live per-service `compose ps` for a compose plugin
+// (the project rollup plus each service's state/health/published ports) — the
+// data a UI renders. Errors for a non-compose plugin (Phase 4).
+func (l *Lifecycle) ComposeServices(ctx context.Context, name string) (compose.Status, error) {
+	rec, err := l.store.Get(name)
+	if err != nil {
+		return compose.Status{}, err
+	}
+	if !l.isCompose(rec) {
+		return compose.Status{}, fmt.Errorf("plugin %q is not a compose plugin", name)
+	}
+	return l.backend.Status(ctx, l.composeSpec(rec))
+}
+
 // composeSpecResolved builds the compose ProjectSpec with x-smoothnas tiered
 // volumes resolved to smoothfs host binds (mechanism B). Used at Materialise
 // (write time); the rewritten compose is what gets written to disk, so
