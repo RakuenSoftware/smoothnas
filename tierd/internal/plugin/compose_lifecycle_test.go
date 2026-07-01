@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
@@ -100,5 +101,26 @@ func TestLifecycle_ComposeStatusReflectsPs(t *testing.T) {
 	}
 	if rec.Plugin.State != StateRunning {
 		t.Fatalf("compose Status state=%q, want %q (from compose ps, not DB)", rec.Plugin.State, StateRunning)
+	}
+}
+
+// TestLifecycle_ComposeHostPortConflict proves the cross-project host-port guard
+// rejects a second compose plugin claiming an already-published host port.
+func TestLifecycle_ComposeHostPortConflict(t *testing.T) {
+	store := openTestStore(t)
+	inst := NewInstaller(store)
+	a := "name: a\nservices:\n  w:\n    image: nginx\n    ports:\n      - \"8080:80\"\n"
+	b := "name: b\nservices:\n  w:\n    image: nginx\n    ports:\n      - \"8080:80\"\n"
+	if _, err := inst.Install([]byte(a)); err != nil {
+		t.Fatalf("install a: %v", err)
+	}
+	if _, err := inst.Install([]byte(b)); err != nil {
+		t.Fatalf("install b: %v", err)
+	}
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", &recRunner{}), t.TempDir()))
+	err := lc.Materialise(context.Background(), "b")
+	if err == nil || !strings.Contains(err.Error(), "8080/tcp") {
+		t.Fatalf("expected host-port conflict on 8080/tcp, got %v", err)
 	}
 }

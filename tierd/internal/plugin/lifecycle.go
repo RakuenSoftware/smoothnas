@@ -253,6 +253,9 @@ func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 		return err
 	}
 	if l.isCompose(rec) {
+		if err := l.checkComposeHostPortConflicts(name, rec.Plugin.ManifestYAML); err != nil {
+			return err
+		}
 		return l.backend.Materialise(ctx, l.composeSpec(rec))
 	}
 	manifest, err := ParseManifest([]byte(rec.Plugin.ManifestYAML))
@@ -386,14 +389,69 @@ func (l *Lifecycle) checkHostPortConflicts(name string, rec *PluginRecord) error
 		if err != nil {
 			return fmt.Errorf("load %q for host-port conflict check: %w", o.Name, err)
 		}
-		for _, p := range orec.Ports {
-			if !p.HostExpose {
-				continue
-			}
-			if _, clash := want[hostPortKey(p.ContainerPort, p.Protocol)]; clash {
-				return fmt.Errorf("host port %s is already published by plugin %q (service %q); "+
+		for key, svc := range otherHostPortKeys(orec) {
+			if _, clash := want[key]; clash {
+				return fmt.Errorf("host port %s is already published by plugin %q (%s); "+
 					"two plugins cannot host-expose the same port — change one of them",
-					hostPortKey(p.ContainerPort, p.Protocol), o.Name, p.Service)
+					key, o.Name, svc)
+			}
+		}
+	}
+	return nil
+}
+
+// otherHostPortKeys returns the host-published port keys (port/proto -> a service
+// or "compose" descriptor) for an installed plugin, unified across the manifest
+// (hostExpose) and compose (ports:) forms so the guard is cross-type.
+func otherHostPortKeys(orec *PluginRecord) map[string]string {
+	keys := map[string]string{}
+	if orec.Plugin.ArtifactType == ArtifactCompose {
+		ports, _ := compose.HostPorts([]byte(orec.Plugin.ManifestYAML))
+		for _, h := range ports {
+			keys[h.Key()] = "compose"
+		}
+		return keys
+	}
+	for _, p := range orec.Ports {
+		if p.HostExpose {
+			keys[hostPortKey(p.ContainerPort, p.Protocol)] = "service " + p.Service
+		}
+	}
+	return keys
+}
+
+// checkComposeHostPortConflicts is the compose-plugin analogue of
+// checkHostPortConflicts: it parses the candidate's fixed published ports and
+// rejects a collision with any other installed plugin (manifest or compose)
+// before `compose up`, turning a silent DNAT shadow into a clear error.
+func (l *Lifecycle) checkComposeHostPortConflicts(name, composeYAML string) error {
+	mine, err := compose.HostPorts([]byte(composeYAML))
+	if err != nil {
+		return fmt.Errorf("parse candidate ports: %w", err)
+	}
+	if len(mine) == 0 {
+		return nil
+	}
+	want := map[string]bool{}
+	for _, h := range mine {
+		want[h.Key()] = true
+	}
+	others, err := l.store.List()
+	if err != nil {
+		return fmt.Errorf("list plugins for host-port conflict check: %w", err)
+	}
+	for _, o := range others {
+		if o.Name == name {
+			continue
+		}
+		orec, err := l.store.Get(o.Name)
+		if err != nil {
+			return fmt.Errorf("load %q for host-port conflict check: %w", o.Name, err)
+		}
+		for key, svc := range otherHostPortKeys(orec) {
+			if want[key] {
+				return fmt.Errorf("host port %s is already published by plugin %q (%s); "+
+					"change one of them", key, o.Name, svc)
 			}
 		}
 	}
