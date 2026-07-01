@@ -172,9 +172,21 @@ func (a *Adapter) Up(ctx context.Context, p Project) error {
 		env = append(env, k+"="+v)
 	}
 	if _, stderr, err := a.runner.Run(ctx, env, args...); err != nil {
-		return fmt.Errorf("compose up %s: %w: %s", p.Name, err, strings.TrimSpace(string(stderr)))
+		return fmt.Errorf("compose up %s: %w: %s", p.Name, err, redactSecrets(string(stderr), p.SecretEnv))
 	}
 	return nil
+}
+
+// redactSecrets replaces any injected secret value in text with *** — defensive,
+// so a compose error that echoes an interpolated field can't surface the value.
+func redactSecrets(text string, secrets map[string]string) string {
+	text = strings.TrimSpace(text)
+	for _, v := range secrets {
+		if v != "" {
+			text = strings.ReplaceAll(text, v, "***")
+		}
+	}
+	return text
 }
 
 // Logs returns the tail of the project's aggregated compose logs (no follow).
@@ -302,7 +314,7 @@ func (a *Adapter) UpRemoveOrphans(ctx context.Context, p Project) error {
 		env = append(env, k+"="+v)
 	}
 	if _, stderr, err := a.runner.Run(ctx, env, args...); err != nil {
-		return fmt.Errorf("compose up --remove-orphans %s: %w: %s", p.Name, err, strings.TrimSpace(string(stderr)))
+		return fmt.Errorf("compose up --remove-orphans %s: %w: %s", p.Name, err, redactSecrets(string(stderr), p.SecretEnv))
 	}
 	return nil
 }

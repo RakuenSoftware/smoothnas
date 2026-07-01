@@ -7,7 +7,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// InstanceSpec is a scalable service declared via service-level x-smoothnas:
+// InstanceSpec is a scalable service declared via service-level x-smoothnas.
+// Count is the current instance count (defaults to 1 when unset); Min/Max are
+// optional bounds Scale validates the target against (0 = unbounded). Example:
 //
 //	services:
 //	  gh-runner:

@@ -246,6 +246,11 @@ func (i *Installer) installCompose(yamlBytes []byte, tiers TierAssignments, conf
 	// seed the declared count + mark it configurable so materialise expands to N
 	// per-instance services and Scale can adjust it. (One scalable service for now.)
 	if specs, err := compose.ScalableServices(yamlBytes); err == nil && len(specs) > 0 {
+		// One scalable service per plugin (the count is plugin-scoped). Reject
+		// more than one rather than silently managing only the first.
+		if len(specs) > 1 {
+			return nil, fmt.Errorf("compose plugin %q declares %d scalable services (x-smoothnas.instances); only one is supported", name, len(specs))
+		}
 		if err := i.store.SetComposeInstances(name, specs[0].Count, true); err != nil {
 			return nil, err
 		}
@@ -255,7 +260,9 @@ func (i *Installer) installCompose(yamlBytes []byte, tiers TierAssignments, conf
 	// injects them into the subprocess env so compose resolves ${key}.
 	if keys, err := compose.SecretKeys(yamlBytes); err == nil {
 		for _, k := range keys {
-			if v, ok := config[k]; ok && v != "" {
+			// Store when the operator supplied the key at all (an explicit empty
+			// value is honoured, not silently dropped).
+			if v, ok := config[k]; ok {
 				if err := i.store.SetComposeSecret(name, k, v); err != nil {
 					return nil, err
 				}
