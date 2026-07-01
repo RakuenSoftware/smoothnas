@@ -79,6 +79,7 @@ type Lifecycle struct {
 	proxy   ProxyManager
 	catalog *Catalog
 	backend *compose.Backend // plugins-11: compose-format plugins route here
+	tier    TierProvider     // plugins-11 Phase 2: compose tiered-volume resolution
 }
 
 // NewLifecycle constructs a Lifecycle around an existing Store and a
@@ -97,6 +98,33 @@ func (l *Lifecycle) SetCatalog(c *Catalog) { l.catalog = c }
 // compose-format plugins route their Materialise/Start/Demolish through it
 // instead of the manifest BuildCreatePayload path.
 func (l *Lifecycle) SetComposeBackend(b *compose.Backend) { l.backend = b }
+
+// SetTierProvider attaches the tier subsystem so compose plugins' x-smoothnas
+// tiered volumes resolve to smoothfs host paths (Phase 2).
+func (l *Lifecycle) SetTierProvider(tp TierProvider) { l.tier = tp }
+
+// composeSpecResolved builds the compose ProjectSpec with x-smoothnas tiered
+// volumes resolved to smoothfs host binds (mechanism B). Used at Materialise
+// (write time); the rewritten compose is what gets written to disk, so
+// Start/Stop/Status run against the bound project. Resolution errors (missing/
+// unhealthy tier) block Materialise before any container is created.
+func (l *Lifecycle) composeSpecResolved(rec *PluginRecord) (compose.ProjectSpec, error) {
+	yamlBytes := []byte(rec.Plugin.ManifestYAML)
+	tvols, err := compose.TieredVolumes(yamlBytes)
+	if err != nil {
+		return compose.ProjectSpec{}, err
+	}
+	if len(tvols) > 0 {
+		binds, err := ResolveComposeTierVolumes(l.tier, rec.Plugin.Name, tvols)
+		if err != nil {
+			return compose.ProjectSpec{}, err
+		}
+		if yamlBytes, err = compose.RewriteTieredBinds(yamlBytes, binds); err != nil {
+			return compose.ProjectSpec{}, err
+		}
+	}
+	return compose.SpecFromSingle(rec.Plugin.Name, string(yamlBytes), nil), nil
+}
 
 // isCompose reports whether a stored plugin is compose-format and a backend is
 // wired to handle it. It trusts the ArtifactCompose stamp set at install time
@@ -294,7 +322,11 @@ func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 		if err := l.checkComposeHostPortConflicts(name, rec.Plugin.ManifestYAML); err != nil {
 			return err
 		}
-		return l.backend.Materialise(ctx, l.composeSpec(rec))
+		spec, err := l.composeSpecResolved(rec)
+		if err != nil {
+			return err
+		}
+		return l.backend.Materialise(ctx, spec)
 	}
 	manifest, err := ParseManifest([]byte(rec.Plugin.ManifestYAML))
 	if err != nil {

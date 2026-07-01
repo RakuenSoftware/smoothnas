@@ -394,6 +394,7 @@ func openPluginInstallerWithRuntime() (*plugin.Installer, *db.Store, error) {
 	}
 	inst := plugin.NewInstaller(pluginStore)
 	inst.SetTierProvider(store, plugin.StatAvail)
+	lc.SetTierProvider(store)
 	inst.SetDemolisher(lc)
 	return inst, store, nil
 }
