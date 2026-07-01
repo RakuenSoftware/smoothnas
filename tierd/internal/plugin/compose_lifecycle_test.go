@@ -17,14 +17,15 @@ import (
 // compose.Runner so the whole install->route->compose path can be exercised
 // without a live engine.
 type recRunner struct {
-	subs  []string
-	psOut []byte
+	subs    []string
+	psOut   []byte
+	logsOut []byte
 }
 
 func (r *recRunner) Run(_ context.Context, _ []string, args ...string) ([]byte, []byte, error) {
 	for _, a := range args {
 		switch a {
-		case "version", "pull", "up", "stop", "down", "ps":
+		case "version", "pull", "up", "stop", "down", "ps", "logs":
 			r.subs = append(r.subs, a)
 		}
 	}
@@ -34,6 +35,8 @@ func (r *recRunner) Run(_ context.Context, _ []string, args ...string) ([]byte, 
 			return []byte(`{"version":"v2.29.7"}`), nil, nil
 		case "ps":
 			return r.psOut, nil, nil
+		case "logs":
+			return r.logsOut, nil, nil
 		}
 	}
 	return nil, nil, nil
@@ -234,5 +237,32 @@ func TestLifecycle_ComposeServices(t *testing.T) {
 	// manifest (non-compose) plugin errors.
 	if _, err := lc.ComposeServices(context.Background(), "does-not-exist"); err == nil {
 		t.Fatal("expected error for unknown/non-compose plugin")
+	}
+}
+
+// TestLifecycle_ComposeLogs returns the compose logs tail for a compose plugin.
+func TestLifecycle_ComposeLogs(t *testing.T) {
+	store := openTestStore(t)
+	if _, err := NewInstaller(store).Install([]byte("name: app\nservices:\n  web:\n    image: nginx\n")); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	r := &recRunner{logsOut: []byte("web-1  | hello\n")}
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", r), t.TempDir()))
+	out, err := lc.ComposeLogs(context.Background(), "app", 50)
+	if err != nil {
+		t.Fatalf("logs: %v", err)
+	}
+	if !strings.Contains(string(out), "hello") {
+		t.Fatalf("logs=%q", out)
+	}
+	found := false
+	for _, s := range r.subs {
+		if s == "logs" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a compose logs subcommand, subs=%v", r.subs)
 	}
 }

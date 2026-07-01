@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/gpu"
@@ -913,6 +914,26 @@ func (h *PluginsHandler) streamLogs(w http.ResponseWriter, r *http.Request, name
 		serverError(w, err)
 		return
 	}
+	// Compose plugins have no tierd-tracked container; serve the aggregated
+	// `compose logs` tail (text/plain, no follow) instead of the container SSE
+	// stream. Streaming follow for compose is a follow-up (Phase 4).
+	if rec.Plugin.ArtifactType == plugin.ArtifactCompose {
+		tail := 200
+		if v := r.URL.Query().Get("tail"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				tail = n
+			}
+		}
+		out, err := h.lifecycle.ComposeLogs(r.Context(), name, tail)
+		if err != nil {
+			jsonErrorCoded(w, err.Error(), http.StatusBadGateway, "plugins.logs_unavailable")
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write(out)
+		return
+	}
+
 	// v1 streams instance 1's logs only. Multi-instance plugins
 	// (gh-runner) get a per-instance picker in phase 6d.
 	if len(rec.Instances) == 0 || rec.Instances[0].ContainerID == "" {
