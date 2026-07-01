@@ -115,7 +115,7 @@ func (l *Lifecycle) composeSpecResolved(rec *PluginRecord) (compose.ProjectSpec,
 		return compose.ProjectSpec{}, err
 	}
 	if len(tvols) > 0 {
-		binds, err := ResolveComposeTierVolumes(l.tier, rec.Plugin.Name, tvols)
+		binds, err := l.resolveAndPinComposeVolumes(rec.Plugin.Name, tvols)
 		if err != nil {
 			return compose.ProjectSpec{}, err
 		}
@@ -177,6 +177,40 @@ func (l *Lifecycle) ReconcileComposeStates(ctx context.Context) error {
 		l.syncComposeState(ctx, row.Name, rec)
 	}
 	return nil
+}
+
+// resolveAndPinComposeVolumes resolves each tiered volume to its host path and
+// PINS the placement on first materialise. On a later materialise it reuses the
+// pinned path and REFUSES a silent retier (the compose now points at a different
+// tier) — a compose edit never relocates tiered data; an explicit REPIN (a
+// follow-up operator verb) is required.
+func (l *Lifecycle) resolveAndPinComposeVolumes(plugin string, tvols []compose.TieredVolume) (map[string]string, error) {
+	pins, err := l.store.GetComposeVolumePins(plugin)
+	if err != nil {
+		return nil, err
+	}
+	binds := map[string]string{}
+	for _, tv := range tvols {
+		resolved, err := ResolveComposeTierVolumes(l.tier, plugin, []compose.TieredVolume{tv})
+		if err != nil {
+			return nil, err
+		}
+		cur := resolved[tv.Name]
+		if pin, ok := pins[tv.Name]; ok {
+			if pin.HostPath != cur {
+				return nil, fmt.Errorf("volume %q is pinned to %q (tier %q); the compose now requests tier %q -> %q. "+
+					"A compose edit will not silently relocate tiered data — an explicit retier is required",
+					tv.Name, pin.HostPath, pin.Pool, tv.Tier, cur)
+			}
+			binds[tv.Name] = pin.HostPath
+			continue
+		}
+		if err := l.store.PinComposeVolume(plugin, tv.Name, tv.Tier, cur, tv.MinSize); err != nil {
+			return nil, err
+		}
+		binds[tv.Name] = cur
+	}
+	return binds, nil
 }
 
 // composeOverallToState maps a compose-project rollup to a tierd plugin state.

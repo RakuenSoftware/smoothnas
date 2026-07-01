@@ -183,3 +183,33 @@ func TestLifecycle_ComposeTieredVolumeRewrite(t *testing.T) {
 		t.Fatalf("compose not rewritten to tier bind:\n%s", written)
 	}
 }
+
+// TestLifecycle_ComposeTieredVolumePinGuardsRetier proves the pin prevents a
+// compose edit from silently relocating tiered data: first Materialise pins the
+// volume to its tier; a later Materialise whose compose points at a different
+// tier is refused.
+func TestLifecycle_ComposeTieredVolumePinGuardsRetier(t *testing.T) {
+	store := openTestStore(t)
+	fast := "name: app\nservices:\n  web:\n    image: nginx\n    volumes: [\"data:/var/data\"]\nvolumes:\n  data:\n    x-smoothnas: { tier: fast }\n"
+	if _, err := NewInstaller(store).Install([]byte(fast)); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}, slots: map[string][]db.TierSlot{}}
+	tp.put("fast", "/mnt/fast", "healthy")
+	tp.put("slow", "/mnt/slow", "healthy")
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", &recRunner{}), t.TempDir()))
+	lc.SetTierProvider(tp)
+
+	if err := lc.Materialise(context.Background(), "app"); err != nil {
+		t.Fatalf("first materialise: %v", err)
+	}
+	// Operator retiers data -> slow in the compose and reinstalls.
+	if err := store.SetManifestYAML("app", strings.Replace(fast, "tier: fast", "tier: slow", 1)); err != nil {
+		t.Fatal(err)
+	}
+	err := lc.Materialise(context.Background(), "app")
+	if err == nil || !strings.Contains(err.Error(), "pinned") {
+		t.Fatalf("expected retier refusal, got %v", err)
+	}
+}
