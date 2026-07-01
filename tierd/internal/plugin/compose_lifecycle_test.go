@@ -17,7 +17,7 @@ type recRunner struct{ subs []string }
 func (r *recRunner) Run(_ context.Context, _ []string, args ...string) ([]byte, []byte, error) {
 	for _, a := range args {
 		switch a {
-		case "version", "pull", "up", "down", "ps":
+		case "version", "pull", "up", "stop", "down", "ps":
 			r.subs = append(r.subs, a)
 		}
 	}
@@ -63,7 +63,15 @@ func TestLifecycle_RoutesComposePluginToBackend(t *testing.T) {
 	if err := lc.Start(context.Background(), "demo"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if want := []string{"version", "pull", "up"}; !reflect.DeepEqual(r.subs, want) {
+	if err := lc.Stop(context.Background(), "demo"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if err := lc.Demolish(context.Background(), "demo"); err != nil {
+		t.Fatalf("demolish: %v", err)
+	}
+	// Full lifecycle routes to compose: Materialise=version+pull, Start=up,
+	// Stop=stop, Demolish=down. None of it hit the manifest path.
+	if want := []string{"version", "pull", "up", "stop", "down"}; !reflect.DeepEqual(r.subs, want) {
 		t.Fatalf("compose subcommands=%v, want %v (routed to backend?)", r.subs, want)
 	}
 }

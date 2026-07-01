@@ -105,6 +105,11 @@ func (b *Backend) Start(ctx context.Context, s ProjectSpec) error {
 	return b.adapter.Up(ctx, b.project(s))
 }
 
+// Stop stops the project's containers without removing them (lifecycle Stop).
+func (b *Backend) Stop(ctx context.Context, s ProjectSpec) error {
+	return b.adapter.Stop(ctx, b.project(s))
+}
+
 // Teardown runs `compose down`. removeVolumes drops anonymous volumes; tiered
 // volumes are tierd-owned (bind-resolved) and NOT removed here. It also removes
 // the on-disk project dir so a re-install starts clean.

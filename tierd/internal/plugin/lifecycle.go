@@ -99,10 +99,11 @@ func (l *Lifecycle) SetCatalog(c *Catalog) { l.catalog = c }
 func (l *Lifecycle) SetComposeBackend(b *compose.Backend) { l.backend = b }
 
 // isCompose reports whether a stored plugin is compose-format and a backend is
-// wired to handle it.
+// wired to handle it. It trusts the ArtifactCompose stamp set at install time
+// (every plugin gets a definitive artifact type), so it does no per-call YAML
+// re-parse and can never misroute a manifest plugin whose YAML looks compose-y.
 func (l *Lifecycle) isCompose(rec *PluginRecord) bool {
-	return l.backend != nil && (rec.Plugin.ArtifactType == ArtifactCompose ||
-		compose.IsComposeFormat([]byte(rec.Plugin.ManifestYAML)))
+	return l.backend != nil && rec.Plugin.ArtifactType == ArtifactCompose
 }
 
 // composeSpec builds the compose ProjectSpec from a stored compose plugin. The
@@ -454,6 +455,13 @@ func (l *Lifecycle) RefreshContainers(ctx context.Context, name string) error {
 	rec, err := l.store.Get(name)
 	if err != nil {
 		return err
+	}
+	if l.isCompose(rec) {
+		// compose owns container discovery; a refresh is just a re-up.
+		if err := l.Materialise(ctx, name); err != nil {
+			return err
+		}
+		return l.Start(ctx, name)
 	}
 	wasRunning := rec.Plugin.State == StateRunning
 	if err := l.Materialise(ctx, name); err != nil {
@@ -1085,6 +1093,9 @@ func (l *Lifecycle) Stop(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if l.isCompose(rec) {
+		return l.backend.Stop(ctx, l.composeSpec(rec))
+	}
 	order := orderedServices(rec)
 	var firstErr error
 	for i := len(order) - 1; i >= 0; i-- {
@@ -1205,6 +1216,9 @@ func (l *Lifecycle) ApplyRouteFor(ctx context.Context, name string) error {
 	rec, err := l.store.Get(name)
 	if err != nil {
 		return err
+	}
+	if l.isCompose(rec) {
+		return nil // compose plugins don't register an nginx UI route
 	}
 	route, err := l.buildPluginRoute(rec)
 	if err != nil {
