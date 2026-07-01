@@ -23,6 +23,7 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/iscsi"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/runtime"
 )
 
@@ -256,6 +257,7 @@ func openPluginLifecycle() (*plugin.Lifecycle, *db.Store, error) {
 	rt := runtime.NewClient(sock)
 	lc := plugin.NewLifecycle(plugin.NewStore(store), rt)
 	lc.SetProxy(plugin.NewProxy())
+	lc.SetComposeBackend(compose.NewBackend(compose.New(sock, nil), "/var/lib/smoothnas/compose"))
 	cat, err := plugin.NewCatalog(plugin.DefaultOperatorProfilesDir)
 	if err != nil {
 		// Operator-profile errors are surfaced but don't block —
@@ -386,6 +388,7 @@ func openPluginInstallerWithRuntime() (*plugin.Installer, *db.Store, error) {
 	rt := runtime.NewClient(sock)
 	lc := plugin.NewLifecycle(pluginStore, rt)
 	lc.SetProxy(plugin.NewProxy())
+	lc.SetComposeBackend(compose.NewBackend(compose.New(sock, nil), "/var/lib/smoothnas/compose"))
 	if cat, err := plugin.NewCatalog(plugin.DefaultOperatorProfilesDir); err == nil && cat != nil {
 		lc.SetCatalog(cat)
 	}
