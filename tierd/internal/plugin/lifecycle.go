@@ -113,6 +113,18 @@ func (l *Lifecycle) composeSpec(rec *PluginRecord) compose.ProjectSpec {
 	return compose.SpecFromSingle(rec.Plugin.Name, rec.Plugin.ManifestYAML, nil)
 }
 
+// syncComposeState refreshes a compose plugin's CACHED state from compose ps (the
+// source of truth) after an op — best-effort. `compose up`/`stop` returning nil
+// doesn't prove the rollup, so we read the real state rather than assume
+// running/stopped. Status reads this cache (a per-read `compose ps` would spawn an
+// unbounded subprocess per UI poll); a periodic reconcile sweep to catch
+// out-of-band drift is a follow-up.
+func (l *Lifecycle) syncComposeState(ctx context.Context, name string, rec *PluginRecord) {
+	if st, err := l.backend.Status(ctx, l.composeSpec(rec)); err == nil {
+		_ = l.store.SetPluginState(name, composeOverallToState(st.Overall))
+	}
+}
+
 // composeOverallToState maps a compose-project rollup to a tierd plugin state.
 func composeOverallToState(o compose.Overall) string {
 	switch o {
@@ -929,7 +941,7 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 		if err := l.backend.Start(ctx, l.composeSpec(rec)); err != nil {
 			return err
 		}
-		_ = l.store.SetPluginState(name, StateRunning) // cache; compose ps stays truth
+		l.syncComposeState(ctx, name, rec) // cache the ACTUAL rollup, not optimistic running
 		return nil
 	}
 	manifest, err := ParseManifest([]byte(rec.Plugin.ManifestYAML))
@@ -1173,7 +1185,7 @@ func (l *Lifecycle) Stop(ctx context.Context, name string) error {
 		if err := l.backend.Stop(ctx, l.composeSpec(rec)); err != nil {
 			return err
 		}
-		_ = l.store.SetPluginState(name, StateStopped)
+		l.syncComposeState(ctx, name, rec) // real rollup (a partial stop isn't fully stopped)
 		return nil
 	}
 	order := orderedServices(rec)
@@ -1284,22 +1296,11 @@ func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 // Status returns the aggregate plugin state plus per-(service,instance)
 // state for the named plugin.
 func (l *Lifecycle) Status(ctx context.Context, name string) (*PluginRecord, error) {
-	rec, err := l.store.Get(name)
-	if err != nil {
-		return nil, err
-	}
-	// plugins-11: compose ps is the source of truth for a compose plugin's
-	// state — refresh (and cache) it on read. Best-effort: a compose/engine
-	// hiccup falls back to the last cached DB state.
-	if l.isCompose(rec) {
-		if st, e := l.backend.Status(ctx, l.composeSpec(rec)); e == nil {
-			if live := composeOverallToState(st.Overall); live != rec.Plugin.State {
-				_ = l.store.SetPluginState(name, live)
-				rec.Plugin.State = live
-			}
-		}
-	}
-	return rec, nil
+	// Reads the cached state, which is kept in sync from compose ps at each op
+	// (Start/Stop) for compose plugins. A per-read `compose ps` would spawn an
+	// unbounded subprocess per UI poll; a periodic reconcile sweep for out-of-band
+	// drift is a follow-up. (Manifest plugins are unchanged.)
+	return l.store.Get(name)
 }
 
 // ApplyRouteFor re-renders and applies the nginx route for one plugin.

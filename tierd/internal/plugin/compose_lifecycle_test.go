@@ -76,9 +76,9 @@ func TestLifecycle_RoutesComposePluginToBackend(t *testing.T) {
 	if err := lc.Demolish(context.Background(), "demo"); err != nil {
 		t.Fatalf("demolish: %v", err)
 	}
-	// Full lifecycle routes to compose: Materialise=version+pull, Start=up,
-	// Stop=stop, Demolish=down. None of it hit the manifest path.
-	if want := []string{"version", "pull", "up", "stop", "down"}; !reflect.DeepEqual(r.subs, want) {
+	// Full lifecycle routes to compose: Materialise=version+pull, Start=up then a
+	// state-sync ps, Stop=stop then ps, Demolish=down. None of it hit the manifest path.
+	if want := []string{"version", "pull", "up", "ps", "stop", "ps", "down"}; !reflect.DeepEqual(r.subs, want) {
 		t.Fatalf("compose subcommands=%v, want %v (routed to backend?)", r.subs, want)
 	}
 }
@@ -95,12 +95,19 @@ func TestLifecycle_ComposeStatusReflectsPs(t *testing.T) {
 	lc := NewLifecycle(store, &fakeRuntime{})
 	lc.SetComposeBackend(compose.NewBackend(compose.New("", r), t.TempDir()))
 
+	// Start caches the REAL rollup from compose ps; Status then reads that cache.
+	if err := lc.Materialise(context.Background(), "demo"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	if err := lc.Start(context.Background(), "demo"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
 	rec, err := lc.Status(context.Background(), "demo")
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
 	if rec.Plugin.State != StateRunning {
-		t.Fatalf("compose Status state=%q, want %q (from compose ps, not DB)", rec.Plugin.State, StateRunning)
+		t.Fatalf("state=%q, want %q (cached from compose ps at Start)", rec.Plugin.State, StateRunning)
 	}
 }
 

@@ -50,3 +50,23 @@ func TestHostPorts_EmptyAndNoPorts(t *testing.T) {
 		t.Fatalf("no ports => nil, got %v err %v", p, err)
 	}
 }
+
+func TestHostPorts_IPv6AndSCTP(t *testing.T) {
+	y := "services:\n  s:\n    image: a\n    ports:\n" +
+		"      - \"[::1]:8081:80\"\n" +
+		"      - \"5000:5000/sctp\"\n" +
+		"      - \"[2001:db8::1]:9443:443/udp\"\n"
+	got, err := HostPorts([]byte(y))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]bool{}
+	for _, h := range got {
+		keys[h.Key()] = true
+	}
+	for _, want := range []string{"8081/tcp", "5000/sctp", "9443/udp"} {
+		if !keys[want] {
+			t.Fatalf("missing %s in %v", want, keys)
+		}
+	}
+}

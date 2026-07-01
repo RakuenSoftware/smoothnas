@@ -75,6 +75,16 @@ func parsePortString(s string) (HostPort, bool) {
 		protocol = proto(s[i+1:])
 		s = s[:i]
 	}
+	// Strip a bracketed IPv6 host-IP prefix ("[::1]:8080:80") so the ':' split
+	// below sees only host:container. NOTE: the guard keys on port/proto only
+	// (not host_ip) — consistent with the manifest hostExpose guard and the
+	// single-host DNAT model, so same-port-on-distinct-host-IPs is treated as a
+	// conflict by policy.
+	if strings.HasPrefix(s, "[") {
+		if j := strings.IndexByte(s, ']'); j >= 0 {
+			s = strings.TrimPrefix(s[j+1:], ":")
+		}
+	}
 	parts := strings.Split(s, ":")
 	var hostPart string
 	switch len(parts) {
@@ -97,11 +107,17 @@ func parsePortString(s string) (HostPort, bool) {
 	return HostPort{Port: p, Protocol: protocol}, true
 }
 
+// proto normalizes the transport to compose's supported set (tcp/udp/sctp),
+// preserving sctp rather than collapsing it to tcp (which would false-match).
 func proto(s string) string {
-	if strings.EqualFold(strings.TrimSpace(s), "udp") {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "udp":
 		return "udp"
+	case "sctp":
+		return "sctp"
+	default:
+		return "tcp"
 	}
-	return "tcp"
 }
 
 func toInt(v any) (int, bool) {
