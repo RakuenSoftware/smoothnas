@@ -113,6 +113,32 @@ func (l *Lifecycle) composeSpec(rec *PluginRecord) compose.ProjectSpec {
 	return compose.SpecFromSingle(rec.Plugin.Name, rec.Plugin.ManifestYAML, nil)
 }
 
+// syncComposeState refreshes a compose plugin's CACHED state from compose ps (the
+// source of truth) after an op — best-effort. `compose up`/`stop` returning nil
+// doesn't prove the rollup, so we read the real state rather than assume
+// running/stopped. Status reads this cache (a per-read `compose ps` would spawn an
+// unbounded subprocess per UI poll); a periodic reconcile sweep to catch
+// out-of-band drift is a follow-up.
+func (l *Lifecycle) syncComposeState(ctx context.Context, name string, rec *PluginRecord) {
+	if st, err := l.backend.Status(ctx, l.composeSpec(rec)); err == nil {
+		_ = l.store.SetPluginState(name, composeOverallToState(st.Overall))
+	}
+}
+
+// composeOverallToState maps a compose-project rollup to a tierd plugin state.
+func composeOverallToState(o compose.Overall) string {
+	switch o {
+	case compose.StateRunning:
+		return StateRunning
+	case compose.StateDegraded:
+		return StateDegraded
+	case compose.StateFailed:
+		return StateFailed
+	default:
+		return StateStopped
+	}
+}
+
 // SetLXCPath attaches the smoothnas-runtime LXC root used for container
 // backing directories. Pass an empty string to disable filesystem cleanup.
 func (l *Lifecycle) SetLXCPath(path string) { l.lxcPath = strings.TrimSpace(path) }
@@ -239,6 +265,9 @@ func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
 		return err
 	}
 	if l.isCompose(rec) {
+		if err := l.checkComposeHostPortConflicts(name, rec.Plugin.ManifestYAML); err != nil {
+			return err
+		}
 		return l.backend.Materialise(ctx, l.composeSpec(rec))
 	}
 	manifest, err := ParseManifest([]byte(rec.Plugin.ManifestYAML))
@@ -372,14 +401,69 @@ func (l *Lifecycle) checkHostPortConflicts(name string, rec *PluginRecord) error
 		if err != nil {
 			return fmt.Errorf("load %q for host-port conflict check: %w", o.Name, err)
 		}
-		for _, p := range orec.Ports {
-			if !p.HostExpose {
-				continue
-			}
-			if _, clash := want[hostPortKey(p.ContainerPort, p.Protocol)]; clash {
-				return fmt.Errorf("host port %s is already published by plugin %q (service %q); "+
+		for key, svc := range otherHostPortKeys(orec) {
+			if _, clash := want[key]; clash {
+				return fmt.Errorf("host port %s is already published by plugin %q (%s); "+
 					"two plugins cannot host-expose the same port — change one of them",
-					hostPortKey(p.ContainerPort, p.Protocol), o.Name, p.Service)
+					key, o.Name, svc)
+			}
+		}
+	}
+	return nil
+}
+
+// otherHostPortKeys returns the host-published port keys (port/proto -> a service
+// or "compose" descriptor) for an installed plugin, unified across the manifest
+// (hostExpose) and compose (ports:) forms so the guard is cross-type.
+func otherHostPortKeys(orec *PluginRecord) map[string]string {
+	keys := map[string]string{}
+	if orec.Plugin.ArtifactType == ArtifactCompose {
+		ports, _ := compose.HostPorts([]byte(orec.Plugin.ManifestYAML))
+		for _, h := range ports {
+			keys[h.Key()] = "compose"
+		}
+		return keys
+	}
+	for _, p := range orec.Ports {
+		if p.HostExpose {
+			keys[hostPortKey(p.ContainerPort, p.Protocol)] = "service " + p.Service
+		}
+	}
+	return keys
+}
+
+// checkComposeHostPortConflicts is the compose-plugin analogue of
+// checkHostPortConflicts: it parses the candidate's fixed published ports and
+// rejects a collision with any other installed plugin (manifest or compose)
+// before `compose up`, turning a silent DNAT shadow into a clear error.
+func (l *Lifecycle) checkComposeHostPortConflicts(name, composeYAML string) error {
+	mine, err := compose.HostPorts([]byte(composeYAML))
+	if err != nil {
+		return fmt.Errorf("parse candidate ports: %w", err)
+	}
+	if len(mine) == 0 {
+		return nil
+	}
+	want := map[string]bool{}
+	for _, h := range mine {
+		want[h.Key()] = true
+	}
+	others, err := l.store.List()
+	if err != nil {
+		return fmt.Errorf("list plugins for host-port conflict check: %w", err)
+	}
+	for _, o := range others {
+		if o.Name == name {
+			continue
+		}
+		orec, err := l.store.Get(o.Name)
+		if err != nil {
+			return fmt.Errorf("load %q for host-port conflict check: %w", o.Name, err)
+		}
+		for key, svc := range otherHostPortKeys(orec) {
+			if want[key] {
+				return fmt.Errorf("host port %s is already published by plugin %q (%s); "+
+					"change one of them", key, o.Name, svc)
 			}
 		}
 	}
@@ -854,7 +938,11 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 		return err
 	}
 	if l.isCompose(rec) {
-		return l.backend.Start(ctx, l.composeSpec(rec))
+		if err := l.backend.Start(ctx, l.composeSpec(rec)); err != nil {
+			return err
+		}
+		l.syncComposeState(ctx, name, rec) // cache the ACTUAL rollup, not optimistic running
+		return nil
 	}
 	manifest, err := ParseManifest([]byte(rec.Plugin.ManifestYAML))
 	if err != nil {
@@ -1094,7 +1182,11 @@ func (l *Lifecycle) Stop(ctx context.Context, name string) error {
 		return err
 	}
 	if l.isCompose(rec) {
-		return l.backend.Stop(ctx, l.composeSpec(rec))
+		if err := l.backend.Stop(ctx, l.composeSpec(rec)); err != nil {
+			return err
+		}
+		l.syncComposeState(ctx, name, rec) // real rollup (a partial stop isn't fully stopped)
+		return nil
 	}
 	order := orderedServices(rec)
 	var firstErr error
@@ -1204,6 +1296,10 @@ func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 // Status returns the aggregate plugin state plus per-(service,instance)
 // state for the named plugin.
 func (l *Lifecycle) Status(ctx context.Context, name string) (*PluginRecord, error) {
+	// Reads the cached state, which is kept in sync from compose ps at each op
+	// (Start/Stop) for compose plugins. A per-read `compose ps` would spawn an
+	// unbounded subprocess per UI poll; a periodic reconcile sweep for out-of-band
+	// drift is a follow-up. (Manifest plugins are unchanged.)
 	return l.store.Get(name)
 }
 
