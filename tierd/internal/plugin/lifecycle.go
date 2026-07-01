@@ -125,6 +125,32 @@ func (l *Lifecycle) syncComposeState(ctx context.Context, name string, rec *Plug
 	}
 }
 
+// ReconcileComposeStates refreshes every compose plugin's cached state from
+// compose ps. The event-based reconciler only tracks io.smoothnas-labelled
+// containers; compose plugins carry com.docker.compose labels, so a periodic
+// sweep keeps their cached state fresh against out-of-band changes (a container
+// crash/restart outside a tierd op). No-op when no backend is wired.
+func (l *Lifecycle) ReconcileComposeStates(ctx context.Context) error {
+	if l.backend == nil {
+		return nil
+	}
+	rows, err := l.store.List()
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if row.ArtifactType != ArtifactCompose {
+			continue
+		}
+		rec, err := l.store.Get(row.Name)
+		if err != nil {
+			continue
+		}
+		l.syncComposeState(ctx, row.Name, rec)
+	}
+	return nil
+}
+
 // composeOverallToState maps a compose-project rollup to a tierd plugin state.
 func composeOverallToState(o compose.Overall) string {
 	switch o {

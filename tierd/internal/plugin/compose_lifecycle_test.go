@@ -131,3 +131,23 @@ func TestLifecycle_ComposeHostPortConflict(t *testing.T) {
 		t.Fatalf("expected host-port conflict on 8080/tcp, got %v", err)
 	}
 }
+
+// TestLifecycle_ReconcileComposeStates syncs a compose plugin's cached state from
+// compose ps (the periodic sweep for out-of-band drift). A manifest plugin is
+// untouched by the sweep.
+func TestLifecycle_ReconcileComposeStates(t *testing.T) {
+	store := openTestStore(t)
+	if _, err := NewInstaller(store).Install([]byte("name: demo\nservices:\n  web:\n    image: nginx\n")); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	r := &recRunner{psOut: []byte(`{"Name":"demo-web-1","Service":"web","State":"running","Health":"healthy"}`)}
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", r), t.TempDir()))
+	if err := lc.ReconcileComposeStates(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := store.Get("demo")
+	if rec.Plugin.State != StateRunning {
+		t.Fatalf("state=%q want running (synced by reconcile sweep)", rec.Plugin.State)
+	}
+}
