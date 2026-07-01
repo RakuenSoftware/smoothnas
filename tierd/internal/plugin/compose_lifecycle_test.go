@@ -2,10 +2,13 @@ package plugin
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
 )
 
@@ -149,5 +152,34 @@ func TestLifecycle_ReconcileComposeStates(t *testing.T) {
 	rec, _ := store.Get("demo")
 	if rec.Plugin.State != StateRunning {
 		t.Fatalf("state=%q want running (synced by reconcile sweep)", rec.Plugin.State)
+	}
+}
+
+// TestLifecycle_ComposeTieredVolumeRewrite proves Materialise resolves an
+// x-smoothnas tiered volume and writes a compose file that binds the resolved
+// tier host path (mechanism B).
+func TestLifecycle_ComposeTieredVolumeRewrite(t *testing.T) {
+	store := openTestStore(t)
+	proj := "name: app\nservices:\n  web:\n    image: nginx\n    volumes: [\"data:/var/data\"]\nvolumes:\n  data:\n    x-smoothnas: { tier: fast }\n"
+	if _, err := NewInstaller(store).Install([]byte(proj)); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}, slots: map[string][]db.TierSlot{}}
+	tp.put("fast", "/mnt/fast", "healthy")
+
+	root := t.TempDir()
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", &recRunner{}), root))
+	lc.SetTierProvider(tp)
+
+	if err := lc.Materialise(context.Background(), "app"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	written, err := os.ReadFile(filepath.Join(root, "app", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(written), "/mnt/fast") || strings.Contains(string(written), "x-smoothnas") {
+		t.Fatalf("compose not rewritten to tier bind:\n%s", written)
 	}
 }
