@@ -1539,3 +1539,19 @@ func (s *Store) PinComposeVolume(plugin, volume, pool, hostPath, minSize string)
 	}
 	return nil
 }
+
+// SetComposeInstances sets a compose plugin's instance count + configurability
+// (seeded from x-smoothnas.instances at install; updated by Scale). Materialise
+// expands the scalable service to this many per-instance services.
+func (s *Store) SetComposeInstances(name string, count int, configurable bool) error {
+	cfg := 0
+	if configurable {
+		cfg = 1
+	}
+	if _, err := s.db.Exec(
+		`UPDATE plugins SET instance_count = ?, instance_configurable = ?, updated_at = datetime('now') WHERE name = ?`,
+		count, cfg, name); err != nil {
+		return fmt.Errorf("set compose instances: %w", err)
+	}
+	return nil
+}

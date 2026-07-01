@@ -284,3 +284,39 @@ func TestInstaller_ComposeTierOverride(t *testing.T) {
 		t.Fatalf("stored compose tier not overridden: %+v", tv)
 	}
 }
+
+// TestLifecycle_ComposeInstanceExpansion proves a scalable compose plugin
+// materialises to N per-instance services, each with its own tier-bound _work.
+func TestLifecycle_ComposeInstanceExpansion(t *testing.T) {
+	store := openTestStore(t)
+	proj := "name: gh-runner\nservices:\n  gh-runner:\n    image: ghcr.io/x/r:1\n    x-smoothnas:\n      instances: { count: 2, min: 1, max: 8 }\n    volumes: [\"work:/w\"]\nvolumes:\n  work:\n    x-smoothnas: { tier: fast, perInstance: true }\n"
+	rec, err := NewInstaller(store).Install([]byte(proj))
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if rec.Plugin.InstanceCount != 2 || !rec.Plugin.InstanceConfigurable {
+		t.Fatalf("expected count=2 configurable, got %d/%v", rec.Plugin.InstanceCount, rec.Plugin.InstanceConfigurable)
+	}
+	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}, slots: map[string][]db.TierSlot{}}
+	tp.put("fast", "/mnt/fast", "healthy")
+	root := t.TempDir()
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", &recRunner{}), root))
+	lc.SetTierProvider(tp)
+	if err := lc.Materialise(context.Background(), "gh-runner"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	written, err := os.ReadFile(filepath.Join(root, "gh-runner", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(written)
+	for _, want := range []string{"gh-runner-1:", "gh-runner-2:", "/mnt/fast", "gh-runner-1-work", "gh-runner-2-work"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("expanded compose missing %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "instances:") {
+		t.Fatalf("x-smoothnas.instances should be gone from the materialised compose:\n%s", s)
+	}
+}

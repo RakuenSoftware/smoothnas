@@ -242,6 +242,14 @@ func (i *Installer) installCompose(yamlBytes []byte, tiers TierAssignments) (*Pl
 	if err := i.store.SetManifestYAML(name, string(yamlBytes)); err != nil {
 		return nil, fmt.Errorf("store compose project: %w", err)
 	}
+	// A compose plugin scales via a service-level x-smoothnas.instances block;
+	// seed the declared count + mark it configurable so materialise expands to N
+	// per-instance services and Scale can adjust it. (One scalable service for now.)
+	if specs, err := compose.ScalableServices(yamlBytes); err == nil && len(specs) > 0 {
+		if err := i.store.SetComposeInstances(name, specs[0].Count, true); err != nil {
+			return nil, err
+		}
+	}
 	return i.store.Get(name)
 }
 

@@ -136,6 +136,22 @@ func (l *Lifecycle) ComposeLogs(ctx context.Context, name string, tail int) ([]b
 // unhealthy tier) block Materialise before any container is created.
 func (l *Lifecycle) composeSpecResolved(rec *PluginRecord) (compose.ProjectSpec, error) {
 	yamlBytes := []byte(rec.Plugin.ManifestYAML)
+	// Phase-5 (gh-runner): expand x-smoothnas.instances services into N discrete
+	// per-instance services BEFORE tiered-volume resolution, so each instance's
+	// _work volume resolves + pins independently (data-safe across scale).
+	specs, err := compose.ScalableServices(yamlBytes)
+	if err != nil {
+		return compose.ProjectSpec{}, err
+	}
+	if len(specs) > 0 {
+		counts := map[string]int{}
+		for _, s := range specs {
+			counts[s.Service] = rec.Plugin.InstanceCount
+		}
+		if yamlBytes, err = compose.ExpandInstances(yamlBytes, counts); err != nil {
+			return compose.ProjectSpec{}, err
+		}
+	}
 	tvols, err := compose.TieredVolumes(yamlBytes)
 	if err != nil {
 		return compose.ProjectSpec{}, err
