@@ -1496,3 +1496,46 @@ func isUniqueViolation(err error) bool {
 	}
 	return strings.Contains(err.Error(), "UNIQUE constraint failed: plugins.name")
 }
+
+// ComposeVolumePin is a compose plugin's pinned tier placement for one volume.
+type ComposeVolumePin struct {
+	Volume   string
+	Pool     string
+	HostPath string
+	MinSize  string
+}
+
+// GetComposeVolumePins returns the pinned tier placements for a compose plugin,
+// keyed by volume name (empty map when none).
+func (s *Store) GetComposeVolumePins(plugin string) (map[string]ComposeVolumePin, error) {
+	rows, err := s.db.Query(
+		`SELECT volume_name, pool, host_path, COALESCE(min_size,'')
+		 FROM plugin_compose_volumes WHERE plugin_name = ?`, plugin)
+	if err != nil {
+		return nil, fmt.Errorf("get compose volume pins: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]ComposeVolumePin{}
+	for rows.Next() {
+		var p ComposeVolumePin
+		if err := rows.Scan(&p.Volume, &p.Pool, &p.HostPath, &p.MinSize); err != nil {
+			return nil, err
+		}
+		out[p.Volume] = p
+	}
+	return out, rows.Err()
+}
+
+// PinComposeVolume records a volume's tier placement. First write wins (INSERT OR
+// IGNORE) — the placement is immutable via this path; a retier is an explicit
+// REPIN operation (a follow-up), so a compose edit can never silently relocate data.
+func (s *Store) PinComposeVolume(plugin, volume, pool, hostPath, minSize string) error {
+	_, err := s.db.Exec(
+		`INSERT OR IGNORE INTO plugin_compose_volumes
+		 (plugin_name, volume_name, pool, host_path, min_size) VALUES (?, ?, ?, ?, ?)`,
+		plugin, volume, pool, hostPath, sqlNullable(minSize))
+	if err != nil {
+		return fmt.Errorf("pin compose volume: %w", err)
+	}
+	return nil
+}
