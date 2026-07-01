@@ -123,3 +123,43 @@ func rewriteLongMount(m map[string]any, binds map[string]string) {
 	m["type"] = "bind"
 	m["source"] = host
 }
+
+// SetVolumeTiers overrides the x-smoothnas.tier of the named top-level volumes —
+// the operator's install-time tier assignment. Volumes not listed, or without an
+// x-smoothnas block, are untouched (a tier is never created implicitly). This
+// lets a compose plugin ship a default tier and be remapped to the operator's
+// pool at install without editing the file.
+func SetVolumeTiers(composeYAML []byte, tiers map[string]string) ([]byte, error) {
+	if len(tiers) == 0 {
+		return composeYAML, nil
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(composeYAML, &doc); err != nil {
+		return nil, fmt.Errorf("compose: parse for tier override: %w", err)
+	}
+	topVols, ok := doc["volumes"].(map[string]any)
+	if !ok {
+		return composeYAML, nil
+	}
+	changed := false
+	for name, tier := range tiers {
+		v, ok := topVols[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		xs, ok := v["x-smoothnas"].(map[string]any)
+		if !ok {
+			continue
+		}
+		xs["tier"] = tier
+		changed = true
+	}
+	if !changed {
+		return composeYAML, nil
+	}
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("compose: render tier override: %w", err)
+	}
+	return out, nil
+}

@@ -48,3 +48,19 @@ func TestRewriteTieredBinds(t *testing.T) {
 		t.Fatal("nil binds must passthrough unchanged")
 	}
 }
+
+func TestSetVolumeTiers(t *testing.T) {
+	y := "volumes:\n  data:\n    x-smoothnas: { tier: default-pool }\n  other: {}\n"
+	out, err := SetVolumeTiers([]byte(y), map[string]string{"data": "fast-pool", "other": "x", "missing": "y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tv, _ := TieredVolumes(out)
+	if len(tv) != 1 || tv[0].Name != "data" || tv[0].Tier != "fast-pool" {
+		t.Fatalf("tier override failed: %+v", tv)
+	}
+	// no assignments => passthrough
+	if b, _ := SetVolumeTiers([]byte(y), nil); string(b) != y {
+		t.Fatal("nil tiers must passthrough")
+	}
+}

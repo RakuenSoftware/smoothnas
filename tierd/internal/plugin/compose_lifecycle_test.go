@@ -266,3 +266,21 @@ func TestLifecycle_ComposeLogs(t *testing.T) {
 		t.Fatalf("expected a compose logs subcommand, subs=%v", r.subs)
 	}
 }
+
+// TestInstaller_ComposeTierOverride bakes the operator's install-time tier into
+// the stored compose (portability fix): a plugin ships tier=default-pool but the
+// operator remaps it to fast-pool without editing the file.
+func TestInstaller_ComposeTierOverride(t *testing.T) {
+	store := openTestStore(t)
+	proj := "name: app\nservices:\n  web:\n    image: nginx\n    volumes: [\"data:/d\"]\nvolumes:\n  data:\n    x-smoothnas: { tier: default-pool }\n"
+	rec, err := NewInstaller(store).InstallWithOptions([]byte(proj), InstallOptions{
+		Tiers: TierAssignments{PerVolume: map[string]string{"data": "fast-pool"}},
+	})
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	tv, _ := compose.TieredVolumes([]byte(rec.Plugin.ManifestYAML))
+	if len(tv) != 1 || tv[0].Tier != "fast-pool" {
+		t.Fatalf("stored compose tier not overridden: %+v", tv)
+	}
+}

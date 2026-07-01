@@ -125,7 +125,7 @@ func (i *Installer) InstallWithOptions(yamlBytes []byte, opts InstallOptions) (*
 	// smoothnas manifest — store it raw and let the compose Backend own its
 	// lifecycle. This bypasses the manifest/tier-preflight/volume machinery.
 	if compose.IsComposeFormat(yamlBytes) {
-		return i.installCompose(yamlBytes)
+		return i.installCompose(yamlBytes, opts.Tiers)
 	}
 
 	m, err := ParseManifest(yamlBytes)
@@ -211,10 +211,30 @@ func (i *Installer) InstallWithOptions(yamlBytes []byte, opts InstallOptions) (*
 // is the compose top-level `name:` (required — it's also the compose -p project
 // name). No tier preflight / volume resolution / plugin_services rows: compose
 // owns those. Lifecycle routes it to the compose Backend by artifact type.
-func (i *Installer) installCompose(yamlBytes []byte) (*PluginRecord, error) {
+func (i *Installer) installCompose(yamlBytes []byte, tiers TierAssignments) (*PluginRecord, error) {
 	name := compose.ProjectName(yamlBytes)
 	if name == "" {
 		return nil, fmt.Errorf("compose plugin: set a top-level `name:` (used as the compose project name)")
+	}
+	// Install-time tier override: bake the operator's tier choices into the
+	// stored compose so an x-smoothnas volume can ship a default pool and be
+	// remapped to the operator's pool without editing the file. (x-smoothnas.tier
+	// is a literal parsed before compose ${} substitution, so it can't be an env
+	// var — the override closes that portability gap.)
+	tvols, err := compose.TieredVolumes(yamlBytes)
+	if err != nil {
+		return nil, fmt.Errorf("compose plugin: %w", err)
+	}
+	if len(tvols) > 0 {
+		overrides := map[string]string{}
+		for _, tv := range tvols {
+			if t := tiers.Resolve("", tv.Name); t != "" {
+				overrides[tv.Name] = t
+			}
+		}
+		if yamlBytes, err = compose.SetVolumeTiers(yamlBytes, overrides); err != nil {
+			return nil, err
+		}
 	}
 	if err := i.store.InsertCompose(name, ""); err != nil {
 		return nil, err
