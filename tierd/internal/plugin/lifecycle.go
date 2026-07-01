@@ -1072,7 +1072,15 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 		return err
 	}
 	if l.isCompose(rec) {
-		if err := l.backend.Start(ctx, l.composeSpec(rec)); err != nil {
+		spec := l.composeSpec(rec)
+		secrets, err := l.store.GetComposeSecrets(name)
+		if err != nil {
+			return err
+		}
+		if len(secrets) > 0 {
+			spec.SecretEnv = secrets // injected into the `up` subprocess env for ${KEY}
+		}
+		if err := l.backend.Start(ctx, spec); err != nil {
 			return err
 		}
 		l.syncComposeState(ctx, name, rec) // cache the ACTUAL rollup, not optimistic running

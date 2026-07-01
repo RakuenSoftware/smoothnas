@@ -125,7 +125,7 @@ func (i *Installer) InstallWithOptions(yamlBytes []byte, opts InstallOptions) (*
 	// smoothnas manifest — store it raw and let the compose Backend own its
 	// lifecycle. This bypasses the manifest/tier-preflight/volume machinery.
 	if compose.IsComposeFormat(yamlBytes) {
-		return i.installCompose(yamlBytes, opts.Tiers)
+		return i.installCompose(yamlBytes, opts.Tiers, opts.Config)
 	}
 
 	m, err := ParseManifest(yamlBytes)
@@ -211,7 +211,7 @@ func (i *Installer) InstallWithOptions(yamlBytes []byte, opts InstallOptions) (*
 // is the compose top-level `name:` (required — it's also the compose -p project
 // name). No tier preflight / volume resolution / plugin_services rows: compose
 // owns those. Lifecycle routes it to the compose Backend by artifact type.
-func (i *Installer) installCompose(yamlBytes []byte, tiers TierAssignments) (*PluginRecord, error) {
+func (i *Installer) installCompose(yamlBytes []byte, tiers TierAssignments, config map[string]string) (*PluginRecord, error) {
 	name := compose.ProjectName(yamlBytes)
 	if name == "" {
 		return nil, fmt.Errorf("compose plugin: set a top-level `name:` (used as the compose project name)")
@@ -248,6 +248,18 @@ func (i *Installer) installCompose(yamlBytes []byte, tiers TierAssignments) (*Pl
 	if specs, err := compose.ScalableServices(yamlBytes); err == nil && len(specs) > 0 {
 		if err := i.store.SetComposeInstances(name, specs[0].Count, true); err != nil {
 			return nil, err
+		}
+	}
+	// Secret env values (declared via top-level x-smoothnas.secrets) go to the
+	// secret store, NOT the compose file / a .env / plugin_config — at `up` tierd
+	// injects them into the subprocess env so compose resolves ${key}.
+	if keys, err := compose.SecretKeys(yamlBytes); err == nil {
+		for _, k := range keys {
+			if v, ok := config[k]; ok && v != "" {
+				if err := i.store.SetComposeSecret(name, k, v); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	return i.store.Get(name)

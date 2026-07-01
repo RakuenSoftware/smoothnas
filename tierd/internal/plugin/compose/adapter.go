@@ -78,6 +78,7 @@ type Project struct {
 	WorkingDir string
 	Profiles   []string
 	EnvFile    string
+	SecretEnv  map[string]string // injected into the `up` subprocess env only
 }
 
 // baseArgs is the leading `docker compose -p <name> -f ... --profile ...`
@@ -164,7 +165,13 @@ func (a *Adapter) Pull(ctx context.Context, p Project) error {
 // call Pull first). Returns the raw compose output for the caller to log.
 func (a *Adapter) Up(ctx context.Context, p Project) error {
 	args := append(a.baseArgs(p), "up", "-d", "--pull", "never")
-	if _, stderr, err := a.runner.Run(ctx, a.env(), args...); err != nil {
+	// Secrets are added to THIS subprocess env only (for ${KEY} interpolation),
+	// never to a file / the compose project / ps / config.
+	env := a.env()
+	for k, v := range p.SecretEnv {
+		env = append(env, k+"="+v)
+	}
+	if _, stderr, err := a.runner.Run(ctx, env, args...); err != nil {
 		return fmt.Errorf("compose up %s: %w: %s", p.Name, err, strings.TrimSpace(string(stderr)))
 	}
 	return nil

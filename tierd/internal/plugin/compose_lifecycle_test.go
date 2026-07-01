@@ -17,16 +17,20 @@ import (
 // compose.Runner so the whole install->route->compose path can be exercised
 // without a live engine.
 type recRunner struct {
-	subs    []string
-	psOut   []byte
-	logsOut []byte
+	subs      []string
+	psOut     []byte
+	logsOut   []byte
+	lastUpEnv []string
 }
 
-func (r *recRunner) Run(_ context.Context, _ []string, args ...string) ([]byte, []byte, error) {
+func (r *recRunner) Run(_ context.Context, env []string, args ...string) ([]byte, []byte, error) {
 	for _, a := range args {
 		switch a {
 		case "version", "pull", "up", "stop", "down", "ps", "logs":
 			r.subs = append(r.subs, a)
+			if a == "up" {
+				r.lastUpEnv = env
+			}
 		}
 	}
 	for _, a := range args {
@@ -318,5 +322,43 @@ func TestLifecycle_ComposeInstanceExpansion(t *testing.T) {
 	}
 	if strings.Contains(s, "instances:") {
 		t.Fatalf("x-smoothnas.instances should be gone from the materialised compose:\n%s", s)
+	}
+}
+
+// TestLifecycle_ComposeSecretInjection proves an x-smoothnas.secrets value is
+// stored out-of-band and injected into the `compose up` subprocess env (never
+// written to the compose file).
+func TestLifecycle_ComposeSecretInjection(t *testing.T) {
+	store := openTestStore(t)
+	proj := "name: app\nx-smoothnas:\n  secrets: [GH_RUNNER_TOKEN]\nservices:\n  r:\n    image: x\n    environment:\n      GH_RUNNER_TOKEN: \"${GH_RUNNER_TOKEN}\"\n"
+	if _, err := NewInstaller(store).InstallWithOptions([]byte(proj), InstallOptions{
+		Config: map[string]string{"GH_RUNNER_TOKEN": "s3cr3t"},
+	}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	// stored in the secret store, and NOT in the compose file.
+	secrets, _ := store.GetComposeSecrets("app")
+	if secrets["GH_RUNNER_TOKEN"] != "s3cr3t" {
+		t.Fatalf("secret not stored: %v", secrets)
+	}
+	rec, _ := store.Get("app")
+	if strings.Contains(rec.Plugin.ManifestYAML, "s3cr3t") {
+		t.Fatal("secret leaked into the stored compose file")
+	}
+	// Start injects it into the up subprocess env.
+	r := &recRunner{}
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", r), t.TempDir()))
+	if err := lc.Start(context.Background(), "app"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	found := false
+	for _, e := range r.lastUpEnv {
+		if e == "GH_RUNNER_TOKEN=s3cr3t" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("secret not injected into up env: %v", r.lastUpEnv)
 	}
 }
