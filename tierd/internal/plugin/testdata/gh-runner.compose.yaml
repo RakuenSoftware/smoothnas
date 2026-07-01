@@ -1,0 +1,32 @@
+# gh-runner — SmoothNAS compose-native plugin (plugins-11 Phase-5): N self-hosted
+# GitHub Actions runners, each with its OWN tier-bound _work dir. tierd expands the
+# scalable service to gh-runner-1..N per-instance services; scale via
+# POST /api/plugins/gh-runner/instances {count}.
+#
+# GH_RUNNER_TOKEN is a SECRET: declared in x-smoothnas.secrets, supplied at install,
+# stored out-of-band, and injected into the `compose up` subprocess env only (never
+# written to the compose file / a .env / plaintext DB).
+#
+# GH_REPO_URL is per-install NON-secret operator config. Until dedicated non-secret
+# compose config plumbing lands (tracked follow-up = config->env for compose plugins),
+# set it by editing the line below (or declare it in x-smoothnas.secrets to reuse the
+# injected-env path).
+name: gh-runner
+x-smoothnas:
+  secrets: [GH_RUNNER_TOKEN]
+services:
+  gh-runner:
+    image: ghcr.io/rakuensoftware/smoothnas-plugin-gh-runner:0.1.0
+    restart: unless-stopped
+    command: ["/entrypoint.sh"]
+    x-smoothnas:
+      instances: { count: 2, min: 1, max: 16 }
+    environment:
+      GH_REPO_URL: "${GH_REPO_URL:-}"
+      GH_RUNNER_TOKEN: "${GH_RUNNER_TOKEN}"
+      GH_RUNNER_LABELS: "${GH_RUNNER_LABELS:-self-hosted,linux,x64,smoothnas}"
+    volumes:
+      - "work:/home/runner/_work"
+volumes:
+  work:
+    x-smoothnas: { tier: runner-ssd, perInstance: true, minSize: 100G }

@@ -17,16 +17,20 @@ import (
 // compose.Runner so the whole install->route->compose path can be exercised
 // without a live engine.
 type recRunner struct {
-	subs    []string
-	psOut   []byte
-	logsOut []byte
+	subs      []string
+	psOut     []byte
+	logsOut   []byte
+	lastUpEnv []string
 }
 
-func (r *recRunner) Run(_ context.Context, _ []string, args ...string) ([]byte, []byte, error) {
+func (r *recRunner) Run(_ context.Context, env []string, args ...string) ([]byte, []byte, error) {
 	for _, a := range args {
 		switch a {
 		case "version", "pull", "up", "stop", "down", "ps", "logs":
 			r.subs = append(r.subs, a)
+			if a == "up" {
+				r.lastUpEnv = env
+			}
 		}
 	}
 	for _, a := range args {
@@ -282,5 +286,193 @@ func TestInstaller_ComposeTierOverride(t *testing.T) {
 	tv, _ := compose.TieredVolumes([]byte(rec.Plugin.ManifestYAML))
 	if len(tv) != 1 || tv[0].Tier != "fast-pool" {
 		t.Fatalf("stored compose tier not overridden: %+v", tv)
+	}
+}
+
+// TestLifecycle_ComposeInstanceExpansion proves a scalable compose plugin
+// materialises to N per-instance services, each with its own tier-bound _work.
+func TestLifecycle_ComposeInstanceExpansion(t *testing.T) {
+	store := openTestStore(t)
+	proj := "name: gh-runner\nservices:\n  gh-runner:\n    image: ghcr.io/x/r:1\n    x-smoothnas:\n      instances: { count: 2, min: 1, max: 8 }\n    volumes: [\"work:/w\"]\nvolumes:\n  work:\n    x-smoothnas: { tier: fast, perInstance: true }\n"
+	rec, err := NewInstaller(store).Install([]byte(proj))
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if rec.Plugin.InstanceCount != 2 || !rec.Plugin.InstanceConfigurable {
+		t.Fatalf("expected count=2 configurable, got %d/%v", rec.Plugin.InstanceCount, rec.Plugin.InstanceConfigurable)
+	}
+	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}, slots: map[string][]db.TierSlot{}}
+	tp.put("fast", "/mnt/fast", "healthy")
+	root := t.TempDir()
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", &recRunner{}), root))
+	lc.SetTierProvider(tp)
+	if err := lc.Materialise(context.Background(), "gh-runner"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	written, err := os.ReadFile(filepath.Join(root, "gh-runner", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(written)
+	for _, want := range []string{"gh-runner-1:", "gh-runner-2:", "/mnt/fast", "gh-runner-1-work", "gh-runner-2-work"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("expanded compose missing %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "instances:") {
+		t.Fatalf("x-smoothnas.instances should be gone from the materialised compose:\n%s", s)
+	}
+}
+
+// TestLifecycle_ComposeSecretInjection proves an x-smoothnas.secrets value is
+// stored out-of-band and injected into the `compose up` subprocess env (never
+// written to the compose file).
+func TestLifecycle_ComposeSecretInjection(t *testing.T) {
+	store := openTestStore(t)
+	proj := "name: app\nx-smoothnas:\n  secrets: [GH_RUNNER_TOKEN]\nservices:\n  r:\n    image: x\n    environment:\n      GH_RUNNER_TOKEN: \"${GH_RUNNER_TOKEN}\"\n"
+	if _, err := NewInstaller(store).InstallWithOptions([]byte(proj), InstallOptions{
+		Config: map[string]string{"GH_RUNNER_TOKEN": "s3cr3t"},
+	}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	// stored in the secret store, and NOT in the compose file.
+	secrets, _ := store.GetComposeSecrets("app")
+	if secrets["GH_RUNNER_TOKEN"] != "s3cr3t" {
+		t.Fatalf("secret not stored: %v", secrets)
+	}
+	rec, _ := store.Get("app")
+	if strings.Contains(rec.Plugin.ManifestYAML, "s3cr3t") {
+		t.Fatal("secret leaked into the stored compose file")
+	}
+	// Start injects it into the up subprocess env.
+	r := &recRunner{}
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", r), t.TempDir()))
+	if err := lc.Start(context.Background(), "app"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	found := false
+	for _, e := range r.lastUpEnv {
+		if e == "GH_RUNNER_TOKEN=s3cr3t" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("secret not injected into up env: %v", r.lastUpEnv)
+	}
+}
+
+// TestLifecycle_ComposeScale scales a gh-runner-style plugin 2->4->1 and enforces max.
+func TestLifecycle_ComposeScale(t *testing.T) {
+	store := openTestStore(t)
+	proj := "name: gh-runner\nservices:\n  gh-runner:\n    image: x\n    x-smoothnas:\n      instances: { count: 2, min: 1, max: 8 }\n    volumes: [\"work:/w\"]\nvolumes:\n  work:\n    x-smoothnas: { tier: fast, perInstance: true }\n"
+	if _, err := NewInstaller(store).Install([]byte(proj)); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}, slots: map[string][]db.TierSlot{}}
+	tp.put("fast", "/mnt/fast", "healthy")
+	root := t.TempDir()
+	r := &recRunner{}
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", r), root))
+	lc.SetTierProvider(tp)
+
+	res, err := lc.Scale(context.Background(), "gh-runner", 4)
+	if err != nil {
+		t.Fatalf("scale up: %v", err)
+	}
+	if res.From != 2 || res.To != 4 || len(res.Added) != 2 {
+		t.Fatalf("scale result=%+v", res)
+	}
+	written, _ := os.ReadFile(filepath.Join(root, "gh-runner", "compose.yaml"))
+	for _, want := range []string{"gh-runner-1:", "gh-runner-4:", "gh-runner-4-work"} {
+		if !strings.Contains(string(written), want) {
+			t.Fatalf("scaled compose missing %q:\n%s", want, written)
+		}
+	}
+	// StartScaled ran a reconcile up (--remove-orphans).
+	sawUp := false
+	for _, sub := range r.subs {
+		if sub == "up" {
+			sawUp = true
+		}
+	}
+	if !sawUp {
+		t.Fatalf("expected a reconcile up, subs=%v", r.subs)
+	}
+	// above max is rejected.
+	if _, err := lc.Scale(context.Background(), "gh-runner", 20); err == nil {
+		t.Fatal("expected max violation")
+	}
+	// scale down reports removed.
+	res2, err := lc.Scale(context.Background(), "gh-runner", 1)
+	if err != nil {
+		t.Fatalf("scale down: %v", err)
+	}
+	if res2.To != 1 || len(res2.Removed) != 3 {
+		t.Fatalf("scale down result=%+v", res2)
+	}
+}
+
+// TestGHRunner_ComposeEndToEnd drives the full gh-runner compose migration from
+// the shipped fixture: install with a secret token, materialise -> N per-instance
+// tier-bound services with the secret injected, then scale.
+func TestGHRunner_ComposeEndToEnd(t *testing.T) {
+	yamlBytes, err := os.ReadFile("testdata/gh-runner.compose.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := openTestStore(t)
+	rec, err := NewInstaller(store).InstallWithOptions(yamlBytes, InstallOptions{
+		Config: map[string]string{"GH_RUNNER_TOKEN": "AABBCC"},
+	})
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if rec.Plugin.InstanceCount != 2 || !rec.Plugin.InstanceConfigurable {
+		t.Fatalf("count/configurable = %d/%v", rec.Plugin.InstanceCount, rec.Plugin.InstanceConfigurable)
+	}
+	// secret stored out-of-band, not in the compose.
+	if s, _ := store.GetComposeSecrets("gh-runner"); s["GH_RUNNER_TOKEN"] != "AABBCC" {
+		t.Fatalf("secret not stored: %v", s)
+	}
+	if strings.Contains(rec.Plugin.ManifestYAML, "AABBCC") {
+		t.Fatal("secret leaked into stored compose")
+	}
+	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}, slots: map[string][]db.TierSlot{}}
+	tp.put("runner-ssd", "/mnt/ssd", "healthy")
+	root := t.TempDir()
+	r := &recRunner{}
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", r), root))
+	lc.SetTierProvider(tp)
+
+	if err := lc.Materialise(context.Background(), "gh-runner"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	if err := lc.Start(context.Background(), "gh-runner"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	written, _ := os.ReadFile(filepath.Join(root, "gh-runner", "compose.yaml"))
+	for _, want := range []string{"gh-runner-1:", "gh-runner-2:", "gh-runner-1-work", "/mnt/ssd"} {
+		if !strings.Contains(string(written), want) {
+			t.Fatalf("materialised compose missing %q:\n%s", want, written)
+		}
+	}
+	// secret reached the up subprocess env.
+	tokenInEnv := false
+	for _, e := range r.lastUpEnv {
+		if e == "GH_RUNNER_TOKEN=AABBCC" {
+			tokenInEnv = true
+		}
+	}
+	if !tokenInEnv {
+		t.Fatal("token not injected into up env")
+	}
+	// scale to 5.
+	res, err := lc.Scale(context.Background(), "gh-runner", 5)
+	if err != nil || res.To != 5 {
+		t.Fatalf("scale: %+v err=%v", res, err)
 	}
 }

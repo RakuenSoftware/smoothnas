@@ -1539,3 +1539,50 @@ func (s *Store) PinComposeVolume(plugin, volume, pool, hostPath, minSize string)
 	}
 	return nil
 }
+
+// SetComposeInstances sets a compose plugin's instance count + configurability
+// (seeded from x-smoothnas.instances at install; updated by Scale). Materialise
+// expands the scalable service to this many per-instance services.
+func (s *Store) SetComposeInstances(name string, count int, configurable bool) error {
+	cfg := 0
+	if configurable {
+		cfg = 1
+	}
+	if _, err := s.db.Exec(
+		`UPDATE plugins SET instance_count = ?, instance_configurable = ?, updated_at = datetime('now') WHERE name = ?`,
+		count, cfg, name); err != nil {
+		return fmt.Errorf("set compose instances: %w", err)
+	}
+	return nil
+}
+
+// SetComposeSecret stores (upsert) a compose plugin's secret env value. Kept out
+// of the compose file + any compose-loaded .env; injected into the `compose up`
+// subprocess env at start so compose resolves ${key}.
+func (s *Store) SetComposeSecret(plugin, key, value string) error {
+	if _, err := s.db.Exec(
+		`INSERT INTO plugin_compose_secrets (plugin_name, key, value) VALUES (?, ?, ?)
+		 ON CONFLICT(plugin_name, key) DO UPDATE SET value = excluded.value`,
+		plugin, key, value); err != nil {
+		return fmt.Errorf("set compose secret: %w", err)
+	}
+	return nil
+}
+
+// GetComposeSecrets returns a compose plugin's secret env (key->value), empty if none.
+func (s *Store) GetComposeSecrets(plugin string) (map[string]string, error) {
+	rows, err := s.db.Query(`SELECT key, value FROM plugin_compose_secrets WHERE plugin_name = ?`, plugin)
+	if err != nil {
+		return nil, fmt.Errorf("get compose secrets: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
+}

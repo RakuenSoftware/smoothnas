@@ -163,3 +163,21 @@ func SetVolumeTiers(composeYAML []byte, tiers map[string]string) ([]byte, error)
 	}
 	return out, nil
 }
+
+// SecretKeys returns the env keys a compose plugin declares as secrets via a
+// top-level `x-smoothnas: {secrets: [KEY, ...]}` list. Their values are stored in
+// the tierd secret store (not the compose file) and injected at `compose up`.
+func SecretKeys(composeYAML []byte) ([]string, error) {
+	var doc struct {
+		XS *struct {
+			Secrets []string `yaml:"secrets"`
+		} `yaml:"x-smoothnas"`
+	}
+	if err := yaml.Unmarshal(composeYAML, &doc); err != nil {
+		return nil, fmt.Errorf("compose: parse secrets: %w", err)
+	}
+	if doc.XS == nil {
+		return nil, nil
+	}
+	return doc.XS.Secrets, nil
+}

@@ -37,6 +37,10 @@ type ProjectSpec struct {
 	FileOrder []string
 	Profiles  []string
 	Env       map[string]string
+	// SecretEnv is injected into the `compose up` SUBPROCESS environment only (so
+	// compose resolves ${KEY} from a service's environment: block) — never written
+	// to a file compose loads. Kept off Materialise/ps/config to limit exposure.
+	SecretEnv map[string]string
 }
 
 // dir is the on-disk project directory.
@@ -57,7 +61,7 @@ func (b *Backend) project(s ProjectSpec) Project {
 	for _, f := range order {
 		files = append(files, filepath.Join(d, f))
 	}
-	p := Project{Name: s.Name, Files: files, WorkingDir: d, Profiles: s.Profiles}
+	p := Project{Name: s.Name, Files: files, WorkingDir: d, Profiles: s.Profiles, SecretEnv: s.SecretEnv}
 	if len(s.Env) > 0 {
 		p.EnvFile = filepath.Join(d, ".env")
 	}
@@ -211,4 +215,9 @@ func contains(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// StartScaled brings the project up reconciling orphans (for scale down/up).
+func (b *Backend) StartScaled(ctx context.Context, s ProjectSpec) error {
+	return b.adapter.UpRemoveOrphans(ctx, b.project(s))
 }

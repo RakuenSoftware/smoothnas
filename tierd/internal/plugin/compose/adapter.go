@@ -78,6 +78,7 @@ type Project struct {
 	WorkingDir string
 	Profiles   []string
 	EnvFile    string
+	SecretEnv  map[string]string // injected into the `up` subprocess env only
 }
 
 // baseArgs is the leading `docker compose -p <name> -f ... --profile ...`
@@ -164,10 +165,28 @@ func (a *Adapter) Pull(ctx context.Context, p Project) error {
 // call Pull first). Returns the raw compose output for the caller to log.
 func (a *Adapter) Up(ctx context.Context, p Project) error {
 	args := append(a.baseArgs(p), "up", "-d", "--pull", "never")
-	if _, stderr, err := a.runner.Run(ctx, a.env(), args...); err != nil {
-		return fmt.Errorf("compose up %s: %w: %s", p.Name, err, strings.TrimSpace(string(stderr)))
+	// Secrets are added to THIS subprocess env only (for ${KEY} interpolation),
+	// never to a file / the compose project / ps / config.
+	env := a.env()
+	for k, v := range p.SecretEnv {
+		env = append(env, k+"="+v)
+	}
+	if _, stderr, err := a.runner.Run(ctx, env, args...); err != nil {
+		return fmt.Errorf("compose up %s: %w: %s", p.Name, err, redactSecrets(string(stderr), p.SecretEnv))
 	}
 	return nil
+}
+
+// redactSecrets replaces any injected secret value in text with *** — defensive,
+// so a compose error that echoes an interpolated field can't surface the value.
+func redactSecrets(text string, secrets map[string]string) string {
+	text = strings.TrimSpace(text)
+	for _, v := range secrets {
+		if v != "" {
+			text = strings.ReplaceAll(text, v, "***")
+		}
+	}
+	return text
 }
 
 // Logs returns the tail of the project's aggregated compose logs (no follow).
@@ -283,4 +302,19 @@ func (ExecRunner) Run(ctx context.Context, env []string, args ...string) ([]byte
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+// UpRemoveOrphans is `up` plus --remove-orphans: it reconciles the running set to
+// the (regenerated) compose, so scaling DOWN removes the dropped per-instance
+// services' containers while their tier-bound _work host dirs (binds) persist.
+func (a *Adapter) UpRemoveOrphans(ctx context.Context, p Project) error {
+	args := append(a.baseArgs(p), "up", "-d", "--pull", "never", "--remove-orphans")
+	env := a.env()
+	for k, v := range p.SecretEnv {
+		env = append(env, k+"="+v)
+	}
+	if _, stderr, err := a.runner.Run(ctx, env, args...); err != nil {
+		return fmt.Errorf("compose up --remove-orphans %s: %w: %s", p.Name, err, redactSecrets(string(stderr), p.SecretEnv))
+	}
+	return nil
 }
