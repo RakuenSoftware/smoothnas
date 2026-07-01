@@ -291,3 +291,18 @@ func (ExecRunner) Run(ctx context.Context, env []string, args ...string) ([]byte
 	err := cmd.Run()
 	return stdout.Bytes(), stderr.Bytes(), err
 }
+
+// UpRemoveOrphans is `up` plus --remove-orphans: it reconciles the running set to
+// the (regenerated) compose, so scaling DOWN removes the dropped per-instance
+// services' containers while their tier-bound _work host dirs (binds) persist.
+func (a *Adapter) UpRemoveOrphans(ctx context.Context, p Project) error {
+	args := append(a.baseArgs(p), "up", "-d", "--pull", "never", "--remove-orphans")
+	env := a.env()
+	for k, v := range p.SecretEnv {
+		env = append(env, k+"="+v)
+	}
+	if _, stderr, err := a.runner.Run(ctx, env, args...); err != nil {
+		return fmt.Errorf("compose up --remove-orphans %s: %w: %s", p.Name, err, strings.TrimSpace(string(stderr)))
+	}
+	return nil
+}

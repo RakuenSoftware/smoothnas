@@ -362,3 +362,117 @@ func TestLifecycle_ComposeSecretInjection(t *testing.T) {
 		t.Fatalf("secret not injected into up env: %v", r.lastUpEnv)
 	}
 }
+
+// TestLifecycle_ComposeScale scales a gh-runner-style plugin 2->4->1 and enforces max.
+func TestLifecycle_ComposeScale(t *testing.T) {
+	store := openTestStore(t)
+	proj := "name: gh-runner\nservices:\n  gh-runner:\n    image: x\n    x-smoothnas:\n      instances: { count: 2, min: 1, max: 8 }\n    volumes: [\"work:/w\"]\nvolumes:\n  work:\n    x-smoothnas: { tier: fast, perInstance: true }\n"
+	if _, err := NewInstaller(store).Install([]byte(proj)); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}, slots: map[string][]db.TierSlot{}}
+	tp.put("fast", "/mnt/fast", "healthy")
+	root := t.TempDir()
+	r := &recRunner{}
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", r), root))
+	lc.SetTierProvider(tp)
+
+	res, err := lc.Scale(context.Background(), "gh-runner", 4)
+	if err != nil {
+		t.Fatalf("scale up: %v", err)
+	}
+	if res.From != 2 || res.To != 4 || len(res.Added) != 2 {
+		t.Fatalf("scale result=%+v", res)
+	}
+	written, _ := os.ReadFile(filepath.Join(root, "gh-runner", "compose.yaml"))
+	for _, want := range []string{"gh-runner-1:", "gh-runner-4:", "gh-runner-4-work"} {
+		if !strings.Contains(string(written), want) {
+			t.Fatalf("scaled compose missing %q:\n%s", want, written)
+		}
+	}
+	// StartScaled ran a reconcile up (--remove-orphans).
+	sawUp := false
+	for _, sub := range r.subs {
+		if sub == "up" {
+			sawUp = true
+		}
+	}
+	if !sawUp {
+		t.Fatalf("expected a reconcile up, subs=%v", r.subs)
+	}
+	// above max is rejected.
+	if _, err := lc.Scale(context.Background(), "gh-runner", 20); err == nil {
+		t.Fatal("expected max violation")
+	}
+	// scale down reports removed.
+	res2, err := lc.Scale(context.Background(), "gh-runner", 1)
+	if err != nil {
+		t.Fatalf("scale down: %v", err)
+	}
+	if res2.To != 1 || len(res2.Removed) != 3 {
+		t.Fatalf("scale down result=%+v", res2)
+	}
+}
+
+// TestGHRunner_ComposeEndToEnd drives the full gh-runner compose migration from
+// the shipped fixture: install with a secret token, materialise -> N per-instance
+// tier-bound services with the secret injected, then scale.
+func TestGHRunner_ComposeEndToEnd(t *testing.T) {
+	yamlBytes, err := os.ReadFile("testdata/gh-runner.compose.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := openTestStore(t)
+	rec, err := NewInstaller(store).InstallWithOptions(yamlBytes, InstallOptions{
+		Config: map[string]string{"GH_RUNNER_TOKEN": "AABBCC"},
+	})
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if rec.Plugin.InstanceCount != 2 || !rec.Plugin.InstanceConfigurable {
+		t.Fatalf("count/configurable = %d/%v", rec.Plugin.InstanceCount, rec.Plugin.InstanceConfigurable)
+	}
+	// secret stored out-of-band, not in the compose.
+	if s, _ := store.GetComposeSecrets("gh-runner"); s["GH_RUNNER_TOKEN"] != "AABBCC" {
+		t.Fatalf("secret not stored: %v", s)
+	}
+	if strings.Contains(rec.Plugin.ManifestYAML, "AABBCC") {
+		t.Fatal("secret leaked into stored compose")
+	}
+	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}, slots: map[string][]db.TierSlot{}}
+	tp.put("runner-ssd", "/mnt/ssd", "healthy")
+	root := t.TempDir()
+	r := &recRunner{}
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", r), root))
+	lc.SetTierProvider(tp)
+
+	if err := lc.Materialise(context.Background(), "gh-runner"); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	if err := lc.Start(context.Background(), "gh-runner"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	written, _ := os.ReadFile(filepath.Join(root, "gh-runner", "compose.yaml"))
+	for _, want := range []string{"gh-runner-1:", "gh-runner-2:", "gh-runner-1-work", "/mnt/ssd"} {
+		if !strings.Contains(string(written), want) {
+			t.Fatalf("materialised compose missing %q:\n%s", want, written)
+		}
+	}
+	// secret reached the up subprocess env.
+	tokenInEnv := false
+	for _, e := range r.lastUpEnv {
+		if e == "GH_RUNNER_TOKEN=AABBCC" {
+			tokenInEnv = true
+		}
+	}
+	if !tokenInEnv {
+		t.Fatal("token not injected into up env")
+	}
+	// scale to 5.
+	res, err := lc.Scale(context.Background(), "gh-runner", 5)
+	if err != nil || res.To != 5 {
+		t.Fatalf("scale: %+v err=%v", res, err)
+	}
+}

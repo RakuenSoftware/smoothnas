@@ -216,3 +216,8 @@ func contains(ss []string, s string) bool {
 	}
 	return false
 }
+
+// StartScaled brings the project up reconciling orphans (for scale down/up).
+func (b *Backend) StartScaled(ctx context.Context, s ProjectSpec) error {
+	return b.adapter.UpRemoveOrphans(ctx, b.project(s))
+}
