@@ -12,7 +12,10 @@ import (
 // v2 version so the Backend's version assertion passes. It implements
 // compose.Runner so the whole install->route->compose path can be exercised
 // without a live engine.
-type recRunner struct{ subs []string }
+type recRunner struct {
+	subs  []string
+	psOut []byte
+}
 
 func (r *recRunner) Run(_ context.Context, _ []string, args ...string) ([]byte, []byte, error) {
 	for _, a := range args {
@@ -22,8 +25,11 @@ func (r *recRunner) Run(_ context.Context, _ []string, args ...string) ([]byte, 
 		}
 	}
 	for _, a := range args {
-		if a == "version" {
+		switch a {
+		case "version":
 			return []byte(`{"version":"v2.29.7"}`), nil, nil
+		case "ps":
+			return r.psOut, nil, nil
 		}
 	}
 	return nil, nil, nil
@@ -73,5 +79,26 @@ func TestLifecycle_RoutesComposePluginToBackend(t *testing.T) {
 	// Stop=stop, Demolish=down. None of it hit the manifest path.
 	if want := []string{"version", "pull", "up", "stop", "down"}; !reflect.DeepEqual(r.subs, want) {
 		t.Fatalf("compose subcommands=%v, want %v (routed to backend?)", r.subs, want)
+	}
+}
+
+// TestLifecycle_ComposeStatusReflectsPs proves Status uses compose ps as the
+// source of truth for a compose plugin (state = running from a live ps), not
+// the stale DB state (installed).
+func TestLifecycle_ComposeStatusReflectsPs(t *testing.T) {
+	store := openTestStore(t)
+	if _, err := NewInstaller(store).Install([]byte("name: demo\nservices:\n  web:\n    image: nginx\n")); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	r := &recRunner{psOut: []byte(`{"Name":"demo-web-1","Service":"web","State":"running","Health":"healthy"}`)}
+	lc := NewLifecycle(store, &fakeRuntime{})
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", r), t.TempDir()))
+
+	rec, err := lc.Status(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if rec.Plugin.State != StateRunning {
+		t.Fatalf("compose Status state=%q, want %q (from compose ps, not DB)", rec.Plugin.State, StateRunning)
 	}
 }

@@ -113,6 +113,20 @@ func (l *Lifecycle) composeSpec(rec *PluginRecord) compose.ProjectSpec {
 	return compose.SpecFromSingle(rec.Plugin.Name, rec.Plugin.ManifestYAML, nil)
 }
 
+// composeOverallToState maps a compose-project rollup to a tierd plugin state.
+func composeOverallToState(o compose.Overall) string {
+	switch o {
+	case compose.StateRunning:
+		return StateRunning
+	case compose.StateDegraded:
+		return StateDegraded
+	case compose.StateFailed:
+		return StateFailed
+	default:
+		return StateStopped
+	}
+}
+
 // SetLXCPath attaches the smoothnas-runtime LXC root used for container
 // backing directories. Pass an empty string to disable filesystem cleanup.
 func (l *Lifecycle) SetLXCPath(path string) { l.lxcPath = strings.TrimSpace(path) }
@@ -854,7 +868,11 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 		return err
 	}
 	if l.isCompose(rec) {
-		return l.backend.Start(ctx, l.composeSpec(rec))
+		if err := l.backend.Start(ctx, l.composeSpec(rec)); err != nil {
+			return err
+		}
+		_ = l.store.SetPluginState(name, StateRunning) // cache; compose ps stays truth
+		return nil
 	}
 	manifest, err := ParseManifest([]byte(rec.Plugin.ManifestYAML))
 	if err != nil {
@@ -1094,7 +1112,11 @@ func (l *Lifecycle) Stop(ctx context.Context, name string) error {
 		return err
 	}
 	if l.isCompose(rec) {
-		return l.backend.Stop(ctx, l.composeSpec(rec))
+		if err := l.backend.Stop(ctx, l.composeSpec(rec)); err != nil {
+			return err
+		}
+		_ = l.store.SetPluginState(name, StateStopped)
+		return nil
 	}
 	order := orderedServices(rec)
 	var firstErr error
@@ -1204,7 +1226,22 @@ func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 // Status returns the aggregate plugin state plus per-(service,instance)
 // state for the named plugin.
 func (l *Lifecycle) Status(ctx context.Context, name string) (*PluginRecord, error) {
-	return l.store.Get(name)
+	rec, err := l.store.Get(name)
+	if err != nil {
+		return nil, err
+	}
+	// plugins-11: compose ps is the source of truth for a compose plugin's
+	// state — refresh (and cache) it on read. Best-effort: a compose/engine
+	// hiccup falls back to the last cached DB state.
+	if l.isCompose(rec) {
+		if st, e := l.backend.Status(ctx, l.composeSpec(rec)); e == nil {
+			if live := composeOverallToState(st.Overall); live != rec.Plugin.State {
+				_ = l.store.SetPluginState(name, live)
+				rec.Plugin.State = live
+			}
+		}
+	}
+	return rec, nil
 }
 
 // ApplyRouteFor re-renders and applies the nginx route for one plugin.

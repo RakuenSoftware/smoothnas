@@ -477,6 +477,18 @@ func (s *Store) InsertCompose(name, version string) error {
 	return nil
 }
 
+// SetPluginState sets the plugin-level state column directly. Used for compose
+// plugins (plugins-11), whose state is the compose-project rollup (compose ps)
+// rather than a plugin_instances aggregate. A best-effort cache write — compose
+// ps stays the source of truth.
+func (s *Store) SetPluginState(name, state string) error {
+	_, err := s.db.Exec(
+		`UPDATE plugins SET state = ?, updated_at = datetime('now') WHERE name = ?`,
+		state, name,
+	)
+	return err
+}
+
 // SetManifestYAML overwrites the stored raw manifest bytes for a plugin.
 func (s *Store) SetManifestYAML(name string, yaml string) error {
 	if yaml == "" {
