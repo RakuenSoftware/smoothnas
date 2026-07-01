@@ -170,6 +170,19 @@ func (a *Adapter) Up(ctx context.Context, p Project) error {
 	return nil
 }
 
+// Logs returns the tail of the project's aggregated compose logs (no follow).
+func (a *Adapter) Logs(ctx context.Context, p Project, tail int) ([]byte, error) {
+	if tail <= 0 {
+		tail = 200
+	}
+	args := append(a.baseArgs(p), "logs", "--no-color", "--tail", strconv.Itoa(tail))
+	out, stderr, err := a.runner.Run(ctx, a.env(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("compose logs %s: %w: %s", p.Name, err, strings.TrimSpace(string(stderr)))
+	}
+	return out, nil
+}
+
 // Stop stops the project's containers WITHOUT removing them (compose stop) —
 // the lifecycle Stop op (vs Down/Teardown which removes on uninstall).
 func (a *Adapter) Stop(ctx context.Context, p Project) error {
