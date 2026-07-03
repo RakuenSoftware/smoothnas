@@ -20,6 +20,13 @@ const (
 	maxPluginManifestBytes         = 1 << 20
 )
 
+// Catalog sources. "builtin" is the first-party snapshot bundled with the
+// appliance (offline, can't be rate-limited); "github" is a live release fetch.
+const (
+	catalogSourceBuiltin = "builtin"
+	catalogSourceGitHub  = "github"
+)
+
 type githubReleaseAsset struct {
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
@@ -43,6 +50,9 @@ type pluginCatalogLatestResponse struct {
 	TagName    string                  `json:"tagName"`
 	ReleaseURL string                  `json:"releaseUrl"`
 	Manifests  []pluginCatalogManifest `json:"manifests"`
+	// Source is "builtin" when served from the bundled snapshot or "github"
+	// when fetched live. Lets the UI badge bundled vs community entries.
+	Source string `json:"source,omitempty"`
 }
 
 func (h *PluginsHandler) catalogLatest(w http.ResponseWriter, r *http.Request) {
@@ -50,6 +60,16 @@ func (h *PluginsHandler) catalogLatest(w http.ResponseWriter, r *http.Request) {
 	owner, name, ok := parseGitHubRepo(repo)
 	if !ok {
 		jsonErrorCoded(w, "repo must be owner/name", http.StatusBadRequest, "plugins.catalog.repo_invalid")
+		return
+	}
+
+	// First-party plugins resolve from the snapshot bundled with the appliance
+	// so the catalog works offline and can never be blocked by GitHub's
+	// unauthenticated rate limit. GitHub is consulted only for non-bundled
+	// (third-party) repos; freshness for bundled repos is handled separately
+	// (a background refresh — see catalogLatestForBundled).
+	if resp := h.catalogLatestForBundled(owner + "/" + name); resp != nil {
+		_ = json.NewEncoder(w).Encode(resp)
 		return
 	}
 
@@ -61,6 +81,7 @@ func (h *PluginsHandler) catalogLatest(w http.ResponseWriter, r *http.Request) {
 		jsonErrorCoded(w, err.Error(), http.StatusBadGateway, "plugins.catalog.fetch_failed")
 		return
 	}
+	resp.Source = catalogSourceGitHub
 	_ = json.NewEncoder(w).Encode(resp)
 }
 

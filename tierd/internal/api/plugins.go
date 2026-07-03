@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/gpu"
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
@@ -46,6 +48,17 @@ type PluginsHandler struct {
 	// that returns 403 once exhausted. Only attached to api.github.com calls,
 	// never to release-asset downloads (which go to a different, signed host).
 	catalogToken string
+
+	// Background freshness for the bundled (first-party) catalog (plugins-12).
+	// When enabled, serving a bundled repo triggers an opportunistic, best-
+	// effort GitHub refresh whose result is cached and served next time; the
+	// served response never waits on or fails with that refresh. Disabled by
+	// default so unit tests make no background network calls; production wiring
+	// enables it. nowFunc is injectable for TTL tests.
+	catalogRefreshEnabled  bool
+	nowFunc                func() time.Time
+	catalogRefreshMu       sync.Mutex
+	catalogRefreshInflight map[string]bool
 }
 
 // NewPluginsHandler constructs a handler from the already-wired
@@ -65,11 +78,12 @@ func NewPluginsHandler(
 	tp plugin.TierProvider,
 ) *PluginsHandler {
 	return &PluginsHandler{
-		store:        store,
-		installer:    installer,
-		lifecycle:    lc,
-		catalog:      cat,
-		tierProvider: tp,
+		store:                  store,
+		installer:              installer,
+		lifecycle:              lc,
+		catalog:                cat,
+		tierProvider:           tp,
+		catalogRefreshInflight: map[string]bool{},
 	}
 }
 
