@@ -1,0 +1,60 @@
+# Keep the bundled first-party plugin-catalog snapshot fresh.
+#
+# tierd embeds a snapshot of the first-party plugins' manifests
+# (tierd/internal/api/catalogdata/) so the "Install plugins" catalog works
+# offline / when GitHub is rate-limited (plugins-12). That snapshot is the
+# guaranteed-installable floor; a connected appliance still refreshes from each
+# repo's latest release at runtime. This job regenerates the floor when the
+# upstream plugin repos publish newer releases and opens a PR for review.
+#
+# Runtime freshness (the background refresh) does NOT depend on this — this only
+# advances the offline floor an air-gapped appliance ships with.
+name: sync-plugin-catalog
+
+on:
+  schedule:
+    - cron: '17 6 * * 1' # Mondays 06:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-plugin-catalog
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Regenerate bundled catalog snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/sync-plugin-catalog.sh
+
+      - name: Open PR if the snapshot changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- tierd/internal/api/catalogdata; then
+            echo "Bundled catalog is already up to date."
+            exit 0
+          fi
+          branch="bot/sync-plugin-catalog"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add tierd/internal/api/catalogdata
+          git commit -m "chore(plugins): refresh bundled plugin-catalog snapshot"
+          git push -f origin "$branch"
+          if gh pr view "$branch" --json state --jq '.state' 2>/dev/null | grep -q OPEN; then
+            echo "Updated existing PR on $branch."
+          else
+            gh pr create --base testing --head "$branch" \
+              --title "chore(plugins): refresh bundled plugin-catalog snapshot" \
+              --body "Automated refresh of the embedded first-party plugin-catalog floor (tierd/internal/api/catalogdata) from the plugin repos' latest releases. See docs/proposals/pending/plugins-12-bundled-catalog.md. Review the manifest diff before merging."
+          fi

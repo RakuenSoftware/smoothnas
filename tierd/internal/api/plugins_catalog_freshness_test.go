@@ -21,9 +21,9 @@ func TestTagIsNewer(t *testing.T) {
 		{"v0.2.5", "v0.2.5", false},
 		{"v0.2.4", "v0.2.5", false},
 		{"v0.2.5", "v0.2.6", false},
-		{"latest", "v0.2.5", false}, // unparseable a -> floor wins
+		{"latest", "v0.2.5", false},  // unparseable a -> floor wins
 		{"v0.2.6", "nightly", false}, // unparseable b -> floor wins
-		{"v0.2", "v0.2.0", false},     // not MAJOR.MINOR.PATCH
+		{"v0.2", "v0.2.0", false},    // not MAJOR.MINOR.PATCH
 	}
 	for _, c := range cases {
 		if got := tagIsNewer(c.a, c.b); got != c.want {
