@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
 )
@@ -135,10 +137,141 @@ func builtinCatalogFor(repo string) *pluginCatalogLatestResponse {
 	return &cp
 }
 
+// bundledCatalogRefreshTTL bounds how often a bundled repo's background GitHub
+// refresh runs: a repo cached more recently than this is considered fresh.
+const bundledCatalogRefreshTTL = 6 * time.Hour
+
 // catalogLatestForBundled returns the response to serve for a bundled repo, or
-// nil if the repo is not bundled (so the caller falls back to GitHub). Slice 1
-// serves the embedded snapshot directly; later slices layer a freshness cache
-// on top here without touching the handler.
+// nil if the repo is not bundled (so the caller falls back to GitHub).
+//
+// It serves the NEWER of the embedded snapshot (the offline floor) and the
+// cached last-successful GitHub fetch (a fresher version, if online refresh has
+// run). It then opportunistically triggers a background refresh when that cache
+// is missing/stale. The returned response is always immediately available and
+// never depends on GitHub being reachable.
 func (h *PluginsHandler) catalogLatestForBundled(repo string) *pluginCatalogLatestResponse {
-	return builtinCatalogFor(repo)
+	builtin := builtinCatalogFor(repo)
+	if builtin == nil {
+		return nil
+	}
+	chosen := builtin
+
+	var cached *plugin.CatalogCacheEntry
+	if h.store != nil {
+		cached, _ = h.store.GetCatalogCache(strings.ToLower(repo))
+		if cached != nil && tagIsNewer(cached.TagName, builtin.TagName) {
+			var fresh pluginCatalogLatestResponse
+			if json.Unmarshal([]byte(cached.Response), &fresh) == nil && len(fresh.Manifests) > 0 {
+				chosen = &fresh
+			}
+		}
+	}
+
+	h.triggerBundledRefresh(repo, cached)
+	return chosen
+}
+
+// triggerBundledRefresh launches a best-effort background GitHub refresh for a
+// bundled repo when refresh is enabled and the cache is missing or older than
+// the TTL. A per-repo in-flight guard prevents concurrent requests from
+// stampeding the same repo. It never blocks the caller.
+func (h *PluginsHandler) triggerBundledRefresh(repo string, cached *plugin.CatalogCacheEntry) {
+	if !h.catalogRefreshEnabled || h.store == nil {
+		return
+	}
+	if cached != nil && h.now().Sub(time.Unix(cached.FetchedAt, 0)) < bundledCatalogRefreshTTL {
+		return // fresh enough
+	}
+	key := strings.ToLower(repo)
+
+	h.catalogRefreshMu.Lock()
+	if h.catalogRefreshInflight[key] {
+		h.catalogRefreshMu.Unlock()
+		return
+	}
+	if h.catalogRefreshInflight == nil {
+		h.catalogRefreshInflight = map[string]bool{}
+	}
+	h.catalogRefreshInflight[key] = true
+	h.catalogRefreshMu.Unlock()
+
+	go func() {
+		defer func() {
+			h.catalogRefreshMu.Lock()
+			delete(h.catalogRefreshInflight, key)
+			h.catalogRefreshMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		h.refreshBundledCatalog(ctx, repo)
+	}()
+}
+
+// refreshBundledCatalog fetches a bundled repo's latest release from GitHub and,
+// on success, caches it. Best-effort: a rate-limited or offline fetch simply
+// leaves the previous cache (or the embedded floor) in place.
+func (h *PluginsHandler) refreshBundledCatalog(ctx context.Context, repo string) {
+	owner, name, ok := parseGitHubRepo(repo)
+	if !ok {
+		return
+	}
+	resp, err := h.fetchLatestPluginRelease(ctx, owner, name)
+	if err != nil {
+		return
+	}
+	resp.Source = catalogSourceGitHub
+	blob, err := json.Marshal(resp)
+	if err != nil {
+		return
+	}
+	_ = h.store.PutCatalogCache(strings.ToLower(repo), resp.TagName, string(blob), h.now().Unix())
+}
+
+// now returns the handler's clock (injectable for tests).
+func (h *PluginsHandler) now() time.Time {
+	if h.nowFunc != nil {
+		return h.nowFunc()
+	}
+	return time.Now()
+}
+
+// tagIsNewer reports whether release tag a is a strictly newer semver than b.
+// Tags look like "v1.2.3"; a leading "v" is optional. If either tag is not a
+// clean MAJOR.MINOR.PATCH, it returns false so the validated embedded floor
+// wins — a fresher-but-unparseable cache never displaces the bundled snapshot.
+func tagIsNewer(a, b string) bool {
+	av, aok := parseSemver(a)
+	bv, bok := parseSemver(b)
+	if !aok || !bok {
+		return false
+	}
+	for i := 0; i < 3; i++ {
+		if av[i] != bv[i] {
+			return av[i] > bv[i]
+		}
+	}
+	return false
+}
+
+func parseSemver(tag string) ([3]int, bool) {
+	var out [3]int
+	s := strings.TrimPrefix(strings.TrimSpace(tag), "v")
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return out, false
+	}
+	for i, p := range parts {
+		n := 0
+		if p == "" {
+			return out, false
+		}
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				return out, false
+			}
+			n = n*10 + int(c-'0')
+		}
+		out[i] = n
+	}
+	return out, true
 }

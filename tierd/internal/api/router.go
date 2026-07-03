@@ -94,6 +94,10 @@ func newRouterFull(store *db.Store, version string, startTime time.Time, history
 			break
 		}
 	}
+	// Keep the bundled first-party catalog current: serving a bundled repo
+	// opportunistically refreshes it from GitHub in the background (plugins-12).
+	// Off by default in the constructor so unit tests make no background calls.
+	pluginsHandler.catalogRefreshEnabled = true
 	zfsHandler := NewZFSHandler(store)
 	userPrefsHandler := NewUserPrefsHandler(store)
 	sharingHandler := NewSharingHandler(store)

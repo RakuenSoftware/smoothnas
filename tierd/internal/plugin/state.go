@@ -1586,3 +1586,41 @@ func (s *Store) GetComposeSecrets(plugin string) (map[string]string, error) {
 	}
 	return out, rows.Err()
 }
+
+// CatalogCacheEntry is one cached latest-release response for a bundled plugin
+// catalog repo (plugins-12). Repo is the lowercased "owner/name"; Response is
+// the JSON-encoded catalog response; FetchedAt is unix seconds.
+type CatalogCacheEntry struct {
+	Repo      string
+	TagName   string
+	Response  string
+	FetchedAt int64
+}
+
+// GetCatalogCache returns the cached catalog response for a repo, or (nil, nil)
+// when nothing is cached. repo must be the lowercased "owner/name".
+func (s *Store) GetCatalogCache(repo string) (*CatalogCacheEntry, error) {
+	var e CatalogCacheEntry
+	err := s.db.QueryRow(
+		`SELECT repo, tag_name, response, fetched_at FROM plugin_catalog_cache WHERE repo = ?`,
+		repo).Scan(&e.Repo, &e.TagName, &e.Response, &e.FetchedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get catalog cache: %w", err)
+	}
+	return &e, nil
+}
+
+// PutCatalogCache upserts the cached catalog response for a repo. repo must be
+// the lowercased "owner/name".
+func (s *Store) PutCatalogCache(repo, tagName, response string, fetchedAt int64) error {
+	if _, err := s.db.Exec(
+		`INSERT INTO plugin_catalog_cache (repo, tag_name, response, fetched_at) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(repo) DO UPDATE SET tag_name = excluded.tag_name, response = excluded.response, fetched_at = excluded.fetched_at`,
+		repo, tagName, response, fetchedAt); err != nil {
+		return fmt.Errorf("put catalog cache: %w", err)
+	}
+	return nil
+}
