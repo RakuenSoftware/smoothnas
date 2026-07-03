@@ -40,6 +40,12 @@ type PluginsHandler struct {
 
 	catalogHTTPClient *http.Client
 	catalogAPIBaseURL string
+	// catalogToken, when set, is sent as a Bearer credential on requests to
+	// the GitHub API host so the catalog fetch uses the authenticated rate
+	// limit (5000/hr) instead of the shared unauthenticated 60/hr-per-IP cap
+	// that returns 403 once exhausted. Only attached to api.github.com calls,
+	// never to release-asset downloads (which go to a different, signed host).
+	catalogToken string
 }
 
 // NewPluginsHandler constructs a handler from the already-wired
