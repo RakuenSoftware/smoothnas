@@ -352,6 +352,9 @@ export const api = {
       repo: string;
       tagName: string;
       releaseUrl: string;
+      // 'builtin' when served from the appliance's bundled snapshot (offline,
+      // can't be rate-limited); 'github' when fetched live. Absent on old servers.
+      source?: 'builtin' | 'github';
       manifests: Array<{
         assetName: string;
         downloadUrl: string;

@@ -398,6 +398,21 @@
     color: #222;
   }
 
+  // "Bundled" badge: first-party plugin served from the appliance snapshot.
+  // margin-right:auto groups it beside the name and pushes the vendor right.
+  .wizard-plugin-card-badge {
+    margin-right: auto;
+    background: #1f7a3d;
+    color: #fff;
+    padding: 2px 7px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+
   .wizard-plugin-card-vendor {
     font-size: 11px;
     color: #888;

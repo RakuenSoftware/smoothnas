@@ -31,11 +31,11 @@ func TestPluginsAPI_CatalogTokenScopedToAPIHost(t *testing.T) {
 	// API host: must receive the Bearer credential.
 	var apiSawAuth string
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/RakuenSoftware/smoothnas-plugin-aimee/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/Community/smoothnas-plugin-demo/releases/latest", func(w http.ResponseWriter, r *http.Request) {
 		apiSawAuth = r.Header.Get("Authorization")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"tag_name": "v0.2.5",
-			"html_url": "https://github.com/RakuenSoftware/smoothnas-plugin-aimee/releases/tag/v0.2.5",
+			"html_url": "https://github.com/Community/smoothnas-plugin-demo/releases/tag/v0.2.5",
 			"assets": []map[string]any{
 				{"name": "smoothnas-plugin-aimee-kb.yaml", "browser_download_url": assetSrv.URL + "/download/kb.yaml"},
 			},
@@ -49,7 +49,7 @@ func TestPluginsAPI_CatalogTokenScopedToAPIHost(t *testing.T) {
 	h.catalogHTTPClient = apiSrv.Client()
 	h.catalogToken = token
 
-	rr := doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins/catalog/latest?repo=RakuenSoftware/smoothnas-plugin-aimee", nil)
+	rr := doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins/catalog/latest?repo=Community/smoothnas-plugin-demo", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
 	}
@@ -67,7 +67,7 @@ func TestPluginsAPI_CatalogTokenScopedToAPIHost(t *testing.T) {
 // error naming the token env var, not an opaque "403 Forbidden".
 func TestPluginsAPI_CatalogRateLimitErrorHintsToken(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/RakuenSoftware/smoothnas-plugin-aimee/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/Community/smoothnas-plugin-demo/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-RateLimit-Remaining", "0")
 		w.WriteHeader(http.StatusForbidden)
 	})
@@ -78,7 +78,7 @@ func TestPluginsAPI_CatalogRateLimitErrorHintsToken(t *testing.T) {
 	h.catalogAPIBaseURL = srv.URL
 	h.catalogHTTPClient = srv.Client()
 
-	rr := doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins/catalog/latest?repo=RakuenSoftware/smoothnas-plugin-aimee", nil)
+	rr := doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins/catalog/latest?repo=Community/smoothnas-plugin-demo", nil)
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
 	}
@@ -95,7 +95,7 @@ func TestPluginsAPI_CatalogRateLimitErrorHintsToken(t *testing.T) {
 func TestPluginsAPI_CatalogNoTokenNoAuthHeader(t *testing.T) {
 	var sawAuth bool
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/RakuenSoftware/smoothnas-plugin-aimee/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/Community/smoothnas-plugin-demo/releases/latest", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "" {
 			sawAuth = true
 		}
@@ -114,7 +114,7 @@ func TestPluginsAPI_CatalogNoTokenNoAuthHeader(t *testing.T) {
 
 	// No manifest assets -> fetch fails with a 502, but the request still
 	// reaches the API host, which is all this test inspects.
-	_ = doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins/catalog/latest?repo=RakuenSoftware/smoothnas-plugin-aimee", nil)
+	_ = doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins/catalog/latest?repo=Community/smoothnas-plugin-demo", nil)
 	if sawAuth {
 		t.Fatalf("Authorization header sent with no token configured")
 	}
