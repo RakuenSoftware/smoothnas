@@ -64,12 +64,31 @@ func (h *PluginsHandler) catalogLatest(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func (h *PluginsHandler) fetchLatestPluginRelease(ctx context.Context, owner, name string) (*pluginCatalogLatestResponse, error) {
-	base := h.catalogAPIBaseURL
-	if strings.TrimSpace(base) == "" {
-		base = defaultPluginCatalogAPIBaseURL
+// apiBaseURL is the GitHub API base the catalog fetches from — the configured
+// override (tests point it at a local server) or the public default.
+func (h *PluginsHandler) apiBaseURL() string {
+	if base := strings.TrimSpace(h.catalogAPIBaseURL); base != "" {
+		return base
 	}
-	releaseURL, err := url.JoinPath(base, "repos", owner, name, "releases", "latest")
+	return defaultPluginCatalogAPIBaseURL
+}
+
+// sameHost reports whether rawURL targets the same host as base. Used to scope
+// the catalog credential to the API host and keep it off asset-download hosts.
+func sameHost(rawURL, base string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	b, err := url.Parse(base)
+	if err != nil {
+		return false
+	}
+	return u.Host == b.Host
+}
+
+func (h *PluginsHandler) fetchLatestPluginRelease(ctx context.Context, owner, name string) (*pluginCatalogLatestResponse, error) {
+	releaseURL, err := url.JoinPath(h.apiBaseURL(), "repos", owner, name, "releases", "latest")
 	if err != nil {
 		return nil, fmt.Errorf("build GitHub release URL: %w", err)
 	}
@@ -127,7 +146,7 @@ func (h *PluginsHandler) fetchCatalogJSON(ctx context.Context, rawURL string, ou
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("%s returned %s", rawURL, resp.Status)
+		return h.catalogHTTPError(rawURL, resp)
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
@@ -142,7 +161,7 @@ func (h *PluginsHandler) fetchCatalogText(ctx context.Context, rawURL string, ma
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return "", fmt.Errorf("%s returned %s", rawURL, resp.Status)
+		return "", h.catalogHTTPError(rawURL, resp)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
@@ -154,6 +173,22 @@ func (h *PluginsHandler) fetchCatalogText(ctx context.Context, rawURL string, ma
 	return string(data), nil
 }
 
+// catalogHTTPError turns a non-2xx catalog response into an error. A GitHub
+// rate-limit rejection (403/429 with X-RateLimit-Remaining: 0) is otherwise an
+// opaque "403 Forbidden"; when no token is configured, say so and point at the
+// fix, since the shared unauthenticated budget (60/hr per IP) is the usual cause.
+func (h *PluginsHandler) catalogHTTPError(rawURL string, resp *http.Response) error {
+	if (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests) &&
+		resp.Header.Get("X-RateLimit-Remaining") == "0" {
+		if h.catalogToken == "" {
+			return fmt.Errorf("%s: GitHub API rate limit exhausted (unauthenticated: 60 requests/hr per IP). "+
+				"Set SMOOTHNAS_GITHUB_TOKEN to a read-only token to raise the limit to 5000/hr", rawURL)
+		}
+		return fmt.Errorf("%s: GitHub API rate limit exhausted even with a token; retry after the reset window", rawURL)
+	}
+	return fmt.Errorf("%s returned %s", rawURL, resp.Status)
+}
+
 func (h *PluginsHandler) fetchCatalog(ctx context.Context, rawURL string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -161,6 +196,14 @@ func (h *PluginsHandler) fetchCatalog(ctx context.Context, rawURL string) (*http
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "SmoothNAS")
+
+	// Authenticate ONLY the GitHub API host (the rate-limited releases/latest
+	// call). Release-asset downloads resolve to a different, pre-signed host
+	// (objects.githubusercontent.com); attaching a second credential there can
+	// break the signed request and isn't needed for public assets.
+	if h.catalogToken != "" && sameHost(rawURL, h.apiBaseURL()) {
+		req.Header.Set("Authorization", "Bearer "+h.catalogToken)
+	}
 
 	client := h.catalogHTTPClient
 	if client == nil {

@@ -18,6 +18,10 @@ Environment=TIERD_DB=/var/lib/tierd/tierd.db
 Environment=HOME=/root
 Environment=USER=root
 Environment=LOGNAME=root
+# Optional operator overrides (upgrade-safe — not overwritten by the package).
+# Drop SMOOTHNAS_GITHUB_TOKEN=<read-only PAT> here to authenticate the plugin
+# catalog fetch (raises the GitHub API limit from 60/hr per IP to 5000/hr).
+EnvironmentFile=-/etc/tierd/tierd.env
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=infinity

@@ -3,6 +3,7 @@ package api
 import (
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -83,6 +84,16 @@ func newRouterFull(store *db.Store, version string, startTime time.Time, history
 		pluginLifecycle.SetTierProvider(store) // Phase 2: resolve compose x-smoothnas tiered volumes
 	}
 	pluginsHandler := NewPluginsHandler(pluginStore, pluginInstaller, pluginLifecycle, pluginCatalog, store)
+	// Optional GitHub credential for the plugin-catalog fetch. Without it the
+	// fetch is unauthenticated (60 req/hr per IP shared across every catalog
+	// repo) and returns 403 once exhausted; a token raises the limit to 5000/hr.
+	// A read-only, public-repo-scoped PAT is sufficient. Checked in priority order.
+	for _, name := range []string{"SMOOTHNAS_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"} {
+		if tok := strings.TrimSpace(os.Getenv(name)); tok != "" {
+			pluginsHandler.catalogToken = tok
+			break
+		}
+	}
 	zfsHandler := NewZFSHandler(store)
 	userPrefsHandler := NewUserPrefsHandler(store)
 	sharingHandler := NewSharingHandler(store)
