@@ -78,11 +78,12 @@ func NewPluginsHandler(
 	tp plugin.TierProvider,
 ) *PluginsHandler {
 	return &PluginsHandler{
-		store:        store,
-		installer:    installer,
-		lifecycle:    lc,
-		catalog:      cat,
-		tierProvider: tp,
+		store:                  store,
+		installer:              installer,
+		lifecycle:              lc,
+		catalog:                cat,
+		tierProvider:           tp,
+		catalogRefreshInflight: map[string]bool{},
 	}
 }
 

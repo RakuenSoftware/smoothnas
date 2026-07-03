@@ -43,11 +43,12 @@ func TestBundledCatalog_ServesNewerCache(t *testing.T) {
 		t.Fatal("aimee not bundled")
 	}
 
+	validYAML := readManifestFixture(t, "aimee-kb.yaml")
 	cache := func(t *testing.T, tag string) *PluginsHandler {
 		h, _ := newPluginsHandlerForTest(t)
 		blob, _ := json.Marshal(pluginCatalogLatestResponse{
 			Repo: repo, TagName: tag, Source: catalogSourceGitHub,
-			Manifests: []pluginCatalogManifest{{AssetName: "smoothnas-plugin.yaml", ManifestYAML: "x"}},
+			Manifests: []pluginCatalogManifest{{AssetName: "smoothnas-plugin.yaml", ManifestYAML: validYAML}},
 		})
 		if err := h.store.PutCatalogCache("rakuensoftware/smoothnas-plugin-aimee", tag, string(blob), 1); err != nil {
 			t.Fatal(err)
@@ -64,6 +65,40 @@ func TestBundledCatalog_ServesNewerCache(t *testing.T) {
 	got = cache(t, "v0.0.1").catalogLatestForBundled(repo)
 	if got.TagName != floor.TagName || got.Source != catalogSourceBuiltin {
 		t.Fatalf("stale cache displaced floor: tag=%q source=%q (floor=%q)", got.TagName, got.Source, floor.TagName)
+	}
+}
+
+// TestBundledCatalog_RejectsInvalidCache proves the defense-in-depth guard: a
+// cached row with a newer tag but an INVALID manifest (or wrong source) is not
+// served — the validated embedded floor wins. Guards against a corrupt/
+// hand-written plugin_catalog_cache row reaching the installer.
+func TestBundledCatalog_RejectsInvalidCache(t *testing.T) {
+	const repo = "RakuenSoftware/smoothnas-plugin-aimee"
+	floor := builtinCatalogFor(repo)
+
+	newerWith := func(t *testing.T, source, manifestYAML string) *pluginCatalogLatestResponse {
+		h, _ := newPluginsHandlerForTest(t)
+		blob, _ := json.Marshal(pluginCatalogLatestResponse{
+			Repo: repo, TagName: "v99.0.0", Source: source,
+			Manifests: []pluginCatalogManifest{{AssetName: "smoothnas-plugin.yaml", ManifestYAML: manifestYAML}},
+		})
+		if err := h.store.PutCatalogCache("rakuensoftware/smoothnas-plugin-aimee", "v99.0.0", string(blob), 1); err != nil {
+			t.Fatal(err)
+		}
+		return h.catalogLatestForBundled(repo)
+	}
+
+	// Newer tag but a manifest that fails validation -> floor wins.
+	got := newerWith(t, catalogSourceGitHub, "this: is not: a valid plugin manifest")
+	if got.TagName != floor.TagName || got.Source != catalogSourceBuiltin {
+		t.Fatalf("invalid cached manifest was served: tag=%q source=%q", got.TagName, got.Source)
+	}
+
+	// Newer tag, structurally valid manifest, but source != github (a row that
+	// didn't come from a live fetch) -> floor wins.
+	got = newerWith(t, catalogSourceBuiltin, readManifestFixture(t, "aimee-kb.yaml"))
+	if got.TagName != floor.TagName || got.Source != catalogSourceBuiltin {
+		t.Fatalf("non-github cache row was served: tag=%q source=%q", got.TagName, got.Source)
 	}
 }
 

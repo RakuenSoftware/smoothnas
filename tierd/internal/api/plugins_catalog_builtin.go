@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"path"
 	"sort"
 	"strings"
@@ -161,7 +162,15 @@ func (h *PluginsHandler) catalogLatestForBundled(repo string) *pluginCatalogLate
 		cached, _ = h.store.GetCatalogCache(strings.ToLower(repo))
 		if cached != nil && tagIsNewer(cached.TagName, builtin.TagName) {
 			var fresh pluginCatalogLatestResponse
-			if json.Unmarshal([]byte(cached.Response), &fresh) == nil && len(fresh.Manifests) > 0 {
+			// Re-validate every manifest before serving a cached response, so a
+			// corrupt/hand-written plugin_catalog_cache row (backup restore, a
+			// future write path) can never surface an invalid or unexpected
+			// manifest — the same invariant the embedded floor enforces. On any
+			// failure we keep the validated floor.
+			if json.Unmarshal([]byte(cached.Response), &fresh) == nil &&
+				fresh.Source == catalogSourceGitHub &&
+				len(fresh.Manifests) > 0 &&
+				catalogResponseManifestsValid(&fresh) {
 				chosen = &fresh
 			}
 		}
@@ -185,16 +194,20 @@ func (h *PluginsHandler) triggerBundledRefresh(repo string, cached *plugin.Catal
 	key := strings.ToLower(repo)
 
 	h.catalogRefreshMu.Lock()
+	if h.catalogRefreshInflight == nil {
+		h.catalogRefreshInflight = map[string]bool{}
+	}
 	if h.catalogRefreshInflight[key] {
 		h.catalogRefreshMu.Unlock()
 		return
 	}
-	if h.catalogRefreshInflight == nil {
-		h.catalogRefreshInflight = map[string]bool{}
-	}
 	h.catalogRefreshInflight[key] = true
 	h.catalogRefreshMu.Unlock()
 
+	// Best-effort and detached: not tied to a shutdown WaitGroup (like tierd's
+	// other background sweeps). Bounded by the 20s timeout; if the store is
+	// closed during shutdown the cache write simply returns an error, which
+	// refreshBundledCatalog logs — never a panic.
 	go func() {
 		defer func() {
 			h.catalogRefreshMu.Lock()
@@ -224,7 +237,27 @@ func (h *PluginsHandler) refreshBundledCatalog(ctx context.Context, repo string)
 	if err != nil {
 		return
 	}
-	_ = h.store.PutCatalogCache(strings.ToLower(repo), resp.TagName, string(blob), h.now().Unix())
+	if err := h.store.PutCatalogCache(strings.ToLower(repo), resp.TagName, string(blob), h.now().Unix()); err != nil {
+		// Best-effort: a persistent write failure keeps re-fetching every TTL;
+		// log it so a stuck cache is diagnosable rather than silent.
+		log.Printf("warn: plugin catalog cache write failed for %s: %v", repo, err)
+	}
+}
+
+// catalogResponseManifestsValid reports whether every manifest in a (cached)
+// catalog response re-parses and validates, matching the guarantee the embedded
+// snapshot is loaded with.
+func catalogResponseManifestsValid(resp *pluginCatalogLatestResponse) bool {
+	for _, m := range resp.Manifests {
+		manifest, err := plugin.ParseManifest([]byte(m.ManifestYAML))
+		if err != nil {
+			return false
+		}
+		if err := plugin.ValidateManifest(manifest); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // now returns the handler's clock (injectable for tests).
@@ -262,7 +295,10 @@ func parseSemver(tag string) ([3]int, bool) {
 	}
 	for i, p := range parts {
 		n := 0
-		if p == "" {
+		// Cap component width so n*10 can't overflow int (9 digits <= 999,999,999
+		// < 2^31, safe even on 32-bit GOARCH). An over-long component is treated
+		// as unparseable, so the validated floor wins.
+		if p == "" || len(p) > 9 {
 			return out, false
 		}
 		for _, c := range p {
