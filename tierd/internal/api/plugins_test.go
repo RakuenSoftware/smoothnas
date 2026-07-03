@@ -257,13 +257,13 @@ func TestPluginsAPI_CatalogLatestFetchesReleaseManifest(t *testing.T) {
 
 	mux := http.NewServeMux()
 	var srv *httptest.Server
-	mux.HandleFunc("/repos/RakuenSoftware/smoothnas-plugin-gh-runner/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/Community/smoothnas-plugin-demo/releases/latest", func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("User-Agent"); got != "SmoothNAS" {
 			t.Fatalf("User-Agent = %q", got)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"tag_name": "v0.3.2",
-			"html_url": "https://github.com/RakuenSoftware/smoothnas-plugin-gh-runner/releases/tag/v0.3.2",
+			"html_url": "https://github.com/Community/smoothnas-plugin-demo/releases/tag/v0.3.2",
 			"assets": []map[string]any{
 				{"name": "notes.txt", "browser_download_url": srv.URL + "/assets/notes.txt"},
 				{"name": "smoothnas-plugin-intel.yaml", "browser_download_url": srv.URL + "/assets/smoothnas-plugin-intel.yaml"},
@@ -287,7 +287,7 @@ func TestPluginsAPI_CatalogLatestFetchesReleaseManifest(t *testing.T) {
 	h.catalogAPIBaseURL = srv.URL
 	h.catalogHTTPClient = srv.Client()
 
-	rr := doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins/catalog/latest?repo=RakuenSoftware/smoothnas-plugin-gh-runner", nil)
+	rr := doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins/catalog/latest?repo=Community/smoothnas-plugin-demo", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
 	}
@@ -317,7 +317,7 @@ func TestPluginsAPI_CatalogLatestFetchesReleaseManifest(t *testing.T) {
 
 func TestPluginsAPI_CatalogLatestRejectsInvalidRepo(t *testing.T) {
 	h, _ := newPluginsHandlerForTest(t)
-	rr := doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins/catalog/latest?repo=https://github.com/RakuenSoftware/smoothnas-plugin-gh-runner", nil)
+	rr := doJSON(t, &routeHandler{h}, http.MethodGet, "/api/plugins/catalog/latest?repo=https://github.com/Community/smoothnas-plugin-demo", nil)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
 	}

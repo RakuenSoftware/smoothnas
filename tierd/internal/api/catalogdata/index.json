@@ -1,0 +1,58 @@
+{
+  "repositories": [
+    {
+      "id": "aimee",
+      "repo": "RakuenSoftware/smoothnas-plugin-aimee",
+      "tagName": "v0.2.5",
+      "releaseUrl": "https://github.com/RakuenSoftware/smoothnas-plugin-aimee/releases/tag/v0.2.5",
+      "manifests": [
+        "smoothnas-plugin-aimee-combined.yaml",
+        "smoothnas-plugin-aimee-kb.yaml",
+        "smoothnas-plugin-aimee-llm-gpu-mid.yaml",
+        "smoothnas-plugin-aimee-llm-gpu-small.yaml",
+        "smoothnas-plugin-aimee-server.yaml"
+      ]
+    },
+    {
+      "id": "gh-runner",
+      "repo": "RakuenSoftware/smoothnas-plugin-gh-runner",
+      "tagName": "v0.5.0",
+      "releaseUrl": "https://github.com/RakuenSoftware/smoothnas-plugin-gh-runner/releases/tag/v0.5.0",
+      "manifests": [
+        "smoothnas-plugin.yaml"
+      ]
+    },
+    {
+      "id": "llama-cpp",
+      "repo": "RakuenSoftware/smoothnas-plugin-llama-cpp",
+      "tagName": "v0.8.1",
+      "releaseUrl": "https://github.com/RakuenSoftware/smoothnas-plugin-llama-cpp/releases/tag/v0.8.1",
+      "manifests": [
+        "smoothnas-plugin-cpu.yaml",
+        "smoothnas-plugin-vulkan.yaml",
+        "smoothnas-plugin.yaml"
+      ]
+    },
+    {
+      "id": "vllm",
+      "repo": "RakuenSoftware/smoothnas-plugin-vllm",
+      "tagName": "v0.2.5",
+      "releaseUrl": "https://github.com/RakuenSoftware/smoothnas-plugin-vllm/releases/tag/v0.2.5",
+      "manifests": [
+        "smoothnas-plugin-rocm.yaml",
+        "smoothnas-plugin.yaml"
+      ]
+    },
+    {
+      "id": "wolf",
+      "repo": "RakuenSoftware/smoothnas-plugin-wolf",
+      "tagName": "v0.3.0",
+      "releaseUrl": "https://github.com/RakuenSoftware/smoothnas-plugin-wolf/releases/tag/v0.3.0",
+      "manifests": [
+        "smoothnas-plugin-amd.yaml",
+        "smoothnas-plugin-intel.yaml",
+        "smoothnas-plugin.yaml"
+      ]
+    }
+  ]
+}
