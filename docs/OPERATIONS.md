@@ -194,6 +194,29 @@ Backend defaults:
 - bind address: `127.0.0.1:8420`
 - database path: `/var/lib/tierd/tierd.db`
 
+### Plugin catalog GitHub token
+
+The "Install plugins" catalog fetches each configured plugin repo's latest
+GitHub release from `api.github.com`. Unauthenticated, GitHub allows only **60
+requests/hr per IP**, shared across every catalog repo; once exhausted the API
+returns **403 Forbidden** for all of them and the UI shows a "returned 403"
+error per repo.
+
+To lift the limit to 5000/hr, give `tierd` a token via its optional env file
+(created empty by default, not overwritten on upgrade):
+
+```sh
+# a read-only, public-repo-scoped classic PAT (or fine-grained "public repos" read) is enough
+printf 'SMOOTHNAS_GITHUB_TOKEN=%s\n' "$TOKEN" > /etc/tierd/tierd.env
+chmod 600 /etc/tierd/tierd.env
+systemctl restart tierd
+```
+
+`tierd` also accepts `GITHUB_TOKEN` / `GH_TOKEN` as fallbacks. The token is sent
+only to the GitHub API host, never to release-asset downloads. Without a token
+the fetch still works — it just shares the 60/hr budget, so a 403 means "wait
+for the hourly reset or set a token," not a broken repo.
+
 ## Agent and MCP Setup
 
 SmoothNAS exposes a repo-local `aimee` MCP server through [../.mcp.json](../.mcp.json).
