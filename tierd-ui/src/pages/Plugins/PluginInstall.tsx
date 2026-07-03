@@ -118,6 +118,9 @@ type CatalogEntry = {
   homepage?: string;
   tags: string[];
   variants: CatalogManifestVariant[];
+  // 'builtin' = served from the appliance's bundled snapshot (works offline);
+  // 'github' = fetched live. Drives the "Bundled" card badge.
+  source?: 'builtin' | 'github';
 };
 
 type CatalogManifestVariant = {
@@ -515,6 +518,14 @@ function SourceStep({
                   >
                     <div className="wizard-plugin-card-header">
                       <span className="wizard-plugin-card-name">{entry.name}</span>
+                      {entry.source === 'builtin' && (
+                        <span
+                          className="wizard-plugin-card-badge"
+                          title={t('plugins.install.source.catalog.bundledHint')}
+                        >
+                          {t('plugins.install.source.catalog.bundledBadge')}
+                        </span>
+                      )}
                       <span className="wizard-plugin-card-vendor">{entry.vendor}</span>
                     </div>
                     <p className="wizard-plugin-card-description">{entry.description}</p>
@@ -577,6 +588,7 @@ function buildCatalogEntries(repo: CatalogRepository, release: {
   repo: string;
   tagName: string;
   releaseUrl: string;
+  source?: 'builtin' | 'github';
   manifests: Array<{ assetName: string; downloadUrl: string; manifestYaml: string; manifest: ParsedManifest }>;
 }): CatalogEntry[] {
   const grouped = new Map<string, typeof release.manifests>();
@@ -612,6 +624,7 @@ function buildCatalogEntries(repo: CatalogRepository, release: {
       homepage: primary.manifest.metadata.homepage || `https://github.com/${release.repo}`,
       tags: Array.from(tags),
       variants,
+      source: release.source,
     };
   });
 }

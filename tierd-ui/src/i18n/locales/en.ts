@@ -1291,6 +1291,8 @@ const en: LanguageTranslations = {
   'plugins.install.source.catalog.description': 'Choose a plugin from the latest release in its repository. Continue advances to the same preview step the manual paste flow uses.',
   'plugins.install.source.catalog.selectedHint': 'Latest release manifest loaded. Hit Continue to preview.',
   'plugins.install.source.catalog.accelerator': 'Accelerator',
+  'plugins.install.source.catalog.bundledBadge': 'Bundled',
+  'plugins.install.source.catalog.bundledHint': 'Shipped with SmoothNAS — installs offline, no GitHub fetch required.',
   'plugins.install.source.heading': 'Paste manifest YAML',
   'plugins.install.source.description': 'The plugin manifest the operator received from the plugin author. Use this for plugins not in the catalog (private builds, sideloaded forks, in-development plugins).',
   'plugins.install.source.placeholder': 'apiVersion: smoothnas.io/v1\nkind: Plugin\n…',
