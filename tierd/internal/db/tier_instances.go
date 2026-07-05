@@ -1022,8 +1022,10 @@ func (s *Store) MarkTierReconciled(name string) error {
 }
 
 // SetTierSlotFill updates the target-fill and full-threshold percentages for a
-// named tier slot within a pool. Values must be in the range [1, 100]. The fill
-// target is the migration/drain target; the full threshold is the write hard cap.
+// named tier slot within a pool. target_fill_pct is in [0, 100] (0 = pure
+// write-cache: no resident data), full_threshold_pct is in [1, 100], and the
+// fill target must be strictly less than the full threshold. The fill target is
+// the migration/drain target; the full threshold is the write hard cap.
 func (s *Store) SetTierSlotFill(poolName, slotName string, targetFillPct, fullThresholdPct int) error {
 	if err := ValidateTierInstanceName(poolName); err != nil {
 		return err
@@ -1032,8 +1034,10 @@ func (s *Store) SetTierSlotFill(poolName, slotName string, targetFillPct, fullTh
 	if slotName == "" {
 		return fmt.Errorf("tier slot name is required")
 	}
-	if targetFillPct < 1 || targetFillPct > 100 {
-		return fmt.Errorf("target_fill_pct must be between 1 and 100")
+	// target_fill_pct == 0 is valid: a pure write-cache tier that keeps no
+	// resident data (everything drains to a slower tier).
+	if targetFillPct < 0 || targetFillPct > 100 {
+		return fmt.Errorf("target_fill_pct must be between 0 and 100")
 	}
 	if fullThresholdPct < 1 || fullThresholdPct > 100 {
 		return fmt.Errorf("full_threshold_pct must be between 1 and 100")
@@ -1061,7 +1065,8 @@ func (s *Store) SetTierSlotFill(poolName, slotName string, targetFillPct, fullTh
 
 // AddTierSlot inserts a new tier slot (level) into an existing pool. rank must
 // be unique within the pool and positive. targetFillPct must be less than
-// fullThresholdPct; both must be in [1, 100].
+// fullThresholdPct; targetFillPct is in [0, 100] (0 = pure write-cache) and
+// fullThresholdPct is in [1, 100].
 func (s *Store) AddTierSlot(poolName, slotName string, rank, targetFillPct, fullThresholdPct int) error {
 	if err := ValidateTierInstanceName(poolName); err != nil {
 		return err
@@ -1073,8 +1078,10 @@ func (s *Store) AddTierSlot(poolName, slotName string, rank, targetFillPct, full
 	if rank <= 0 {
 		return fmt.Errorf("rank must be a positive integer")
 	}
-	if targetFillPct < 1 || targetFillPct > 100 {
-		return fmt.Errorf("target_fill_pct must be between 1 and 100")
+	// target_fill_pct == 0 is valid: a pure write-cache tier that keeps no
+	// resident data (everything drains to a slower tier).
+	if targetFillPct < 0 || targetFillPct > 100 {
+		return fmt.Errorf("target_fill_pct must be between 0 and 100")
 	}
 	if fullThresholdPct < 1 || fullThresholdPct > 100 {
 		return fmt.Errorf("full_threshold_pct must be between 1 and 100")
