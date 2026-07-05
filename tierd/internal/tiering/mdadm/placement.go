@@ -250,6 +250,20 @@ func tierTargetCapBytes(totalBytes int64, targetFillPct int) int64 {
 	return totalBytes * int64(targetFillPct) / 100
 }
 
+// tierFullCapBytes is the hard byte ceiling the planner's Pass B fallback will
+// place a tier up to under its full_threshold_pct. Like the target cap the
+// percentage is honoured verbatim, including 0: full_threshold_pct of 0 yields
+// a cap of 0, so Pass B never strands a file onto that tier either — combined
+// with target_fill_pct 0 the planner fully evacuates and keeps the tier empty.
+// (A previous version floored this to 95%, so full_threshold below 95 — and 0
+// in particular — was ignored.) full_threshold_pct is validated to [0, 100].
+func tierFullCapBytes(totalBytes int64, fullThresholdPct int) int64 {
+	if fullThresholdPct < 0 {
+		fullThresholdPct = 0
+	}
+	return totalBytes * int64(fullThresholdPct) / 100
+}
+
 func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNamespaceRow) {
 	maintenanceMode, ok := a.poolReadyForSmoothNASMaintenance(ns.PoolName)
 	if !ok {
@@ -306,7 +320,7 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 			totalBytes: total,
 			usedBytes:  used,
 			targetCap:  tierTargetCapBytes(total, rt.targetFillPct),
-			fullCap:    total * int64(max1(rt.fullThresholdPct, 95)) / 100,
+			fullCap:    tierFullCapBytes(total, rt.fullThresholdPct),
 			target:     rt.target,
 		}
 	}
