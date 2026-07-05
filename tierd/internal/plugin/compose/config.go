@@ -3,6 +3,7 @@ package compose
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -23,6 +24,12 @@ type ConfigDecl struct {
 	Default     string
 	Description string
 	Secret      bool
+	// Min/Max/Step/Unit are advisory bounds for number fields, carried through to
+	// the wizard and enforced on non-secret number injection. Empty = unbounded.
+	Min  string
+	Max  string
+	Step string
+	Unit string
 }
 
 // reSecretName flags keys that look like credentials; such a key MUST be
@@ -43,6 +50,10 @@ type xsConfigDoc struct {
 			Default     string `yaml:"default"`
 			Description string `yaml:"description"`
 			Secret      bool   `yaml:"secret"`
+			Min         string `yaml:"min"`
+			Max         string `yaml:"max"`
+			Step        string `yaml:"step"`
+			Unit        string `yaml:"unit"`
 		} `yaml:"config"`
 	} `yaml:"x-smoothnas"`
 }
@@ -88,6 +99,7 @@ func ConfigSchema(composeYAML []byte) ([]ConfigDecl, error) {
 		out = append(out, ConfigDecl{
 			Key: c.Key, Label: c.Label, Type: typ,
 			Default: c.Default, Description: c.Description, Secret: c.Secret,
+			Min: c.Min, Max: c.Max, Step: c.Step, Unit: c.Unit,
 		})
 	}
 	return out, nil
@@ -130,8 +142,21 @@ func validateConfigValue(d ConfigDecl, v string) error {
 	}
 	switch d.Type {
 	case "number":
-		if v != "" && !reNumber.MatchString(v) {
-			return fmt.Errorf("config %q: not an integer: %q", d.Key, v)
+		if v != "" {
+			if !reNumber.MatchString(v) {
+				return fmt.Errorf("config %q: not an integer: %q", d.Key, v)
+			}
+			n, _ := strconv.Atoi(v)
+			if d.Min != "" {
+				if lo, err := strconv.Atoi(d.Min); err == nil && n < lo {
+					return fmt.Errorf("config %q: %d below minimum %d", d.Key, n, lo)
+				}
+			}
+			if d.Max != "" {
+				if hi, err := strconv.Atoi(d.Max); err == nil && n > hi {
+					return fmt.Errorf("config %q: %d above maximum %d", d.Key, n, hi)
+				}
+			}
 		}
 	case "bool":
 		if v != "" && v != "true" && v != "false" {

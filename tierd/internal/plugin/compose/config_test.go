@@ -74,3 +74,24 @@ func TestResolveConfigEnv_ValidatesTypes(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigSchema_MinMax(t *testing.T) {
+	y := "name: p\nservices: {s: {image: x}}\nx-smoothnas:\n  config:\n    - {key: CTX, type: number, default: \"262144\", min: \"4096\", max: \"1048576\", unit: tokens}\n"
+	got, err := ConfigSchema([]byte(y))
+	if err != nil {
+		t.Fatalf("ConfigSchema: %v", err)
+	}
+	if got[0].Min != "4096" || got[0].Max != "1048576" || got[0].Unit != "tokens" {
+		t.Fatalf("bounds not parsed: %+v", got[0])
+	}
+	// below min / above max rejected; in-range accepted
+	if _, _, err := ResolveConfigEnv(got, map[string]string{"CTX": "1000"}); err == nil {
+		t.Error("expected reject below min")
+	}
+	if _, _, err := ResolveConfigEnv(got, map[string]string{"CTX": "9999999"}); err == nil {
+		t.Error("expected reject above max")
+	}
+	if _, _, err := ResolveConfigEnv(got, map[string]string{"CTX": "8192"}); err != nil {
+		t.Errorf("in-range rejected: %v", err)
+	}
+}
