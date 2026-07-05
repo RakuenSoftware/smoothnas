@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
 	"gopkg.in/yaml.v3"
 )
 
@@ -101,7 +102,19 @@ type Manifest struct {
 	LegacyVolumes       []Volume       `json:"-" yaml:"volumes,omitempty"`
 	LegacyPorts         []Port         `json:"-" yaml:"ports,omitempty"`
 	LegacyConfig        []ConfigField  `json:"-" yaml:"config,omitempty"`
+
+	// isCompose marks a manifest that ParseManifest built from a plain
+	// docker-compose file (top-level services: map, no smoothnas.io/*
+	// apiVersion) rather than the native format. Only Metadata + UI are
+	// populated (for catalog display + console embed); the compose YAML
+	// itself is the runtime source of truth and drives the ArtifactCompose
+	// lifecycle. Unexported so it neither serializes nor affects the strict
+	// decode of native manifests. ValidateManifest branches on it.
+	isCompose bool
 }
+
+// IsCompose reports whether this manifest was parsed from a plain compose file.
+func (m *Manifest) IsCompose() bool { return m != nil && m.isCompose }
 
 // Service is one container within a plugin. Artifact, container knobs,
 // volumes, ports, and config are all per-service; the plugin owns the
@@ -228,6 +241,13 @@ type UI struct {
 type UIEmbed struct {
 	Path string `json:"path" yaml:"path"`
 	Auth string `json:"auth" yaml:"auth"`
+	// Service and Port are populated for plain-compose plugins (from
+	// x-smoothnas.ui): Service names the compose service that hosts the UI
+	// and Port is that service's CONTAINER-side port. Native single-service
+	// plugins leave them empty (the embed target is unambiguous). The console
+	// builds the iframe src from the discovered service endpoint at runtime.
+	Service string `json:"service,omitempty" yaml:"service,omitempty"`
+	Port    int    `json:"port,omitempty" yaml:"port,omitempty"`
 }
 
 // ConfigField declares an operator-tunable parameter. The value
@@ -260,6 +280,14 @@ type ConfigOption struct {
 // being dropped — operators sideloading bad manifests should learn
 // about typos at parse time.
 func ParseManifest(data []byte) (*Manifest, error) {
+	// A plain docker-compose plugin (top-level services: map, no
+	// smoothnas.io/* apiVersion) carries no native metadata block; build a
+	// display-only Manifest from the compose name + the x-smoothnas extras so
+	// every ParseManifest caller (catalog, install, validate) gets a usable
+	// Manifest without re-parsing. The compose YAML remains the runtime source.
+	if compose.IsComposeFormat(data) {
+		return manifestFromCompose(data)
+	}
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 	dec.KnownFields(true)
 	var m Manifest
@@ -268,6 +296,53 @@ func ParseManifest(data []byte) (*Manifest, error) {
 	}
 	m.normalizeLegacy()
 	return &m, nil
+}
+
+// manifestFromCompose builds a display-only *Manifest from a plain compose
+// plugin: Name from the compose `name:` project, and Description/Vendor/
+// Homepage/UI lifted from the top-level x-smoothnas block. Version is left
+// blank here — a compose plugin's version comes from its catalog release tag,
+// which ParseManifest doesn't see; the catalog stamps it. Marked isCompose so
+// ValidateManifest applies compose (not native) rules.
+func manifestFromCompose(data []byte) (*Manifest, error) {
+	if err := compose.RejectMultiDoc(data); err != nil {
+		return nil, err
+	}
+	name := compose.ProjectName(data)
+	if !reName.MatchString(name) {
+		return nil, fmt.Errorf("parse compose manifest: name %q must match %s (DNS-1123 label, ≤40 chars)", name, reName)
+	}
+	meta, err := compose.ParseMeta(data)
+	if err != nil {
+		return nil, err
+	}
+	// Validate the x-smoothnas.ui embed target against the real services now,
+	// at ingest — compose ignores x-* entirely, so a mis-spelled ui.service
+	// would otherwise fail silently at runtime instead of loudly at publish.
+	svcNames, err := compose.ServiceNames(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := compose.ValidateMeta(meta, svcNames); err != nil {
+		return nil, fmt.Errorf("parse compose manifest: %w", err)
+	}
+	m := &Manifest{
+		isCompose: true,
+		Metadata: Metadata{
+			Name:        name,
+			Description: meta.Description,
+			Vendor:      meta.Vendor,
+			Homepage:    meta.Homepage,
+		},
+	}
+	if meta.UI != nil {
+		m.UI = &UI{Embed: UIEmbed{
+			Path:    meta.UI.Path,
+			Service: meta.UI.Service,
+			Port:    meta.UI.Port,
+		}}
+	}
+	return m, nil
 }
 
 // normalizeLegacy folds a pre-plugins-10 single-image manifest (top-level
@@ -327,6 +402,18 @@ var validArches = map[string]struct{}{
 func ValidateManifest(m *Manifest) error {
 	if m == nil {
 		return fmt.Errorf("validate: nil manifest")
+	}
+	// A plain-compose plugin has no native apiVersion/kind/services to check —
+	// the compose file is validated as compose (and `docker compose config`
+	// runs at install). Here we only assert the catalog-display invariant: a
+	// usable plugin name. Version is stamped from the release tag, and the
+	// ui.service embed target was already checked at parse (manifestFromCompose).
+	if m.isCompose {
+		v := &ValidationError{}
+		if !reName.MatchString(m.Metadata.Name) {
+			v.add("name", "must match %s (DNS-1123 label, ≤40 chars)", reName)
+		}
+		return v.asError()
 	}
 	v := &ValidationError{}
 
