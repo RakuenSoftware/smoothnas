@@ -237,6 +237,19 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 // If no eligible tier has room below target_fill, the packer falls through
 // to full_threshold as a hard cap from the bottom tier upward; files that
 // don't fit anywhere stay put.
+// tierTargetCapBytes is the byte ceiling the planner packs a tier up to under
+// its target_fill_pct. The percentage is honoured verbatim, including 0: a
+// target_fill_pct of 0 yields a cap of 0, making the tier a pure write-cache
+// that holds no resident data — every unpinned file drains to a slower tier.
+// (A previous version coerced 0 to a 50% default, so a "write-cache" tier still
+// filled to half capacity.) targetFillPct is validated to [0, 100] at set time.
+func tierTargetCapBytes(totalBytes int64, targetFillPct int) int64 {
+	if targetFillPct < 0 {
+		targetFillPct = 0
+	}
+	return totalBytes * int64(targetFillPct) / 100
+}
+
 func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNamespaceRow) {
 	maintenanceMode, ok := a.poolReadyForSmoothNASMaintenance(ns.PoolName)
 	if !ok {
@@ -289,14 +302,10 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 		}
 		total := int64(st.Blocks) * int64(st.Bsize)
 		used := total - int64(st.Bavail)*int64(st.Bsize)
-		targetPct := int64(50)
-		if rt.targetFillPct > 0 {
-			targetPct = int64(rt.targetFillPct)
-		}
 		caps[rt.rank] = &tierCapacity{
 			totalBytes: total,
 			usedBytes:  used,
-			targetCap:  total * targetPct / 100,
+			targetCap:  tierTargetCapBytes(total, rt.targetFillPct),
 			fullCap:    total * int64(max1(rt.fullThresholdPct, 95)) / 100,
 			target:     rt.target,
 		}
