@@ -356,6 +356,7 @@ func manifestFromCompose(data []byte) (*Manifest, error) {
 		m.Config = append(m.Config, ConfigField{
 			Key: d.Key, Label: d.Label, Type: d.Type,
 			Default: d.Default, Description: d.Description, Secret: d.Secret,
+			Min: d.Min, Max: d.Max, Step: d.Step, Unit: d.Unit,
 		})
 	}
 	return m, nil
