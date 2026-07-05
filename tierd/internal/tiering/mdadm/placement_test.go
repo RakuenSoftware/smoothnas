@@ -739,3 +739,26 @@ func TestInstallPlacementCopyDoesNotOverwriteExistingDestination(t *testing.T) {
 		t.Fatalf("dst contents = %q, want old", got)
 	}
 }
+
+func TestTierTargetCapBytes(t *testing.T) {
+	const tib = int64(1) << 40
+	cases := []struct {
+		name     string
+		total    int64
+		fillPct  int
+		wantCap  int64
+	}{
+		{"write-cache tier holds nothing", tib, 0, 0},
+		{"half fill", tib, 50, tib / 2},
+		{"one percent", 100 << 30, 1, 1 << 30},
+		{"full", tib, 100, tib},
+		{"negative clamps to zero", tib, -5, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := tierTargetCapBytes(c.total, c.fillPct); got != c.wantCap {
+				t.Fatalf("tierTargetCapBytes(%d, %d) = %d, want %d", c.total, c.fillPct, got, c.wantCap)
+			}
+		})
+	}
+}
