@@ -1,6 +1,7 @@
 package mdadm
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -234,6 +235,7 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 //     does not fit above it (filling past fill% via the Pass B full% fallback).
 //     full% itself is not a planner concept; it is the smoothfs write cap.
 //   - Pinned files force-place: PinHot → fastest tier, PinCold → slowest tier.
+//
 // If no eligible tier has room below target_fill, the packer falls through
 // to full_threshold as a hard cap from the bottom tier upward; files that
 // don't fit anywhere stay put.
@@ -738,6 +740,47 @@ func (a *Adapter) poolRankedTargets(poolName string) []rankedPoolTarget {
 // moveForPlacement copies a file from source tier to dest tier, updates
 // the meta record (which now lives on the destination tier instead of
 // the source), and unlinks the source.
+// filesHaveSameContent reports whether two files hold byte-identical content.
+// It streams both files so large ones are compared without buffering them whole,
+// and short-circuits on the first differing byte. Callers should compare sizes
+// first; this is the authoritative content check used to reconcile a stalled
+// tier move whose destination duplicate has an mtime skew.
+func filesHaveSameContent(a, b string) (bool, error) {
+	fa, err := os.Open(a)
+	if err != nil {
+		return false, err
+	}
+	defer fa.Close()
+	fb, err := os.Open(b)
+	if err != nil {
+		return false, err
+	}
+	defer fb.Close()
+
+	const chunk = 128 * 1024
+	ba := make([]byte, chunk)
+	bb := make([]byte, chunk)
+	for {
+		na, ea := io.ReadFull(fa, ba)
+		nb, eb := io.ReadFull(fb, bb)
+		if na != nb || !bytes.Equal(ba[:na], bb[:nb]) {
+			return false, nil
+		}
+		aDone := ea == io.EOF || ea == io.ErrUnexpectedEOF
+		bDone := eb == io.EOF || eb == io.ErrUnexpectedEOF
+		if aDone || bDone {
+			// Equal only if both streams ended together (same length).
+			return aDone == bDone, nil
+		}
+		if ea != nil {
+			return false, ea
+		}
+		if eb != nil {
+			return false, eb
+		}
+	}
+}
+
 func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, src, dst db.MdadmManagedTargetRow, srcRank, destRank int) error {
 	if !a.targetMountReady(src) {
 		return fmt.Errorf("source tier %s is not mounted", src.TierName)
@@ -758,10 +801,36 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 	if dstErr == nil {
 		// Destination already exists. This is the expected state after a move
 		// that installed the destination but crashed or was interrupted before
-		// unlinking the source. If size and mtime match, the copy is complete:
-		// remove the stale source and update the meta record.
+		// unlinking the source. When the two files are identical the copy is
+		// complete: remove the stale source and update the meta record.
+		//
+		// Reconcile on size + CONTENT, never mtime. Two reasons:
+		//
+		//   1. A tier copy does not always preserve the source mtime, so a
+		//      byte-identical duplicate can legitimately carry a different
+		//      mtime. The old code gated reconciliation on an exact mtime match,
+		//      which left such duplicates un-reconcilable; because the source
+		//      then stayed on the wrong tier the scanner re-queued the very same
+		//      doomed move every cycle — forever. That spun the reconciler
+		//      (scanned>0 moved=0), flooded the log, and starved unrelated work
+		//      such as image pulls.
+		//
+		//   2. This reconcile DELETES the source, so trusting a size+mtime match
+		//      (which two genuinely different files can share) risked destroying
+		//      real data. A content compare is authoritative.
+		//
+		// A same-size but content-different file at the same path is a genuine
+		// conflict: it still errors and both copies are preserved (below).
 		srcInfo2, srcErr := os.Stat(srcPath)
-		if srcErr == nil && dstInfo.Size() == srcInfo2.Size() && dstInfo.ModTime().Equal(srcInfo2.ModTime()) {
+		identical := false
+		if srcErr == nil && !srcInfo2.IsDir() && dstInfo.Size() == srcInfo2.Size() {
+			same, cmpErr := filesHaveSameContent(srcPath, dstPath)
+			if cmpErr != nil {
+				return fmt.Errorf("compare stalled-move duplicate %s: %w", rel, cmpErr)
+			}
+			identical = same
+		}
+		if identical {
 			log.Printf("placement: completing stalled move for %s: destination already exists and matches source", rel)
 			store2 := a.metaStoreFor(ns.PoolName)
 			srcSt2, _ := srcInfo2.Sys().(*syscall.Stat_t)
@@ -781,9 +850,9 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 				if statErr == nil {
 					if dstSt, ok := dstStat.Sys().(*syscall.Stat_t); ok {
 						rec := meta.Record{
-							Version:     meta.RecordVersion,
-							NamespaceID: meta.NamespaceID(ns.NamespaceID),
-							TierIdx:     uint8(destRank),
+							Version:      meta.RecordVersion,
+							NamespaceID:  meta.NamespaceID(ns.NamespaceID),
+							TierIdx:      uint8(destRank),
 							LastAccessNS: uint64(time.Now().UnixNano()),
 						}
 						if hadSrcRec2 {
