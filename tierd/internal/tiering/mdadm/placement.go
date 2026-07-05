@@ -237,6 +237,19 @@ func assignCandidateRanks(cands []candidate, caps map[int]*tierCapacity, ranked 
 // If no eligible tier has room below target_fill, the packer falls through
 // to full_threshold as a hard cap from the bottom tier upward; files that
 // don't fit anywhere stay put.
+// tierTargetCapBytes is the byte ceiling the planner packs a tier up to under
+// its target_fill_pct. The percentage is honoured verbatim, including 0: a
+// target_fill_pct of 0 yields a cap of 0, making the tier a pure write-cache
+// that holds no resident data — every unpinned file drains to a slower tier.
+// (A previous version coerced 0 to a 50% default, so a "write-cache" tier still
+// filled to half capacity.) targetFillPct is validated to [0, 100] at set time.
+func tierTargetCapBytes(totalBytes int64, targetFillPct int) int64 {
+	if targetFillPct < 0 {
+		targetFillPct = 0
+	}
+	return totalBytes * int64(targetFillPct) / 100
+}
+
 func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNamespaceRow) {
 	maintenanceMode, ok := a.poolReadyForSmoothNASMaintenance(ns.PoolName)
 	if !ok {
@@ -289,14 +302,10 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 		}
 		total := int64(st.Blocks) * int64(st.Bsize)
 		used := total - int64(st.Bavail)*int64(st.Bsize)
-		targetPct := int64(50)
-		if rt.targetFillPct > 0 {
-			targetPct = int64(rt.targetFillPct)
-		}
 		caps[rt.rank] = &tierCapacity{
 			totalBytes: total,
 			usedBytes:  used,
-			targetCap:  total * targetPct / 100,
+			targetCap:  tierTargetCapBytes(total, rt.targetFillPct),
 			fullCap:    total * int64(max1(rt.fullThresholdPct, 95)) / 100,
 			target:     rt.target,
 		}
@@ -424,26 +433,12 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 	// no separate meta-eviction step is needed; moveForPlacement updates
 	// the meta as part of every successful data move.
 
-	if moved > 0 {
-		// smoothfs (the stacked VFS layer) holds a path_get() reference to
-		// each lower-tier inode in its in-memory smoothfs_inode_info.lower_path.
-		// When moveForPlacement unlinks the source copy from the backing
-		// directory directly (bypassing smoothfs), the XFS directory entry is
-		// removed but the smoothfs VFS inode keeps the lower_path alive.
-		// smoothfs_evict_inode only runs when the inode's VFS refcount hits
-		// zero — which requires the kernel to drop it from the dentry/inode
-		// cache. On a NAS with ample RAM that cache pressure never happens
-		// organically, so unlinked NVME inodes accumulate indefinitely and
-		// the XFS filesystem reports phantom "used" space for the freed blocks.
-		//
-		// Writing 2 to drop_caches evicts all dentries and inodes from VFS
-		// cache (without dropping page cache data). Smoothfs evicts its
-		// in-memory inodes, path_put() releases each lower_path, and XFS
-		// finally frees the zombie blocks. The cost is a brief cold-cache
-		// warmup for the next metadata access; file data in page cache is
-		// unaffected.
-		dropVMCachesForInodes()
-	}
+	// Per-inode reclaim now happens inline in moveForPlacement via
+	// forgetLowerInode: each source copy we remove out-of-band is immediately
+	// released from smoothfs's replay pin so the backing frees its blocks. The
+	// old pool-wide drop_caches=2 hammer that used to run here could not
+	// reclaim these at all — the replay pin holds a reference, so the inode is
+	// never cache-idle and drop_caches skips it.
 }
 
 func placementExcludedDir(root, path, name string) bool {
@@ -764,6 +759,9 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 			if err := os.Remove(srcPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("unlink stalled src: %w", err)
 			}
+			if srcSt2 != nil {
+				forgetLowerInode(a, ns.PoolName, srcRank, srcSt2.Ino)
+			}
 			if store2 != nil {
 				dstStat, statErr := os.Stat(dstPath)
 				if statErr == nil {
@@ -840,6 +838,12 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 		_ = os.Remove(dstPath)
 		return fmt.Errorf("unlink src after copy: %w", err)
 	}
+	// We removed the source out-of-band (bypassing the smoothfs VFS), so tell
+	// smoothfs to drop the replay pin it holds on that inode; otherwise the
+	// backing blocks leak until unmount. Replaces the old drop_caches hammer.
+	if srcSt != nil {
+		forgetLowerInode(a, ns.PoolName, srcRank, srcSt.Ino)
+	}
 
 	// Move the meta record from src tier to dest tier. The dest file has
 	// its own inode (different filesystem) so we read it post-rename.
@@ -878,26 +882,40 @@ func installPlacementCopy(tmpPath, dstPath string) error {
 	return os.Remove(tmpPath)
 }
 
-// copyFileContents opens src for read and dst for exclusive create-write,
-// streams the bytes, and closes both.
-// dropVMCachesForInodes writes 2 to /proc/sys/vm/drop_caches, which evicts
-// all dentries and inodes from the VFS cache without touching page cache data.
-// This triggers smoothfs_evict_inode() on any smoothfs VFS inodes that are no
-// longer referenced, which in turn calls path_put(&si->lower_path) to release
-// the lower (NVME/SSD XFS) inode references that smoothfs holds.
+// forgetLowerInode tells smoothfs to release the replay pin it holds on the
+// shadow inode for a lower copy we just removed out-of-band (copy-to-dest +
+// os.Remove of the source, bypassing the smoothfs VFS). smoothfs holds a
+// path_get() reference to each lower inode via smoothfs_inode_info.lower_path;
+// placement/spill/replay inodes are additionally replay-pinned, so their VFS
+// refcount is never zero and smoothfs_evict_inode never runs for them. That
+// leaves the source's XFS blocks allocated (df >> du) until unmount.
 //
-// Without this call, the lower XFS inodes for files that tierd has migrated
-// remain "alive" in the VFS because smoothfs holds a path_get() reference to
-// them even after their directory entry has been unlinked. On systems with
-// ample RAM where the VFS cache never comes under memory pressure, these zombie
-// inodes accumulate and the XFS filesystem reports their blocks as "used",
-// which makes the tier appear full and blocks new writes to the fast tier.
-var dropVMCachesForInodes = func() {
-	if err := os.WriteFile("/proc/sys/vm/drop_caches", []byte("2"), 0); err != nil {
-		log.Printf("placement: drop_caches for inode eviction: %v", err)
+// Writing "<tier> <lower_ino>" to the pool's forget_lower sysfs makes smoothfs
+// drop exactly that inode's pin and evict it, freeing the backing blocks now.
+// This replaces the old pool-wide drop_caches=2 call, which could not reclaim
+// these inodes at all: drop_caches only evicts cache-idle inodes, and the
+// replay pin keeps a reference so they are never idle.
+//
+// Best-effort: a missing pool/uuid or a write error just defers reclaim to the
+// next opportunity (or unmount); it is never a move failure. Var for test hook.
+var forgetLowerInode = func(a *Adapter, poolName string, tierRank int, lowerIno uint64) {
+	if a == nil || a.store == nil {
+		return
+	}
+	pool, err := a.store.GetSmoothfsPool(poolName)
+	if err != nil || pool == nil || pool.UUID == "" {
+		return
+	}
+	path := filepath.Join("/sys/fs/smoothfs", pool.UUID, "forget_lower")
+	line := fmt.Sprintf("%d %d", tierRank, lowerIno)
+	if err := os.WriteFile(path, []byte(line), 0); err != nil {
+		log.Printf("placement: forget_lower pool=%s tier=%d inode=%d: %v",
+			poolName, tierRank, lowerIno, err)
 	}
 }
 
+// copyFileContents opens src for read and dst for exclusive create-write,
+// streams the bytes, and closes both.
 func copyFileContents(src, dst string, mode os.FileMode) error {
 	sf, err := os.Open(src)
 	if err != nil {

@@ -368,8 +368,11 @@ func (s *Store) UpdateTierTargetPolicy(id string, targetFillPct, fullThresholdPc
 }
 
 func validateFillPolicy(targetFillPct, fullThresholdPct int) error {
-	if targetFillPct < 1 || targetFillPct > 100 {
-		return fmt.Errorf("target_fill_pct must be between 1 and 100")
+	// target_fill_pct == 0 is valid: the tier holds no resident data and acts
+	// as a pure write-cache (everything drains to a slower tier). full_threshold
+	// must still be >= 1 and strictly greater than target.
+	if targetFillPct < 0 || targetFillPct > 100 {
+		return fmt.Errorf("target_fill_pct must be between 0 and 100")
 	}
 	if fullThresholdPct < 1 || fullThresholdPct > 100 {
 		return fmt.Errorf("full_threshold_pct must be between 1 and 100")
