@@ -717,6 +717,104 @@ func TestMoveForPlacementCompletesstalledMoveWhenDestMatchesSrc(t *testing.T) {
 	}
 }
 
+// A byte-identical destination duplicate whose mtime differs from the source
+// (a tier copy that did not preserve mtime) must still reconcile — otherwise the
+// scanner re-queues the same doomed move forever. Regression for the reconcile
+// loop that flooded the log and starved image pulls.
+func TestMoveForPlacementReconcilesIdenticalDestWithMtimeSkew(t *testing.T) {
+	origMountReady := backingMountActive
+	backingMountActive = func(string) bool { return true }
+	t.Cleanup(func() { backingMountActive = origMountReady })
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	rel := "dir/file.txt"
+	content := []byte("identical bytes across tiers")
+
+	for _, dir := range []string{srcDir + "/dir", dstDir + "/dir"} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	if err := writeFile(srcDir+"/"+rel, content, 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if err := writeFile(dstDir+"/"+rel, content, 0o644); err != nil {
+		t.Fatalf("write dst: %v", err)
+	}
+	// Same content, deliberately different mtimes.
+	if err := os.Chtimes(srcDir+"/"+rel, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("chtimes src: %v", err)
+	}
+	if err := os.Chtimes(dstDir+"/"+rel, time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC), time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("chtimes dst: %v", err)
+	}
+
+	a := &Adapter{}
+	err := a.moveForPlacement(
+		db.MdadmManagedNamespaceRow{PoolName: "pool1", NamespaceID: "ns1"},
+		rel,
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "src", MountPath: srcDir},
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "dst", MountPath: dstDir},
+		1, 2,
+	)
+	if err != nil {
+		t.Fatalf("moveForPlacement should reconcile identical dup with mtime skew, got: %v", err)
+	}
+	if _, err := os.Stat(srcDir + "/" + rel); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale source should have been removed, got: %v", err)
+	}
+	got, err := readFile(dstDir + "/" + rel)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("dst contents = %q, want %q", got, content)
+	}
+}
+
+// A same-size but content-DIFFERENT destination is a genuine conflict: it must
+// still error and preserve both files (never silently overwrite), even though
+// the reconcile path now falls back to a content compare.
+func TestMoveForPlacementSameSizeDifferentContentStillErrors(t *testing.T) {
+	origMountReady := backingMountActive
+	backingMountActive = func(string) bool { return true }
+	t.Cleanup(func() { backingMountActive = origMountReady })
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	rel := "dir/file.txt"
+	for _, dir := range []string{srcDir + "/dir", dstDir + "/dir"} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	if err := writeFile(srcDir+"/"+rel, []byte("AAAA"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if err := writeFile(dstDir+"/"+rel, []byte("BBBB"), 0o644); err != nil {
+		t.Fatalf("write dst: %v", err)
+	}
+
+	a := &Adapter{}
+	err := a.moveForPlacement(
+		db.MdadmManagedNamespaceRow{PoolName: "pool1", NamespaceID: "ns1"},
+		rel,
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "src", MountPath: srcDir},
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "dst", MountPath: dstDir},
+		1, 2,
+	)
+	if err == nil || !strings.Contains(err.Error(), "destination already exists") {
+		t.Fatalf("moveForPlacement error = %v, want destination exists", err)
+	}
+	if got, _ := readFile(srcDir + "/" + rel); string(got) != "AAAA" {
+		t.Fatalf("src altered: %q", got)
+	}
+	if got, _ := readFile(dstDir + "/" + rel); string(got) != "BBBB" {
+		t.Fatalf("dst altered: %q", got)
+	}
+}
+
 func TestInstallPlacementCopyDoesNotOverwriteExistingDestination(t *testing.T) {
 	dir := t.TempDir()
 	tmp := dir + "/file.tierd-move"
