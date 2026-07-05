@@ -156,10 +156,17 @@ func (s *shard) enqueueBlocking(key, val []byte) {
 
 // del removes a record synchronously. Used by UNLINK so the next boot
 // reconcile doesn't resurrect a ghost record from a file that no longer
-// exists. Uses bbolt's own batch semantics to coalesce with nearby deletes
-// under concurrent load.
+// exists, and by the placement planner (Move/Delete) after each migration.
+//
+// Commits via db.Update, not db.Batch. bbolt documents Batch as "only useful
+// when there are multiple goroutines calling it": the placement planner calls
+// del serially from a single goroutine, so a single-call batch never reaches
+// MaxBatchSize and blocks the caller for the full MaxBatchDelay (10ms) waiting
+// on the batch timer — 10ms per move, serialized, which wedged tiering on a
+// large pool. db.Update commits immediately; with NoSync it does not fsync, so
+// it is sub-millisecond and durability still lands via the periodic syncLoop.
 func (s *shard) del(key []byte) error {
-	return s.db.Batch(func(tx *bolt.Tx) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(objectsBucket)
 		if b == nil {
 			return nil
@@ -168,11 +175,13 @@ func (s *shard) del(key []byte) error {
 	})
 }
 
-// putSync commits a record synchronously via bbolt's batch path, bypassing
-// the async writer queue. Used by Move where the next Get must observe the
-// write without depending on the batched writer's flush window.
+// putSync commits a record synchronously, bypassing the async writer queue.
+// Used by Move where the next Get must observe the write without depending on
+// the batched writer's flush window. Uses db.Update rather than db.Batch for
+// the same reason as del: the serial planner caller gains nothing from Batch
+// coalescing and would pay the 10ms batch-timer delay on every call.
 func (s *shard) putSync(key, val []byte) error {
-	return s.db.Batch(func(tx *bolt.Tx) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(objectsBucket)
 		if b == nil {
 			return fmt.Errorf("objects bucket missing")
