@@ -84,6 +84,11 @@ type Manifest struct {
 	UI         *UI       `json:"ui,omitempty" yaml:"ui,omitempty"`
 	Profiles   []string  `json:"profiles,omitempty" yaml:"profiles"`
 
+	// Config is the plugin-level operator-tunable schema for a plain-compose
+	// plugin (from x-smoothnas.config), surfaced so the install wizard renders a
+	// form. Native manifests carry config per-Service instead and leave this nil.
+	Config []ConfigField `json:"config,omitempty" yaml:"-"`
+
 	// Services is the set of containers this plugin owns. A single-
 	// container plugin is one service. New manifests should use this
 	// shape; pre-plugins-10 manifests using the top-level fields below
@@ -341,6 +346,17 @@ func manifestFromCompose(data []byte) (*Manifest, error) {
 			Service: meta.UI.Service,
 			Port:    meta.UI.Port,
 		}}
+	}
+	// Surface the operator-config schema so the install wizard can render a form.
+	schema, err := compose.ConfigSchema(data)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range schema {
+		m.Config = append(m.Config, ConfigField{
+			Key: d.Key, Label: d.Label, Type: d.Type,
+			Default: d.Default, Description: d.Description, Secret: d.Secret,
+		})
 	}
 	return m, nil
 }
