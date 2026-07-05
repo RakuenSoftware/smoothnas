@@ -166,7 +166,37 @@ func (l *Lifecycle) composeSpecResolved(rec *PluginRecord) (compose.ProjectSpec,
 			return compose.ProjectSpec{}, err
 		}
 	}
-	return compose.SpecFromSingle(rec.Plugin.Name, string(yamlBytes), nil), nil
+	spec := compose.SpecFromSingle(rec.Plugin.Name, string(yamlBytes), nil)
+	// Render operator config into the compose .env: every non-secret
+	// x-smoothnas.config key gets the operator's answer or the schema default,
+	// so a ${KEY} reference never resolves empty. Secrets are NOT here — they go
+	// to the up-subprocess env via GetComposeSecrets at Start (never on disk).
+	env, err := l.composeConfigEnv(rec, yamlBytes)
+	if err != nil {
+		return compose.ProjectSpec{}, err
+	}
+	spec.Env = env
+	return spec, nil
+}
+
+// composeConfigEnv resolves the non-secret operator config for a compose plugin
+// into the .env map: the declared x-smoothnas.config schema, filled from the
+// stored answers (plugin_compose_config) with schema defaults for unset keys,
+// type-validated. Returns nil when the plugin declares no config.
+func (l *Lifecycle) composeConfigEnv(rec *PluginRecord, yamlBytes []byte) (map[string]string, error) {
+	schema, err := compose.ConfigSchema(yamlBytes)
+	if err != nil {
+		return nil, err
+	}
+	if len(schema) == 0 {
+		return nil, nil
+	}
+	answers, err := l.store.GetComposeConfig(rec.Plugin.Name)
+	if err != nil {
+		return nil, err
+	}
+	env, _, err := compose.ResolveConfigEnv(schema, answers)
+	return env, err
 }
 
 // isCompose reports whether a stored plugin is compose-format and a backend is

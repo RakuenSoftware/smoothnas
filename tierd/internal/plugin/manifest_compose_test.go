@@ -159,3 +159,27 @@ func TestParseManifest_Compose_MultiServiceUIResolves(t *testing.T) {
 		t.Fatalf("ui embed = %+v", m.UI)
 	}
 }
+
+func TestParseManifest_Compose_ExposesConfigSchema(t *testing.T) {
+	y := `name: p
+services:
+  s: { image: x }
+x-smoothnas:
+  config:
+    - { key: LLM_ENDPOINT, label: LLM endpoint, type: url }
+    - { key: PW, label: password, secret: true }
+`
+	m, err := ParseManifest([]byte(y))
+	if err != nil {
+		t.Fatalf("ParseManifest: %v", err)
+	}
+	if len(m.Config) != 2 {
+		t.Fatalf("config len = %d, want 2", len(m.Config))
+	}
+	if m.Config[0].Key != "LLM_ENDPOINT" || m.Config[0].Type != "url" {
+		t.Errorf("config[0] = %+v", m.Config[0])
+	}
+	if !m.Config[1].Secret {
+		t.Errorf("config[1] should be secret: %+v", m.Config[1])
+	}
+}
