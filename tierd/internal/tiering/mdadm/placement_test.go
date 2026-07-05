@@ -762,3 +762,25 @@ func TestTierTargetCapBytes(t *testing.T) {
 		})
 	}
 }
+
+func TestTierFullCapBytes(t *testing.T) {
+	const tib = int64(1) << 40
+	cases := []struct {
+		name    string
+		total   int64
+		fullPct int
+		want    int64
+	}{
+		{"evacuated tier caps at zero", tib, 0, 0},
+		{"normal write cap", tib, 95, tib * 95 / 100},
+		{"full", tib, 100, tib},
+		{"negative clamps to zero", tib, -3, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := tierFullCapBytes(c.total, c.fullPct); got != c.want {
+				t.Fatalf("tierFullCapBytes(%d, %d) = %d, want %d", c.total, c.fullPct, got, c.want)
+			}
+		})
+	}
+}

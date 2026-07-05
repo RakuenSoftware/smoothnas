@@ -1886,8 +1886,8 @@ func (h *ArraysHandler) addTierLevel(w http.ResponseWriter, r *http.Request, poo
 	if req.FullThresholdPct != nil {
 		fullThreshold = *req.FullThresholdPct
 	}
-	if targetFill >= fullThreshold {
-		jsonErrorCoded(w, "target_fill_pct must be less than full_threshold_pct", http.StatusBadRequest, "tiers.fill_thresholds_invalid")
+	if targetFill > fullThreshold {
+		jsonErrorCoded(w, "target_fill_pct must not exceed full_threshold_pct", http.StatusBadRequest, "tiers.fill_thresholds_invalid")
 		return
 	}
 
@@ -1945,8 +1945,8 @@ func (h *ArraysHandler) updateTierLevel(w http.ResponseWriter, r *http.Request, 
 	if req.FullThresholdPct != nil {
 		fullThreshold = *req.FullThresholdPct
 	}
-	if targetFill >= fullThreshold {
-		jsonErrorCoded(w, "target_fill_pct must be less than full_threshold_pct", http.StatusBadRequest, "tiers.fill_thresholds_invalid")
+	if targetFill > fullThreshold {
+		jsonErrorCoded(w, "target_fill_pct must not exceed full_threshold_pct", http.StatusBadRequest, "tiers.fill_thresholds_invalid")
 		return
 	}
 
