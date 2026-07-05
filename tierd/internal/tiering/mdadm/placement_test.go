@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -604,6 +605,66 @@ func TestMoveForPlacementDoesNotOverwriteExistingDestination(t *testing.T) {
 	}
 	if string(gotDst) != "dest" {
 		t.Fatalf("dst contents = %q, want dest", gotDst)
+	}
+}
+
+// After moving a file out-of-band (copy + os.Remove of the source), tierd must
+// tell smoothfs to drop the replay pin on the removed source inode, else its
+// backing blocks leak until unmount. This asserts the forget_lower call fires
+// with the correct pool, source tier rank, and the source's lower inode number.
+func TestMoveForPlacementForgetsLowerInodeAfterMove(t *testing.T) {
+	origMountReady := backingMountActive
+	backingMountActive = func(string) bool { return true }
+	t.Cleanup(func() { backingMountActive = origMountReady })
+
+	type forgetCall struct {
+		pool string
+		tier int
+		ino  uint64
+	}
+	var calls []forgetCall
+	origForget := forgetLowerInode
+	forgetLowerInode = func(_ *Adapter, poolName string, tierRank int, lowerIno uint64) {
+		calls = append(calls, forgetCall{poolName, tierRank, lowerIno})
+	}
+	t.Cleanup(func() { forgetLowerInode = origForget })
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	rel := "dir/file.txt"
+	if err := os.MkdirAll(srcDir+"/dir", 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	if err := writeFile(srcDir+"/"+rel, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	// Capture the source's lower inode before the move unlinks it.
+	fi, err := os.Stat(srcDir + "/" + rel)
+	if err != nil {
+		t.Fatalf("stat src: %v", err)
+	}
+	srcIno := fi.Sys().(*syscall.Stat_t).Ino
+
+	a := &Adapter{}
+	if err := a.moveForPlacement(
+		db.MdadmManagedNamespaceRow{PoolName: "pool1", NamespaceID: "ns1"},
+		rel,
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "src", MountPath: srcDir},
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "dst", MountPath: dstDir},
+		1, 2,
+	); err != nil {
+		t.Fatalf("moveForPlacement: %v", err)
+	}
+	if _, err := os.Stat(srcDir + "/" + rel); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source not removed: %v", err)
+	}
+
+	if len(calls) != 1 {
+		t.Fatalf("forgetLowerInode called %d times, want 1: %+v", len(calls), calls)
+	}
+	if calls[0].pool != "pool1" || calls[0].tier != 1 || calls[0].ino != srcIno {
+		t.Fatalf("forgetLowerInode = {pool:%q tier:%d ino:%d}, want {pool1 1 %d}",
+			calls[0].pool, calls[0].tier, calls[0].ino, srcIno)
 	}
 }
 
