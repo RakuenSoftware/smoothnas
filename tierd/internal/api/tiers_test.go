@@ -1833,3 +1833,56 @@ func TestReconcileSpindownTimers(t *testing.T) {
 		t.Fatalf("disabled (0) timer must not be re-applied, got %#v", timers)
 	}
 }
+
+// TestResumeDestroyingRefusesToWipeTierDataOnBoot is the regression guard for
+// the 23 TB data-loss incident: a tier left in the "destroying" state (e.g. an
+// interrupted or blocked delete) must NEVER have its backing zfs-destroyed by
+// the automatic boot-time ResumeDestroyingPools path while it still holds data.
+func TestResumeDestroyingRefusesToWipeTierDataOnBoot(t *testing.T) {
+	oldMountRoot := db.TierMountRoot
+	db.TierMountRoot = t.TempDir()
+	t.Cleanup(func() { db.TierMountRoot = oldMountRoot })
+
+	h := newTestHandler(t)
+	if err := h.store.CreateTierInstance("media"); err != nil {
+		t.Fatalf("create tier: %v", err)
+	}
+	if err := h.store.AssignBackingToTier("media", db.TierSlotHDD, "zfs", "tank"); err != nil {
+		t.Fatalf("assign zfs backing: %v", err)
+	}
+	if err := h.store.TransitionTierInstanceState("media", db.TierPoolStateDestroying); err != nil {
+		t.Fatalf("transition destroying: %v", err)
+	}
+
+	// The zfs backing still holds ~30 TiB.
+	oldUsed := zfsDatasetUsedBytes
+	zfsDatasetUsedBytes = func(string) (int64, bool, error) { return 30 << 40, true, nil }
+	t.Cleanup(func() { zfsDatasetUsedBytes = oldUsed })
+
+	// Any destructive teardown must be provably NOT reached.
+	destroyed := false
+	oldVG, oldPV, oldUnmount := removePoolVG, removePVLabel, unmountTierPath
+	removePoolVG = func(string) error { destroyed = true; return nil }
+	removePVLabel = func(string) error { destroyed = true; return nil }
+	unmountTierPath = func(string) error { destroyed = true; return nil }
+	t.Cleanup(func() { removePoolVG, removePVLabel, unmountTierPath = oldVG, oldPV, oldUnmount })
+
+	pool, err := h.store.GetTierInstance("media")
+	if err != nil {
+		t.Fatalf("get tier: %v", err)
+	}
+
+	// explicit=false == the automatic boot resume path.
+	if err := h.destroyTierPool(pool, false); err == nil {
+		t.Fatal("boot resume destroyed a data-bearing tier — expected a refusal")
+	} else if !strings.Contains(err.Error(), "still holds data") {
+		t.Fatalf("expected data-safety refusal, got: %v", err)
+	}
+	if destroyed {
+		t.Fatal("DESTRUCTIVE teardown ran despite the data-safety refusal")
+	}
+	// The tier must survive for an explicit re-delete.
+	if _, err := h.store.GetTierInstance("media"); err != nil {
+		t.Fatalf("tier must survive the refusal, got: %v", err)
+	}
+}

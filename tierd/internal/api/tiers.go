@@ -1370,7 +1370,8 @@ func (h *ArraysHandler) deleteTier(w http.ResponseWriter, r *http.Request, tierN
 				h.asyncDone <- struct{}{}
 			}
 		}()
-		if err := h.destroyTierPool(t); err != nil {
+		// explicit=true: this is the operator's confirmed DELETE.
+		if err := h.destroyTierPool(t, true); err != nil {
 			_ = h.store.SetTierInstanceDestroyingReason(tierName, err.Error())
 			h.invalidateAll()
 			return
@@ -1513,9 +1514,81 @@ func (h *ArraysHandler) releaseTierConsumers(poolName string) {
 	}
 }
 
-func (h *ArraysHandler) destroyTierPool(pool *db.TierInstance) error {
+// zfsDatasetUsedBytes returns the `used` bytes of a ZFS dataset. exists=false
+// with a nil error means the dataset is absent (already gone / nothing to
+// protect). Indirected as a var so the data-safety guard is testable.
+var zfsDatasetUsedBytes = func(dataset string) (used int64, exists bool, err error) {
+	out, cmdErr := exec.Command("zfs", "get", "-Hp", "-o", "value", "used", dataset).CombinedOutput()
+	if cmdErr != nil {
+		if strings.Contains(string(out), "does not exist") {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("zfs get used %s: %s: %w", dataset, strings.TrimSpace(string(out)), cmdErr)
+	}
+	v, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if perr != nil {
+		return 0, true, fmt.Errorf("parse zfs used %q: %w", strings.TrimSpace(string(out)), perr)
+	}
+	return v, true, nil
+}
+
+// tierBackingHoldsData conservatively reports whether any of pool's tier slots
+// still holds user data. It returns true whenever it cannot PROVE a backing is
+// empty, so an automatic teardown never wipes data it can't vouch for. The
+// returned string names the first data-bearing backing, for logging.
+func (h *ArraysHandler) tierBackingHoldsData(pool *db.TierInstance) (bool, string) {
+	const emptyThresholdBytes = 128 << 20 // slack for empty-fs / metadata overhead
+
+	slots, err := h.store.ListTierSlots(pool.Name)
+	if err != nil {
+		return true, fmt.Sprintf("cannot list tier slots: %v", err)
+	}
+	for _, slot := range slots {
+		if slot.BackingKind == "zfs" {
+			ds := strings.TrimSpace(slot.BackingRef) + "/tierd/" + pool.Name + "/" + slot.Name
+			used, exists, uerr := zfsDatasetUsedBytes(ds)
+			if uerr != nil {
+				return true, fmt.Sprintf("%s: usage unreadable: %v", ds, uerr)
+			}
+			if exists && used > emptyThresholdBytes {
+				return true, fmt.Sprintf("%s holds %d bytes", ds, used)
+			}
+			continue
+		}
+		// mdadm / filesystem backings: prove empty via the mounted backing's
+		// usage; if it can't be measured, refuse (fail safe).
+		_, used, _, ok := h.backingFSUsage(pool.Name, slot.Name)
+		if !ok {
+			return true, fmt.Sprintf("tier %s: backing usage unknown", slot.Name)
+		}
+		if used > emptyThresholdBytes {
+			return true, fmt.Sprintf("tier %s holds %d bytes", slot.Name, used)
+		}
+	}
+	return false, ""
+}
+
+// destroyTierPool tears down a tier's storage. explicit MUST be true only when
+// the caller is an operator's confirmed DELETE — never for a boot/import path.
+func (h *ArraysHandler) destroyTierPool(pool *db.TierInstance, explicit bool) error {
 	const lvName = "data"
 	vg := "tier-" + pool.Name
+
+	// DATA-LOSS SAFETY: this destroys the backing's data, so it must only ever
+	// run from an EXPLICIT operator delete — never as a side effect of
+	// boot/import. ResumeDestroyingPools re-runs this for every tier left in the
+	// "destroying" state, so a tier stuck there (an interrupted or blocked
+	// delete) would otherwise have its data `zfs destroy`'d on the next boot
+	// where the backing is reachable — which wiped ~23 TB after one reimport.
+	// If we got here automatically and any backing still holds data, refuse and
+	// leave the tier for an explicit re-delete: a stuck tier is recoverable,
+	// wiped data is not.
+	if !explicit {
+		if held, detail := h.tierBackingHoldsData(pool); held {
+			log.Printf("destroy pool %s: REFUSING automatic teardown — backing still holds data (%s); an explicit operator delete is required", pool.Name, detail)
+			return fmt.Errorf("refused automatic teardown: pool %q backing still holds data (%s); re-issue the delete explicitly to confirm", pool.Name, detail)
+		}
+	}
 
 	// Reaching teardown means deletion is authorised: either the pool had no
 	// consumers, or the operator gave the second (force) confirmation. Release
@@ -1745,7 +1818,11 @@ func (h *ArraysHandler) ResumeDestroyingPools() {
 			// async destroy goroutine in deleteTier — the
 			// "destroying" DB state is the authoritative gate
 			// for concurrent mutations.
-			if err := h.destroyTierPool(&p); err != nil {
+			// explicit=false: this is an automatic boot-time resume. The
+			// data-safety guard in destroyTierPool refuses to wipe a backing
+			// that still holds data — a stuck "destroying" tier must be
+			// re-deleted explicitly, it is NEVER auto-destroyed on boot.
+			if err := h.destroyTierPool(&p, false); err != nil {
 				log.Printf("resume destroying: pool %q: %v", p.Name, err)
 				_ = h.store.SetTierInstanceDestroyingReason(p.Name, err.Error())
 				h.invalidateAll()
