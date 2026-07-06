@@ -476,3 +476,84 @@ func TestGHRunner_ComposeEndToEnd(t *testing.T) {
 		t.Fatalf("scale: %+v err=%v", res, err)
 	}
 }
+
+// A compose plugin records each service's image as a plugin_services +
+// plugin_container_refs row, so it surfaces the same Update button as a manifest
+// plugin (the API's containerUpdateAvailable = hasMutableContainerRef, which
+// reads these refs). Before this, InsertCompose wrote no refs and the button
+// never appeared even though refresh-containers (compose pull + up) works.
+func TestInstaller_ComposeRecordsServiceImagesForUpdates(t *testing.T) {
+	store := openTestStore(t)
+	const project = "name: app\n" +
+		"services:\n" +
+		"  web:\n" +
+		"    image: ghcr.io/acme/web:latest\n" +
+		"  db:\n" +
+		"    image: pgvector/pgvector:pg17\n"
+	if _, err := NewInstaller(store).Install([]byte(project)); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	rec, err := store.Get("app")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(rec.ContainerRefs) != 2 {
+		t.Fatalf("container refs = %d, want 2 (one per service)", len(rec.ContainerRefs))
+	}
+	got := map[string]string{}
+	for _, r := range rec.ContainerRefs {
+		if r.Name != "primary" {
+			t.Fatalf("ref name = %q, want primary", r.Name)
+		}
+		got[r.Service] = r.ImageRef
+		// A mutable tag (no @sha256) is what drives the Update button.
+		if strings.Contains(r.ImageRef, "@sha256:") {
+			t.Fatalf("ref %s image %q is digest-pinned; update button would not show", r.Service, r.ImageRef)
+		}
+	}
+	if got["web"] != "ghcr.io/acme/web:latest" || got["db"] != "pgvector/pgvector:pg17" {
+		t.Fatalf("recorded images = %+v, want web+db", got)
+	}
+	// The service rows exist too (container_refs FK requires them) but stay inert
+	// for lifecycle — the plugin is still artifact_type=compose.
+	if rec.Plugin.ArtifactType != ArtifactCompose {
+		t.Fatalf("artifact_type = %q, want compose", rec.Plugin.ArtifactType)
+	}
+	if len(rec.Services) != 2 {
+		t.Fatalf("services = %d, want 2", len(rec.Services))
+	}
+}
+
+// BackfillComposeImageRefs gives compose plugins installed before image-ref
+// tracking an Update button on upgrade, without a reinstall — and is idempotent.
+func TestLifecycle_BackfillComposeImageRefs(t *testing.T) {
+	store := openTestStore(t)
+	// Simulate a pre-fix compose install: a plugins row + stored project, but no
+	// service/container-ref rows (the old InsertCompose path).
+	const project = "name: legacy\nservices:\n  web:\n    image: nginx:latest\n"
+	if err := store.InsertCompose("legacy", ""); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if err := store.SetManifestYAML("legacy", project); err != nil {
+		t.Fatalf("manifest: %v", err)
+	}
+	if rec, _ := store.Get("legacy"); len(rec.ContainerRefs) != 0 {
+		t.Fatalf("precondition: want 0 refs, got %d", len(rec.ContainerRefs))
+	}
+
+	lc := NewLifecycle(store, &fakeRuntime{})
+	if err := lc.BackfillComposeImageRefs(context.Background()); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	rec, _ := store.Get("legacy")
+	if len(rec.ContainerRefs) != 1 || rec.ContainerRefs[0].ImageRef != "nginx:latest" {
+		t.Fatalf("after backfill: refs=%+v", rec.ContainerRefs)
+	}
+	// Idempotent: a second sweep leaves the single ref untouched (already tracked).
+	if err := lc.BackfillComposeImageRefs(context.Background()); err != nil {
+		t.Fatalf("backfill 2: %v", err)
+	}
+	if rec, _ := store.Get("legacy"); len(rec.ContainerRefs) != 1 {
+		t.Fatalf("idempotency: refs=%d, want 1", len(rec.ContainerRefs))
+	}
+}

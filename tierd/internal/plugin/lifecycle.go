@@ -276,6 +276,37 @@ func (l *Lifecycle) ReconcileComposeStates(ctx context.Context) error {
 	return nil
 }
 
+// BackfillComposeImageRefs records service images for compose plugins that were
+// installed before image-ref tracking existed (so they carry no container refs
+// and never surfaced an Update button). Idempotent: it only touches compose
+// plugins with zero refs, parsing images from the stored compose project. Runs
+// once at startup after an upgrade; a per-plugin parse/record failure is logged
+// and skipped so one bad project can't block the sweep.
+func (l *Lifecycle) BackfillComposeImageRefs(_ context.Context) error {
+	rows, err := l.store.List()
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, row := range rows {
+		if row.ArtifactType != ArtifactCompose {
+			continue
+		}
+		rec, err := l.store.Get(row.Name)
+		if err != nil || len(rec.ContainerRefs) > 0 {
+			continue // absent, unreadable, or already tracked
+		}
+		images, err := compose.ServiceImages([]byte(rec.Plugin.ManifestYAML))
+		if err != nil || len(images) == 0 {
+			continue
+		}
+		if err := l.store.RecordComposeImages(row.Name, images); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", row.Name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // resolveAndPinComposeVolumes resolves each tiered volume to its host path and
 // PINS the placement on first materialise. On a later materialise it reuses the
 // pinned path and REFUSES a silent retier (the compose now points at a different

@@ -242,6 +242,17 @@ func (i *Installer) installCompose(yamlBytes []byte, tiers TierAssignments, conf
 	if err := i.store.SetManifestYAML(name, string(yamlBytes)); err != nil {
 		return nil, fmt.Errorf("store compose project: %w", err)
 	}
+	// Register each service's image so the plugin surfaces an Update button and
+	// the refresh-containers apply path (compose pull + up) can run. Without this
+	// the compose backend records no plugin_services/container_refs, so
+	// containerUpdateAvailable (hasMutableContainerRef) is always false and the
+	// UI offers no way to pull a newer image. A parse failure here is non-fatal
+	// (the compose already validated at install); a DB failure is surfaced.
+	if images, err := compose.ServiceImages(yamlBytes); err == nil && len(images) > 0 {
+		if err := i.store.RecordComposeImages(name, images); err != nil {
+			return nil, fmt.Errorf("record compose images: %w", err)
+		}
+	}
 	// A compose plugin scales via a service-level x-smoothnas.instances block;
 	// seed the declared count + mark it configurable so materialise expands to N
 	// per-instance services and Scale can adjust it. (One scalable service for now.)
