@@ -1,51 +1,119 @@
-# gh-runner — GitHub Actions self-hosted runner controller, as a plain
-# docker-compose plugin. A single controller container that spawns ephemeral
-# one-shot worker containers via the SmoothNAS runtime docker socket — the
-# standard Docker control-plane pattern (mount the docker socket + point
-# DOCKER_HOST at it), exactly as you would in plain Docker Compose. Outbound
-# network only: no ports, no UI (GitHub.com is the UI).
-name: gh-runner
-services:
-  gh-runner:
-    image: ghcr.io/rakuensoftware/smoothnas-plugin-gh-runner:0.5.0
-    restart: unless-stopped
-    environment:
-      # runtime-control: the controller creates worker containers via the runtime
-      # docker socket (a normal docker-socket mount, see volumes below).
-      DOCKER_HOST: "unix:///run/smoothnas-runtime/docker.sock"
-      GH_REPO_URL: "${GH_REPO_URL:-}"
-      GH_RUNNER_TOKEN: "${GH_RUNNER_TOKEN:-}"
-      GH_RUNNER_LABELS: "${GH_RUNNER_LABELS:-self-hosted,linux,x64,smoothnas}"
-      GH_RUNNER_GROUP: "${GH_RUNNER_GROUP:-default}"
-      GH_RUNNER_WORKERS: "${GH_RUNNER_WORKERS:-1}"
-      GH_RUNNER_CPUS: "${GH_RUNNER_CPUS:-0}"
-      GH_RUNNER_MEMORY: "${GH_RUNNER_MEMORY:-0}"
-      GH_RUNNER_BIND_WORKSPACE: "${GH_RUNNER_BIND_WORKSPACE:-false}"
-      GH_RUNNER_KVM: "${GH_RUNNER_KVM:-false}"
-    volumes:
-      - "workspace:/home/runner/_work"
-      # Runtime control socket — the standard Docker socket mount that lets the
-      # controller create/destroy its ephemeral worker containers.
-      - "/run/smoothnas-runtime:/run/smoothnas-runtime"
-    pids_limit: 1024
-    oom_score_adj: 100
-volumes:
-  workspace:
-    x-smoothnas: { tier: SSD, minSize: 100G }
-x-smoothnas:
-  description: >-
-    GitHub Actions ephemeral self-hosted runner controller. Keeps a small pool of
-    one-shot worker containers; each worker registers with GitHub, runs one job,
-    deregisters, and is removed with its ephemeral workspace. Outbound only.
+# SmoothNAS plugin manifest for the GitHub Actions self-hosted runner.
+#
+# GitHub releases publish this manifest with the semver image tag. The
+# SmoothNAS catalog installs the newest release version, and the image
+# reference should stay tag-based instead of digest-pinned.
+#
+# The plugin runs one controller container. That controller uses the
+# SmoothNAS runtime socket to start one-shot ephemeral runner worker
+# containers. Workers use their ephemeral container rootfs for active
+# GitHub workspaces by default; the tier-bound workspace volume remains
+# available for the controller and can be opt-in bound to workers.
+
+apiVersion: smoothnas.io/v1
+kind: Plugin
+
+metadata:
+  name: gh-runner
+  version: 0.5.0 # x-release-please-version
+  description: |
+    GitHub Actions ephemeral self-hosted runner controller. The
+    controller keeps a small pool of one-shot worker containers; each
+    worker registers with GitHub, runs one job, deregisters, and is
+    removed with its ephemeral workspace. Outbound network only: no
+    ports exposed, no SmoothNAS UI to embed — GitHub.com is the UI.
   vendor: smoothnas
   homepage: https://github.com/RakuenSoftware/smoothnas-plugin-gh-runner
-  config:
-    - { key: GH_REPO_URL, label: Repository or org URL, type: string, default: "", description: "Repository or organisation URL the runner registers against (e.g. https://github.com/owner/repo)." }
-    - { key: GH_RUNNER_TOKEN, label: GitHub token, type: string, secret: true, description: "PAT / GitHub App / OAuth token used to mint fresh registration tokens for ephemeral workers." }
-    - { key: GH_RUNNER_LABELS, label: Runner labels, type: string, default: "self-hosted,linux,x64,smoothnas", description: "Comma-separated runner labels." }
-    - { key: GH_RUNNER_GROUP, label: Runner group, type: string, default: "default", description: "Runner group name (org-level runners only)." }
-    - { key: GH_RUNNER_WORKERS, label: Runner instances, type: number, default: "1", min: "1", step: "1", description: "Number of ephemeral worker containers to keep available." }
-    - { key: GH_RUNNER_CPUS, label: CPUs per runner, type: number, default: "0", min: "0", step: "0.25", unit: CPUs, description: "CPU limit per ephemeral worker (0 = unrestricted)." }
-    - { key: GH_RUNNER_MEMORY, label: Memory per runner, type: string, default: "0", description: "Memory limit per worker (e.g. 8GiB, 16384MiB, or 0 for unrestricted)." }
-    - { key: GH_RUNNER_BIND_WORKSPACE, label: Bind workspace volume, type: bool, default: "false", description: "Bind the tier-bound workspace into each worker (default false keeps checkouts in the worker's ephemeral rootfs)." }
-    - { key: GH_RUNNER_KVM, label: Enable KVM in workers, type: bool, default: "false", description: "Expose /dev/kvm to each worker for KVM-accelerated nested VMs (requires /dev/kvm on the host)." }
+
+artifact:
+  type: oci-image
+  image: ghcr.io/rakuensoftware/smoothnas-plugin-gh-runner:0.5.0 # x-release-please-version
+
+container:
+  command: []
+  restartPolicy: unless-stopped
+
+instances:
+  count: 1
+  configurable: false
+
+volumes:
+  - name: workspace
+    mode: tier-bound
+    slot: SSD
+    minSize: 100G
+    bind: /home/runner/_work
+    perInstance: false
+
+# No `ports`: runner is outbound-only.
+# No `ui`: GitHub.com is the UI; the install wizard skips the embed
+# config when ui is omitted.
+
+profiles:
+  - default-limits
+  - runtime-control
+
+config:
+  - key: GH_REPO_URL
+    type: string
+    description: |
+      Repository or organisation URL the runner registers against.
+      Examples:
+        https://github.com/owner/repo
+        https://github.com/my-org
+  - key: GH_RUNNER_TOKEN
+    type: string
+    secret: true
+    description: |
+      Personal access token, GitHub App installation token, or GitHub
+      OAuth token used to mint fresh registration tokens for ephemeral
+      workers. Registration tokens from the GitHub UI are not supported
+      for controller mode because each worker needs a new one-shot token.
+  - key: GH_RUNNER_LABELS
+    type: string
+    default: "self-hosted,linux,x64,smoothnas"
+    description: Comma-separated runner labels.
+  - key: GH_RUNNER_GROUP
+    type: string
+    default: "default"
+    description: Runner group name (org-level runners only; ignored at repo scope).
+  - key: GH_RUNNER_WORKERS
+    type: number
+    label: Runner instances
+    default: "1"
+    min: "1"
+    step: "1"
+    description: Number of ephemeral worker containers to keep available.
+  - key: GH_RUNNER_CPUS
+    type: number
+    label: CPUs per runner
+    default: "0"
+    min: "0"
+    step: "0.25"
+    unit: CPUs
+    description: |
+      CPU limit applied to each ephemeral runner worker container.
+      Set to 0 to leave worker CPU allocation unrestricted.
+  - key: GH_RUNNER_MEMORY
+    type: string
+    label: Memory per runner
+    default: "0"
+    description: |
+      Memory limit applied to each ephemeral runner worker container
+      (for example 8GiB, 16384MiB, or 0 for unrestricted).
+  - key: GH_RUNNER_BIND_WORKSPACE
+    type: boolean
+    label: Bind workspace volume
+    default: "false"
+    description: |
+      Set to true to bind the tier-bound workspace volume into each
+      worker. The default false keeps active GitHub checkouts inside
+      the worker's ephemeral rootfs and removes them with the worker.
+  - key: GH_RUNNER_KVM
+    type: boolean
+    label: Enable KVM in workers
+    default: "false"
+    description: |
+      Expose /dev/kvm to each ephemeral worker so jobs can run
+      KVM-accelerated nested VMs (qemu, virtme-ng). Requires /dev/kvm
+      on the host; leave off on hosts without hardware virtualization.

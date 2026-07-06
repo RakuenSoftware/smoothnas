@@ -1,71 +1,102 @@
-# aimee-server — the agent/memory broker, as a plain docker-compose plugin.
+# aimee-server — the agent/memory broker.
 #
-# Standalone: DB1 (a self-contained, user-scoped SQLite store) only. Serves BOTH
-# the authenticated /v1 HTTP API and the webchat browser UI (HTTPS :8443). For
-# shared/vector memory install the `aimee-combined` plugin instead. The only
-# SmoothNAS extensions are the top-level x-smoothnas block (catalog display + UI
-# embed + operator config) and x-smoothnas.tier on the named volumes — the file
-# is otherwise plain compose.
-name: aimee-server
-services:
-  aimee-server:
-    image: ghcr.io/rakuensoftware/aimee-server:latest
-    restart: unless-stopped
-    ports:
-      - "8740:8740" # authenticated /v1 JSON API (bearer on every request)
-      - "8443:8443" # webchat UI (HTTPS)
-    volumes:
-      - home:/var/lib/aimee              # DB1 (aimee.db) + server state
-      - workspaces:/var/lib/aimee-workspaces # per-workspace mirrors + worktrees
-    environment:
-      AIMEE_KB_API_URL: "${AIMEE_KB_API_URL:-}"
-      AIMEE_KB_API_BEARER_TOKEN: "${AIMEE_KB_API_BEARER_TOKEN:-}"
-      AIMEE_WEBCHAT_ENABLED: "${AIMEE_WEBCHAT_ENABLED:-true}"
-      AIMEE_WEBCHAT_USER: "${AIMEE_WEBCHAT_USER:-}"
-      AIMEE_WEBCHAT_PASSWORD: "${AIMEE_WEBCHAT_PASSWORD:-}"
-volumes:
-  home:
-    x-smoothnas: { tier: HDD }
-  workspaces:
-    x-smoothnas: { tier: HDD }
-x-smoothnas:
+# Fronts the /v1 HTTP API and owns DB1 (a self-contained, user-scoped SQLite
+# store). Runs fully standalone: only the DB1-backed endpoints are active. A
+# single-service plugin — point AIMEE_KB_API_URL at a running aimee-kb plugin to
+# additionally enable the shared/vector (DB2 + pgvector) features.
+#
+# Image: ghcr.io/rakuensoftware/aimee-server  (Dockerfile.server upstream)
+apiVersion: smoothnas.io/v1
+kind: Plugin
+metadata:
+  name: aimee-server
+  version: 0.2.5
   description: >-
     aimee agent/memory broker — serves the /v1 HTTP API backed by a
     self-contained SQLite store (DB1). Runs standalone; optionally federates to
     an aimee-kb plugin for shared/vector memory.
   vendor: RakuenSoftware
   homepage: https://github.com/RakuenSoftware/aimee
-  ui:
-    service: aimee-server
-    port: 8443
-    path: /
-  config:
-    - key: AIMEE_KB_API_URL
-      label: aimee-kb API URL
-      type: string
-      default: ""
-      description: >-
-        Optional. URL of a running aimee-kb /v1 endpoint (e.g.
-        http://10.0.0.5:8741) to enable shared/vector memory. Blank = standalone.
-    - key: AIMEE_KB_API_BEARER_TOKEN
-      label: aimee-kb bearer token
-      type: string
-      secret: true
-      description: Optional bearer token presented to the configured aimee-kb endpoint.
-    - key: AIMEE_WEBCHAT_ENABLED
-      label: Browser webchat UI
-      type: bool
-      default: "true"
-      description: >-
-        Browser UI on HTTPS :8443 (first-class, on by default). Turn off to serve
-        the /v1 API only.
-    - key: AIMEE_WEBCHAT_USER
-      label: Webchat login user
-      type: string
-      default: ""
-      description: PAM login username for the browser UI (set with a password to enable sign-in).
-    - key: AIMEE_WEBCHAT_PASSWORD
-      label: Webchat login password
-      type: string
-      secret: true
-      description: PAM login password for the browser UI (set alongside the user).
+services:
+  - name: aimee-server
+    artifact:
+      type: oci-image
+      # Pin to a release tag (e.g. :0.2.1) or a sha256 digest for reproducible
+      # installs. :latest tracks the newest published multi-arch manifest.
+      image: ghcr.io/rakuensoftware/aimee-server:latest
+    container:
+      # The image entrypoint binds /v1 (port + bearer from the baked aimee.yaml)
+      # and honours AIMEE_SERVER_HTTP_BIND=1 (set in the image) so the listener
+      # reaches 0.0.0.0. No command override needed.
+      restartPolicy: unless-stopped
+    volumes:
+      # DB1 (aimee.db) and server state live under AIMEE_HOME. Tier-bound so the
+      # data sits on a storage tier of your choosing, not the small OS/root
+      # device; pick the tier at install (slot is the home tier within it,
+      # smoothfs promotes hot data upward). The server runs as uid 1000 to match
+      # SmoothNAS tiers' forced owner (requires the runtime from v0.1.20+).
+      - name: home
+        mode: tier-bound
+        slot: HDD
+        bind: /var/lib/aimee
+      # Mirror tier (AIMEE_WORKSPACES_DIR): per-workspace bare mirrors +
+      # reconstructed worktrees. Large, durable, separate backup lifecycle.
+      - name: workspaces
+        mode: tier-bound
+        slot: HDD
+        bind: /var/lib/aimee-workspaces
+    ports:
+      # Authenticated JSON API (bearer required on every request) — published on
+      # the SmoothNAS host so aimee thin-clients on the network can reach it
+      # directly, matching the upstream compose `8740:8740`.
+      - name: api
+        port: 8740
+        protocol: tcp
+        expose: false
+        hostExpose: true
+      # Browser webchat UI (HTTPS). First-class and on by default in the image;
+      # published so it is reachable from the host/LAN.
+      - name: webchat
+        port: 8443
+        protocol: tcp
+        expose: false
+        hostExpose: true
+    config:
+      # Optional federation to a shared-memory backend. Leave blank to run
+      # standalone (DB1 only). The base URL must NOT include the /v1 suffix.
+      - key: AIMEE_KB_API_URL
+        type: string
+        label: aimee-kb API URL
+        default: ""
+        description: >-
+          Optional. URL of a running aimee-kb /v1 endpoint (e.g.
+          http://10.0.0.5:8741) to enable shared/vector memory features. Blank =
+          standalone (SQLite-only).
+      - key: AIMEE_KB_API_BEARER_TOKEN
+        type: string
+        label: aimee-kb bearer token
+        default: ""
+        secret: true
+        description: Optional bearer token presented to the configured aimee-kb endpoint.
+      - key: AIMEE_WEBCHAT_ENABLED
+        type: boolean
+        label: Browser webchat UI
+        default: true
+        description: >-
+          Browser UI on HTTPS :8443 (first-class, on by default). Turn off to
+          serve the /v1 API only.
+      - key: AIMEE_WEBCHAT_USER
+        type: string
+        label: Webchat login user
+        default: ""
+        description: >-
+          PAM login username for the browser UI. Set this together with a
+          password to enable sign-in; leave blank to serve the login page with
+          no account.
+      - key: AIMEE_WEBCHAT_PASSWORD
+        type: string
+        label: Webchat login password
+        default: ""
+        secret: true
+        description: >-
+          PAM login password for the browser UI (set alongside the user).
