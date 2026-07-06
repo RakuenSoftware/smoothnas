@@ -2,6 +2,7 @@ package compose
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -30,16 +31,15 @@ type ConfigDecl struct {
 	Max  string
 	Step string
 	Unit string
+	// Options is the allowed-value set for a `select` field (enum). The wizard
+	// renders a dropdown and non-secret injection rejects an out-of-set value.
+	Options []string
 }
 
 // reSecretName flags keys that look like credentials; such a key MUST be
 // declared secret:true (defense-in-depth against a misclassified field leaking
 // into the on-disk .env).
 var reSecretName = regexp.MustCompile(`(?i)(PASSWORD|SECRET|TOKEN|BEARER|_KEY)$`)
-
-// reNumber matches an integer config value (number type). Package-level so it is
-// compiled once, not per validateConfigValue call.
-var reNumber = regexp.MustCompile(`^-?\d+$`)
 
 type xsConfigDoc struct {
 	XS *struct {
@@ -54,6 +54,9 @@ type xsConfigDoc struct {
 			Max         string `yaml:"max"`
 			Step        string `yaml:"step"`
 			Unit        string `yaml:"unit"`
+			Options     []struct {
+				Value string `yaml:"value"`
+			} `yaml:"options"`
 		} `yaml:"config"`
 	} `yaml:"x-smoothnas"`
 }
@@ -85,10 +88,17 @@ func ConfigSchema(composeYAML []byte) ([]ConfigDecl, error) {
 		if typ == "" {
 			typ = "string"
 		}
+		if typ == "boolean" { // native manifests spell it "boolean"
+			typ = "bool"
+		}
 		switch typ {
 		case "string", "number", "bool", "url":
+		case "select":
+			if len(c.Options) == 0 {
+				return nil, fmt.Errorf("x-smoothnas.config[%s]: select type requires options", c.Key)
+			}
 		default:
-			return nil, fmt.Errorf("x-smoothnas.config[%s]: unknown type %q (want string|number|bool|url)", c.Key, typ)
+			return nil, fmt.Errorf("x-smoothnas.config[%s]: unknown type %q (want string|number|bool|url|select)", c.Key, typ)
 		}
 		if reSecretName.MatchString(c.Key) && !c.Secret {
 			return nil, fmt.Errorf("x-smoothnas.config[%s]: credential-looking key must be secret:true", c.Key)
@@ -96,10 +106,14 @@ func ConfigSchema(composeYAML []byte) ([]ConfigDecl, error) {
 		if c.Secret && c.Default != "" {
 			return nil, fmt.Errorf("x-smoothnas.config[%s]: secret fields may not declare a default", c.Key)
 		}
+		opts := make([]string, 0, len(c.Options))
+		for _, o := range c.Options {
+			opts = append(opts, o.Value)
+		}
 		out = append(out, ConfigDecl{
 			Key: c.Key, Label: c.Label, Type: typ,
 			Default: c.Default, Description: c.Description, Secret: c.Secret,
-			Min: c.Min, Max: c.Max, Step: c.Step, Unit: c.Unit,
+			Min: c.Min, Max: c.Max, Step: c.Step, Unit: c.Unit, Options: opts,
 		})
 	}
 	return out, nil
@@ -142,19 +156,21 @@ func validateConfigValue(d ConfigDecl, v string) error {
 	}
 	switch d.Type {
 	case "number":
+		// `number` matches the native manifest's single numeric type: integer or
+		// decimal (e.g. gh-runner CPUs step 0.25). Bounds compare as floats.
 		if v != "" {
-			if !reNumber.MatchString(v) {
-				return fmt.Errorf("config %q: not an integer: %q", d.Key, v)
+			n, err := strconv.ParseFloat(v, 64)
+			if err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
+				return fmt.Errorf("config %q: not a finite number: %q", d.Key, v)
 			}
-			n, _ := strconv.Atoi(v)
 			if d.Min != "" {
-				if lo, err := strconv.Atoi(d.Min); err == nil && n < lo {
-					return fmt.Errorf("config %q: %d below minimum %d", d.Key, n, lo)
+				if lo, err := strconv.ParseFloat(d.Min, 64); err == nil && n < lo {
+					return fmt.Errorf("config %q: %s below minimum %s", d.Key, v, d.Min)
 				}
 			}
 			if d.Max != "" {
-				if hi, err := strconv.Atoi(d.Max); err == nil && n > hi {
-					return fmt.Errorf("config %q: %d above maximum %d", d.Key, n, hi)
+				if hi, err := strconv.ParseFloat(d.Max, 64); err == nil && n > hi {
+					return fmt.Errorf("config %q: %s above maximum %s", d.Key, v, d.Max)
 				}
 			}
 		}
@@ -165,6 +181,15 @@ func validateConfigValue(d ConfigDecl, v string) error {
 	case "url":
 		if v != "" && !strings.HasPrefix(v, "http://") && !strings.HasPrefix(v, "https://") {
 			return fmt.Errorf("config %q: url must be http/https: %q", d.Key, v)
+		}
+	case "select":
+		if v != "" {
+			for _, o := range d.Options {
+				if v == o {
+					return nil
+				}
+			}
+			return fmt.Errorf("config %q: %q not in options %v", d.Key, v, d.Options)
 		}
 	}
 	return nil

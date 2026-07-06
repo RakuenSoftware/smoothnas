@@ -95,3 +95,54 @@ func TestConfigSchema_MinMax(t *testing.T) {
 		t.Errorf("in-range rejected: %v", err)
 	}
 }
+
+func TestResolveConfigEnv_AcceptsFloat(t *testing.T) {
+	s := []ConfigDecl{{Key: "CPUS", Type: "number", Min: "0", Default: "0"}}
+	if _, _, err := ResolveConfigEnv(s, map[string]string{"CPUS": "0.25"}); err != nil {
+		t.Fatalf("float rejected: %v", err)
+	}
+	if _, _, err := ResolveConfigEnv(s, map[string]string{"CPUS": "-1"}); err == nil {
+		t.Error("expected reject below min 0")
+	}
+}
+
+func TestConfigSchema_Select(t *testing.T) {
+	y := "name: p\nservices: {s: {image: x}}\nx-smoothnas:\n  config:\n    - {key: Q, type: select, default: q8_0, options: [{value: q8_0}, {value: q4_0}]}\n"
+	got, err := ConfigSchema([]byte(y))
+	if err != nil {
+		t.Fatalf("ConfigSchema: %v", err)
+	}
+	if len(got[0].Options) != 2 {
+		t.Fatalf("options not parsed: %+v", got[0])
+	}
+	if _, _, err := ResolveConfigEnv(got, map[string]string{"Q": "q4_0"}); err != nil {
+		t.Errorf("valid option rejected: %v", err)
+	}
+	if _, _, err := ResolveConfigEnv(got, map[string]string{"Q": "q2_0"}); err == nil {
+		t.Error("expected reject out-of-set value")
+	}
+	// select without options must fail schema
+	if _, err := ConfigSchema([]byte("name: p\nservices: {s: {image: x}}\nx-smoothnas:\n  config:\n    - {key: Q, type: select}\n")); err == nil {
+		t.Error("expected error: select without options")
+	}
+}
+
+func TestConfigValue_RejectsNonFiniteAndAcceptsBooleanAlias(t *testing.T) {
+	num := []ConfigDecl{{Key: "N", Type: "number"}}
+	for _, bad := range []string{"NaN", "Inf", "-Inf"} {
+		if _, _, err := ResolveConfigEnv(num, map[string]string{"N": bad}); err == nil {
+			t.Errorf("expected reject %q", bad)
+		}
+	}
+	if _, _, err := ResolveConfigEnv(num, map[string]string{"N": "262144"}); err != nil {
+		t.Errorf("integer rejected: %v", err)
+	}
+	// native "boolean" spelling normalizes to bool
+	s, err := ConfigSchema([]byte("name: p\nservices: {s: {image: x}}\nx-smoothnas:\n  config:\n    - {key: B, type: boolean, default: \"true\"}\n"))
+	if err != nil {
+		t.Fatalf("boolean alias: %v", err)
+	}
+	if s[0].Type != "bool" {
+		t.Errorf("boolean not normalized to bool: %q", s[0].Type)
+	}
+}

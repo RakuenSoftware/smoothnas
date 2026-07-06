@@ -353,11 +353,15 @@ func manifestFromCompose(data []byte) (*Manifest, error) {
 		return nil, err
 	}
 	for _, d := range schema {
-		m.Config = append(m.Config, ConfigField{
+		cf := ConfigField{
 			Key: d.Key, Label: d.Label, Type: d.Type,
 			Default: d.Default, Description: d.Description, Secret: d.Secret,
 			Min: d.Min, Max: d.Max, Step: d.Step, Unit: d.Unit,
-		})
+		}
+		for _, v := range d.Options {
+			cf.Options = append(cf.Options, ConfigOption{Value: v})
+		}
+		m.Config = append(m.Config, cf)
 	}
 	return m, nil
 }
