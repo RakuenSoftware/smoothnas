@@ -1,256 +1,285 @@
-apiVersion: smoothnas.io/v1
-kind: Plugin
-metadata:
-  name: vllm
-  version: 0.2.5
-  description: |
-    vLLM OpenAI-compatible inference server using the official CUDA image for
+# vllm — plain docker-compose plugin (compose-migration). GPU/runtime access is standard
+# compose devices/device_cgroup_rules/cap_add; operator config is x-smoothnas.config.
+# Converted from the native manifest.
+name: vllm
+services:
+  vllm:
+    image: ghcr.io/rakuensoftware/smoothnas-plugin-vllm:0.2.5-cuda@sha256:f6f3cfbc532a4c35f29dd92f3c7e508f79c47509fb8855da40c1b69aa0e15a88
+    restart: unless-stopped
+    mem_limit: ${MEMORY_LIMIT:-16GiB}
+    pids_limit: 1024
+    oom_score_adj: 100
+    environment:
+      SMOOTHNAS_GPU: ${SMOOTHNAS_GPU:-}
+      MODEL_ID: ${MODEL_ID:-unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q5_K_XL}
+      HF_TOKEN: ${HF_TOKEN:-}
+      VLLM_TOKENIZER: ${VLLM_TOKENIZER:-google/gemma-4-26B-A4B-it}
+      VLLM_HF_CONFIG_PATH: ${VLLM_HF_CONFIG_PATH:-google/gemma-4-26B-A4B-it}
+      VLLM_LOAD_FORMAT: ${VLLM_LOAD_FORMAT:-gguf}
+      VLLM_SERVED_MODEL_NAME: ${VLLM_SERVED_MODEL_NAME:-gemma4-q5-26b}
+      VLLM_TENSOR_PARALLEL_SIZE: ${VLLM_TENSOR_PARALLEL_SIZE:-1}
+      VLLM_MAX_MODEL_LEN: ${VLLM_MAX_MODEL_LEN:-65536}
+      VLLM_MAX_NUM_SEQS: ${VLLM_MAX_NUM_SEQS:-4}
+      VLLM_MAX_NUM_BATCHED_TOKENS: ${VLLM_MAX_NUM_BATCHED_TOKENS:-262144}
+      VLLM_GPU_MEMORY_UTILIZATION: ${VLLM_GPU_MEMORY_UTILIZATION:-0.92}
+      VLLM_KV_CACHE_DTYPE: ${VLLM_KV_CACHE_DTYPE:-turboquant_k8v4}
+      VLLM_KV_CACHE_MEMORY_BYTES: ${VLLM_KV_CACHE_MEMORY_BYTES:-}
+      VLLM_CPU_OFFLOAD_GB: ${VLLM_CPU_OFFLOAD_GB:-}
+      VLLM_SPECULATIVE_CONFIG: ${VLLM_SPECULATIVE_CONFIG:-{"method":"mtp","model":"google/gemma-4-26B-A4B-it-assistant","num_speculative_tokens":4}}
+      VLLM_TOOL_CALL_PARSER: ${VLLM_TOOL_CALL_PARSER:-}
+      VLLM_REASONING_PARSER: ${VLLM_REASONING_PARSER:-}
+      VLLM_ENABLE_AUTO_TOOL_CHOICE: ${VLLM_ENABLE_AUTO_TOOL_CHOICE:-off}
+      VLLM_CHAT_TEMPLATE: ${VLLM_CHAT_TEMPLATE:-}
+      VLLM_LIMIT_MM_PER_PROMPT: ${VLLM_LIMIT_MM_PER_PROMPT:-}
+      VLLM_ENABLE_PREFIX_CACHING: ${VLLM_ENABLE_PREFIX_CACHING:-on}
+      VLLM_ENABLE_CHUNKED_PREFILL: ${VLLM_ENABLE_CHUNKED_PREFILL:-auto}
+      VLLM_ASYNC_SCHEDULING: ${VLLM_ASYNC_SCHEDULING:-off}
+      VLLM_DTYPE: ${VLLM_DTYPE:-float16}
+      VLLM_QUANTIZATION: ${VLLM_QUANTIZATION:-none}
+      VLLM_TRUST_REMOTE_CODE: ${VLLM_TRUST_REMOTE_CODE:-on}
+      VLLM_ADDITIONAL_CONFIG: ${VLLM_ADDITIONAL_CONFIG:-}
+      MEMORY_LIMIT: ${MEMORY_LIMIT:-16GiB}
+      SMOOTHNAS_BEARER_EXPECTED: ${SMOOTHNAS_BEARER_EXPECTED:-}
+    devices:
+    - /dev/nvidiactl:/dev/nvidiactl
+    - /dev/nvidia-uvm:/dev/nvidia-uvm
+    - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+    - /dev/nvidia0:/dev/nvidia0
+    device_cgroup_rules:
+    - c 195:* rwm
+    - c 509:* rwm
+    volumes:
+    - huggingface-cache:/root/.cache/huggingface
+    expose:
+    - '8080'
+volumes:
+  huggingface-cache:
+    x-smoothnas:
+      tier: NVME
+      minSize: 50G
+x-smoothnas:
+  description: 'vLLM OpenAI-compatible inference server using the official CUDA image for
+
     NVIDIA GPUs. Hugging Face cache data lives on the NVME slot of an
+
     operator-chosen tier. Bearer-injected auth is enforced by the SmoothNAS
-    wrapper before requests reach vLLM.
+
+    wrapper before requests reach vLLM.'
   vendor: smoothnas
   homepage: https://github.com/RakuenSoftware/smoothnas-plugin-vllm
-artifact:
-  type: oci-image
-  image: ghcr.io/rakuensoftware/smoothnas-plugin-vllm:0.2.5-cuda
-  digest: sha256:f6f3cfbc532a4c35f29dd92f3c7e508f79c47509fb8855da40c1b69aa0e15a88
-container:
-  restartPolicy: unless-stopped
-  resources:
-    memory: ${MEMORY_LIMIT}
-volumes:
-  - name: huggingface-cache
-    mode: tier-bound
-    slot: NVME
-    minSize: 50G
-    bind: /root/.cache/huggingface
-ports:
-  - name: http
+  ui:
+    service: vllm
     port: 8080
-    protocol: tcp
-    expose: true
-ui:
-  embed:
     path: /
     auth: bearer-injected
-profiles:
-  - gpu-nvidia
-  - default-limits
-config:
+  config:
   - key: SMOOTHNAS_GPU
-    type: gpu
     label: GPU
-    gpuVendor: nvidia
-    default: ''
-    description: |
-      NVIDIA GPU device to pass through. Leave automatic to use the host
+    type: string
+    description: 'NVIDIA GPU device to pass through. Leave automatic to use the host
+
       default; selecting a device narrows passthrough to that GPU.
-  - key: MODEL_ID
-    type: string
-    label: Model
-    default: unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q5_K_XL
-    description: >-
-      Hugging Face model id, local model path, or GGUF repo:quant passed to
-      vLLM.
-  - key: HF_TOKEN
-    type: string
-    label: Hugging Face token
+
+      '
     default: ''
-    secret: true
+  - key: MODEL_ID
+    label: Model
+    type: string
+    description: Hugging Face model id, local model path, or GGUF repo:quant passed to vLLM.
+    default: unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q5_K_XL
+  - key: HF_TOKEN
+    label: Hugging Face token
+    type: string
     description: Optional Hugging Face token for gated model downloads.
+    secret: true
   - key: VLLM_TOKENIZER
-    type: string
     label: Tokenizer
-    default: google/gemma-4-26B-A4B-it
-    description: Tokenizer id/path, required when MODEL_ID points at a GGUF quant.
-  - key: VLLM_HF_CONFIG_PATH
     type: string
-    label: HF config path
+    description: Tokenizer id/path, required when MODEL_ID points at a GGUF quant.
     default: google/gemma-4-26B-A4B-it
+  - key: VLLM_HF_CONFIG_PATH
+    label: HF config path
+    type: string
     description: Hugging Face config id/path for GGUF models.
+    default: google/gemma-4-26B-A4B-it
   - key: VLLM_LOAD_FORMAT
-    type: select
     label: Load format
+    type: select
+    description: vLLM weight loader selection.
     default: gguf
     options:
-      - value: auto
-      - value: gguf
-      - value: safetensors
-      - value: bitsandbytes
-    description: vLLM weight loader selection.
+    - value: auto
+    - value: gguf
+    - value: safetensors
+    - value: bitsandbytes
   - key: VLLM_SERVED_MODEL_NAME
-    type: string
     label: Served model name
-    default: gemma4-q5-26b
+    type: string
     description: Optional OpenAI model name exposed by vLLM.
+    default: gemma4-q5-26b
   - key: VLLM_TENSOR_PARALLEL_SIZE
-    type: number
     label: Tensor parallel size
-    default: '1'
-    min: '1'
-    step: '1'
+    type: number
     description: Number of GPUs used for tensor parallelism.
-  - key: VLLM_MAX_MODEL_LEN
-    type: number
-    label: Max model length
-    default: '65536'
-    min: '1024'
-    step: '1024'
-    unit: tokens
-    description: Maximum per-request context length passed to vLLM.
-  - key: VLLM_MAX_NUM_SEQS
-    type: number
-    label: Max sequences
-    default: '4'
     min: '1'
     step: '1'
-    description: Maximum number of concurrent 64k slots.
-  - key: VLLM_MAX_NUM_BATCHED_TOKENS
+    default: '1'
+  - key: VLLM_MAX_MODEL_LEN
+    label: Max model length
     type: number
-    label: Max batched tokens
-    default: '262144'
+    description: Maximum per-request context length passed to vLLM.
     min: '1024'
     step: '1024'
     unit: tokens
-    description: Scheduler token budget for four 64k slots.
-  - key: VLLM_GPU_MEMORY_UTILIZATION
+    default: '65536'
+  - key: VLLM_MAX_NUM_SEQS
+    label: Max sequences
     type: number
+    description: Maximum number of concurrent 64k slots.
+    min: '1'
+    step: '1'
+    default: '4'
+  - key: VLLM_MAX_NUM_BATCHED_TOKENS
+    label: Max batched tokens
+    type: number
+    description: Scheduler token budget for four 64k slots.
+    min: '1024'
+    step: '1024'
+    unit: tokens
+    default: '262144'
+  - key: VLLM_GPU_MEMORY_UTILIZATION
     label: GPU memory utilization
-    default: '0.92'
+    type: number
+    description: Fraction of GPU memory vLLM may reserve.
     min: '0.10'
     max: '1'
     step: '0.01'
-    description: Fraction of GPU memory vLLM may reserve.
+    default: '0.92'
   - key: VLLM_KV_CACHE_DTYPE
-    type: select
     label: KV cache dtype
+    type: select
+    description: vLLM KV cache storage type. turboquant_k8v4 is the TurboQuant K8/V4 preset.
     default: turboquant_k8v4
     options:
-      - value: auto
-      - value: fp8
-      - value: fp8_e4m3
-      - value: fp8_e5m2
-      - value: int8_per_token_head
-      - value: turboquant_k8v4
-    description: >-
-      vLLM KV cache storage type. turboquant_k8v4 is the TurboQuant K8/V4
-      preset.
+    - value: auto
+    - value: fp8
+    - value: fp8_e4m3
+    - value: fp8_e5m2
+    - value: int8_per_token_head
+    - value: turboquant_k8v4
   - key: VLLM_KV_CACHE_MEMORY_BYTES
-    type: string
     label: KV cache memory
-    default: ''
+    type: string
     description: Optional fixed KV cache size accepted by vLLM, such as 20G.
-  - key: VLLM_CPU_OFFLOAD_GB
-    type: number
-    label: CPU offload GiB
     default: ''
+  - key: VLLM_CPU_OFFLOAD_GB
+    label: CPU offload GiB
+    type: number
+    description: Optional CPU offload budget for fitting larger checkpoints.
     min: '0'
     step: '1'
-    description: Optional CPU offload budget for fitting larger checkpoints.
+    default: ''
   - key: VLLM_SPECULATIVE_CONFIG
-    type: string
     label: Speculative config
-    default: >-
-      {"method":"mtp","model":"google/gemma-4-26B-A4B-it-assistant","num_speculative_tokens":4}
+    type: string
     description: JSON passed to --speculative-config for Gemma4 MTP.
+    default: '{"method":"mtp","model":"google/gemma-4-26B-A4B-it-assistant","num_speculative_tokens":4}'
   - key: VLLM_TOOL_CALL_PARSER
-    type: string
     label: Tool call parser
-    default: ''
-    description: Optional parser passed to --tool-call-parser, such as gemma4.
-  - key: VLLM_REASONING_PARSER
     type: string
-    label: Reasoning parser
+    description: Optional parser passed to --tool-call-parser, such as gemma4.
     default: ''
+  - key: VLLM_REASONING_PARSER
+    label: Reasoning parser
+    type: string
     description: Optional parser passed to --reasoning-parser, such as gemma4.
+    default: ''
   - key: VLLM_ENABLE_AUTO_TOOL_CHOICE
-    type: select
     label: Auto tool choice
+    type: select
+    description: Enable vLLM automatic tool-call detection when a tool parser is configured.
     default: 'off'
     options:
-      - value: 'off'
-      - value: 'on'
-    description: >-
-      Enable vLLM automatic tool-call detection when a tool parser is
-      configured.
+    - value: 'off'
+    - value: 'on'
   - key: VLLM_CHAT_TEMPLATE
-    type: string
     label: Chat template
-    default: ''
-    description: Optional chat template path passed to --chat-template.
-  - key: VLLM_LIMIT_MM_PER_PROMPT
     type: string
-    label: Multimodal limits
+    description: Optional chat template path passed to --chat-template.
     default: ''
-    description: >-
-      Optional JSON passed to --limit-mm-per-prompt, such as
-      {"image":0,"audio":0}.
+  - key: VLLM_LIMIT_MM_PER_PROMPT
+    label: Multimodal limits
+    type: string
+    description: Optional JSON passed to --limit-mm-per-prompt, such as {"image":0,"audio":0}.
+    default: ''
   - key: VLLM_ENABLE_PREFIX_CACHING
-    type: select
     label: Prefix caching
+    type: select
+    description: Optional vLLM prefix cache toggle.
     default: 'on'
     options:
-      - value: auto
-      - value: 'off'
-      - value: 'on'
-    description: Optional vLLM prefix cache toggle.
+    - value: auto
+    - value: 'off'
+    - value: 'on'
   - key: VLLM_ENABLE_CHUNKED_PREFILL
-    type: select
     label: Chunked prefill
+    type: select
+    description: Optional vLLM chunked prefill toggle.
     default: auto
     options:
-      - value: auto
-      - value: 'off'
-      - value: 'on'
-    description: Optional vLLM chunked prefill toggle.
+    - value: auto
+    - value: 'off'
+    - value: 'on'
   - key: VLLM_ASYNC_SCHEDULING
-    type: select
     label: Async scheduling
+    type: select
+    description: Enable --async-scheduling for higher-throughput vLLM scheduling.
     default: 'off'
     options:
-      - value: 'off'
-      - value: 'on'
-    description: Enable --async-scheduling for higher-throughput vLLM scheduling.
+    - value: 'off'
+    - value: 'on'
   - key: VLLM_DTYPE
-    type: select
     label: Dtype
+    type: select
+    description: vLLM dtype selection.
     default: float16
     options:
-      - value: auto
-      - value: float16
-      - value: bfloat16
-    description: vLLM dtype selection.
+    - value: auto
+    - value: float16
+    - value: bfloat16
   - key: VLLM_QUANTIZATION
-    type: select
     label: Quantization
+    type: select
+    description: Optional vLLM quantization mode.
     default: none
     options:
-      - value: none
-      - value: fp8
-      - value: awq
-      - value: gptq
-    description: Optional vLLM quantization mode.
+    - value: none
+    - value: fp8
+    - value: awq
+    - value: gptq
   - key: VLLM_TRUST_REMOTE_CODE
-    type: select
     label: Trust remote code
+    type: select
+    description: Enable only for model repos whose custom code you trust.
     default: 'on'
     options:
-      - value: 'off'
-      - value: 'on'
-    description: Enable only for model repos whose custom code you trust.
+    - value: 'off'
+    - value: 'on'
   - key: VLLM_ADDITIONAL_CONFIG
-    type: string
     label: Additional config
-    default: ''
-    description: Optional raw JSON passed to --additional-config.
-  - key: MEMORY_LIMIT
     type: string
+    description: Optional raw JSON passed to --additional-config.
+    default: ''
+  - key: MEMORY_LIMIT
     label: Container memory
-    default: 16GiB
+    type: string
     description: LXC memory limit for the vLLM container.
+    default: 16GiB
   - key: SMOOTHNAS_BEARER_EXPECTED
     type: string
-    secret: true
-    description: |
-      Auto-populated by SmoothNAS to match the rotated bearer token.
+    description: 'Auto-populated by SmoothNAS to match the rotated bearer token.
+
       Do not edit manually; the wrapper validates every request against it.
+
+      '
+    secret: true
