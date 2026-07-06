@@ -7,18 +7,34 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"time"
 )
+
+// createContainerTimeout bounds a container create when the caller passes no
+// deadline. Generous because create clones the image rootfs (multi-GB) before
+// the daemon replies; it only needs to exceed the slowest realistic clone.
+const createContainerTimeout = 30 * time.Minute
 
 // CreateContainer issues POST /containers/create?name=<name>. The
 // returned ID is the daemon's identifier; tierd records it in
 // plugin_instances.container_id.
 func (c *Client) CreateContainer(ctx context.Context, name string, req CreateContainerRequest) (CreateContainerResponse, error) {
+	// Creating from a large image clones a multi-GB rootfs before the daemon
+	// replies, which can far exceed the default 60s ResponseHeaderTimeout and
+	// spuriously mark the plugin failed. Use the slow client (no header timeout)
+	// and, if the caller set no deadline, a generous one so it still can't hang
+	// forever against a wedged daemon.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, createContainerTimeout)
+		defer cancel()
+	}
 	q := url.Values{}
 	if name != "" {
 		q.Set("name", name)
 	}
 	var out CreateContainerResponse
-	if err := c.postJSON(ctx, "/containers/create", q, req, &out); err != nil {
+	if err := c.postJSONVia(ctx, c.httpSlow, "/containers/create", q, req, &out); err != nil {
 		return CreateContainerResponse{}, err
 	}
 	return out, nil
