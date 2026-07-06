@@ -255,18 +255,48 @@ func (i *Installer) installCompose(yamlBytes []byte, tiers TierAssignments, conf
 			return nil, err
 		}
 	}
-	// Secret env values (declared via top-level x-smoothnas.secrets) go to the
-	// secret store, NOT the compose file / a .env / plugin_config — at `up` tierd
-	// injects them into the subprocess env so compose resolves ${key}.
+	// Split operator config into the two injection channels by secret-ness.
+	// x-smoothnas.config is the source of truth (its secret:true entries), unioned
+	// with the legacy top-level x-smoothnas.secrets list for back-compat. Secret
+	// values go to the secret store (subprocess env at `up`, never on disk);
+	// non-secret values go to plugin_config and are rendered into the compose .env
+	// at Materialise (with schema defaults) — see composeSpecResolved.
+	schema, err := compose.ConfigSchema(yamlBytes)
+	if err != nil {
+		return nil, err
+	}
+	secretKey := map[string]bool{}
+	declared := map[string]bool{}
 	if keys, err := compose.SecretKeys(yamlBytes); err == nil {
 		for _, k := range keys {
+			secretKey[k] = true
+			declared[k] = true
+		}
+	}
+	for _, d := range schema {
+		declared[d.Key] = true
+		if d.Secret {
+			secretKey[d.Key] = true
+		}
+	}
+	nonSecret := map[string]string{}
+	for k, v := range config {
+		if !declared[k] {
+			continue // ignore operator answers for keys the plugin never declared
+		}
+		if secretKey[k] {
 			// Store when the operator supplied the key at all (an explicit empty
 			// value is honoured, not silently dropped).
-			if v, ok := config[k]; ok {
-				if err := i.store.SetComposeSecret(name, k, v); err != nil {
-					return nil, err
-				}
+			if err := i.store.SetComposeSecret(name, k, v); err != nil {
+				return nil, err
 			}
+			continue
+		}
+		nonSecret[k] = v
+	}
+	for k, v := range nonSecret {
+		if err := i.store.SetComposeConfig(name, k, v); err != nil {
+			return nil, err
 		}
 	}
 	return i.store.Get(name)

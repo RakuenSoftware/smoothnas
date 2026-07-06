@@ -33,6 +33,14 @@ func detachRequest(r *http.Request) context.Context {
 // PluginsHandler exposes the plugin subsystem over HTTP. Mirrors
 // the surface tierd-cli already has + the SSE log/event streams the
 // UI needs. Every endpoint is admin-only — the router gates that.
+// runtimeReady reports whether a container-runtime-backed lifecycle is wired
+// AND its runtime is confirmed reachable. Plugin verbs that need the runtime
+// gate on this so they return a clean 503 both when no lifecycle is wired and
+// while the runtime is still warming up in the background at boot.
+func (h *PluginsHandler) runtimeReady() bool {
+	return h.lifecycle != nil && h.lifecycle.RuntimeReady()
+}
+
 type PluginsHandler struct {
 	store        *plugin.Store
 	installer    *plugin.Installer
@@ -627,7 +635,7 @@ func (h *PluginsHandler) install(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
-	if h.lifecycle != nil {
+	if h.runtimeReady() {
 		opCtx := detachRequest(r)
 		if err := h.lifecycle.Materialise(opCtx, rec.Plugin.Name); err != nil {
 			jsonErrorCoded(w, fmt.Sprintf("autostart materialise: %v", err), http.StatusInternalServerError, "plugins.lifecycle_failed")
@@ -694,7 +702,7 @@ func (h *PluginsHandler) update(w http.ResponseWriter, r *http.Request, name str
 		return
 	}
 
-	if h.lifecycle != nil {
+	if h.runtimeReady() {
 		opCtx := detachRequest(r)
 		if err := h.lifecycle.Materialise(opCtx, name); err != nil {
 			jsonErrorCoded(w, fmt.Sprintf("update materialise: %v", err), http.StatusInternalServerError, "plugins.lifecycle_failed")
@@ -717,7 +725,7 @@ func (h *PluginsHandler) update(w http.ResponseWriter, r *http.Request, name str
 
 // lifecycleVerb dispatches start/stop/restart/materialise.
 func (h *PluginsHandler) lifecycleVerb(w http.ResponseWriter, r *http.Request, name, verb string) {
-	if h.lifecycle == nil {
+	if !h.runtimeReady() {
 		jsonErrorCoded(w, "runtime not configured", http.StatusServiceUnavailable, "plugins.runtime_unavailable")
 		return
 	}
@@ -834,7 +842,7 @@ func (h *PluginsHandler) setPinnedImage(w http.ResponseWriter, r *http.Request, 
 	// restart reuses the already-resolved image_ref). Detached so a client disconnect
 	// can't strand the plugin mid-swap.
 	applied := false
-	if h.lifecycle != nil {
+	if h.runtimeReady() {
 		opCtx := detachRequest(r)
 		wasRunning := rec.Plugin.State == plugin.StateRunning
 		if err := h.lifecycle.Materialise(opCtx, name); err != nil {
@@ -866,7 +874,7 @@ func (h *PluginsHandler) setPinnedImage(w http.ResponseWriter, r *http.Request, 
 // 404 when the plugin doesn't exist; 200 with the new token on
 // success.
 func (h *PluginsHandler) rotateToken(w http.ResponseWriter, r *http.Request, name string) {
-	if h.lifecycle == nil {
+	if !h.runtimeReady() {
 		jsonErrorCoded(w, "runtime not configured", http.StatusServiceUnavailable, "plugins.runtime_unavailable")
 		return
 	}
@@ -921,7 +929,7 @@ func (h *PluginsHandler) uninstall(w http.ResponseWriter, _ *http.Request, name 
 // for fan-out (a small follow-up — kept here so the URL shape is
 // stable).
 func (h *PluginsHandler) streamLogs(w http.ResponseWriter, r *http.Request, name string) {
-	if h.lifecycle == nil {
+	if !h.runtimeReady() {
 		jsonErrorCoded(w, "runtime not configured", http.StatusServiceUnavailable, "plugins.runtime_unavailable")
 		return
 	}
@@ -1035,7 +1043,7 @@ type composeServicesResponse struct {
 // (Phase 4: the data the UI renders — project rollup + each service's
 // state/health/published ports).
 func (h *PluginsHandler) composeServices(w http.ResponseWriter, r *http.Request, name string) {
-	if h.lifecycle == nil {
+	if !h.runtimeReady() {
 		jsonErrorCoded(w, "plugin runtime unavailable", http.StatusServiceUnavailable, "plugins.runtime_unavailable")
 		return
 	}
@@ -1090,7 +1098,7 @@ type scaleInstancesRequest struct {
 //	plugins.runtime_unavailable              — no Lifecycle wired
 //	plugins.not_found                        — typo'd plugin name
 func (h *PluginsHandler) scaleInstances(w http.ResponseWriter, r *http.Request, name string) {
-	if h.lifecycle == nil {
+	if !h.runtimeReady() {
 		jsonErrorCoded(w, "runtime not configured", http.StatusServiceUnavailable, "plugins.runtime_unavailable")
 		return
 	}

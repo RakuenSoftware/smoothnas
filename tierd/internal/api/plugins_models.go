@@ -94,7 +94,7 @@ func (h *PluginsHandler) installModel(w http.ResponseWriter, r *http.Request, na
 			return
 		}
 	}
-	if h.lifecycle == nil {
+	if !h.runtimeReady() {
 		jsonErrorCoded(w, "runtime not configured", http.StatusServiceUnavailable, "plugins.runtime_unavailable")
 		return
 	}
@@ -163,7 +163,7 @@ func (h *PluginsHandler) runModelInstallJob(
 	}
 
 	if shouldStart {
-		if h.lifecycle == nil {
+		if !h.runtimeReady() {
 			return nil, fmt.Errorf("runtime not configured")
 		}
 		jobs.UpdateProgress(jobID, "Preparing runtime...")

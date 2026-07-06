@@ -3,7 +3,7 @@ import { useI18n } from '@rakuensoftware/smoothgui';
 import { usePreload } from '../../contexts/PreloadContext';
 import { useToast } from '../../contexts/ToastContext';
 import { api } from '../../api/api';
-import { extractError } from '../../utils/errors';
+import { extractError, isApiError } from '../../utils/errors';
 import Spinner from '../../components/Spinner/Spinner';
 import ConfirmDialog from '../../components/ConfirmDialog/ConfirmDialog';
 import NamespaceFiles from './NamespaceFiles';
@@ -278,32 +278,59 @@ export default function Tiers() {
     }
   }
 
+  // performDelete issues the delete. force=false is the first confirm; if the
+  // backend refuses with 409 requires_force (something is still using the pool),
+  // we surface what's holding it and ask for a second, forcing confirm rather
+  // than dead-ending. force=true then blows it all away.
+  function performDelete(name: string, force: boolean) {
+    setConfirmVisible(false);
+    // Optimistically mark the tier destroying so the dim/spinner appears
+    // immediately, even if the API call is slow (e.g. while tierd tears down a
+    // busy smoothfs mount). Polling reconciles the state once tierd finishes.
+    setTiers(prev => prev.map((t: any) =>
+      t.name === name ? { ...t, state: 'destroying' } : t));
+    startPolling();
+    api.deleteTier(name, force).then(() => {
+      load(true);
+      invalidatePreload('arrays');
+      invalidatePreload('filesystemArrays');
+    }).catch(e => {
+      // Roll back the optimistic state.
+      load(true);
+      // First confirm refused because the pool is still in use → ask again to
+      // force-delete, listing what's holding it. Any other error is surfaced.
+      if (!force && isApiError(e) && e.status === 409 &&
+          (e.code === 'tiers.consumers_present' || (e.body as { requires_force?: boolean })?.requires_force)) {
+        const consumers = ((e.body as { consumers?: string[] })?.consumers) || [];
+        promptForceDelete(name, consumers);
+        return;
+      }
+      const msg = extractError(e, t('tiers.error.delete'));
+      setError(msg);
+      toast.error(msg);
+    });
+  }
+
+  // promptForceDelete is the second "are you really sure" confirm, shown when
+  // the pool is still in use. It names the consumers that will be torn down.
+  function promptForceDelete(name: string, consumers: string[]) {
+    const list = consumers.length
+      ? consumers.join(', ')
+      : t('tiers.confirm.forceDeleteUnknownConsumers');
+    setConfirmTitle(t('tiers.confirm.forceDeleteTitle'));
+    setConfirmMessage(t('tiers.confirm.forceDeleteMessage', { name, consumers: list }));
+    setConfirmClass('btn danger');
+    setConfirmText(t('tiers.confirm.forceDeleteConfirm'));
+    confirmAction.current = () => performDelete(name, true);
+    setConfirmVisible(true);
+  }
+
   function deleteTier(name: string) {
     setConfirmTitle(t('tiers.confirm.deleteTitle'));
     setConfirmMessage(t('tiers.confirm.deleteMessage', { name }));
     setConfirmClass('btn danger');
     setConfirmText(t('common.delete'));
-    confirmAction.current = () => {
-      setConfirmVisible(false);
-      // Optimistically mark the tier destroying so the dim/spinner
-      // appears immediately, even if the API call is slow (e.g. while
-      // tierd is tearing down a busy smoothfs mount). Polling reconciles
-      // the state once the backend finishes.
-      setTiers(prev => prev.map((t: any) =>
-        t.name === name ? { ...t, state: 'destroying' } : t));
-      startPolling();
-      api.deleteTier(name).then(() => {
-        load(true);
-        invalidatePreload('arrays');
-        invalidatePreload('filesystemArrays');
-      }).catch(e => {
-        // Roll back the optimistic state so the user can retry.
-        load(true);
-        const msg = extractError(e, t('tiers.error.delete'));
-        setError(msg);
-        toast.error(msg);
-      });
-    };
+    confirmAction.current = () => performDelete(name, false);
     setConfirmVisible(true);
   }
 

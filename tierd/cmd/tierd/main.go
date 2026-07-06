@@ -352,22 +352,15 @@ func setupPluginRuntime(pluginStore *plugin.Store, catalog *plugin.Catalog) (*pl
 	}
 
 	rt := pluginruntime.NewClient(socketPath)
-	readyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	err := rt.WaitForReady(readyCtx)
-	cancel()
-	if err != nil {
-		log.Printf("plugin runtime unavailable at %s: %v", socketPath, err)
-		return nil, func() {}
-	}
 
-	if info, err := rt.Info(context.Background()); err != nil {
-		log.Printf("plugin runtime ready at %s; info unavailable: %v", socketPath, err)
-	} else {
-		log.Printf("plugin runtime ready at %s: version=%s driver=%s containers=%d images=%d",
-			socketPath, info.ServerVersion, info.Driver, info.Containers, info.Images)
-	}
-
+	// Construct the lifecycle eagerly and return immediately so the HTTP API
+	// (and thus login) comes up without waiting on the container runtime.
+	// Blocking here on WaitForReady (up to 30s when the runtime is down/slow, or
+	// indefinitely if it hangs) previously kept the whole management UI returning
+	// 502 through nginx for the entire boot. Mark the runtime not-ready until a
+	// background probe confirms it; plugin verbs return a clean 503 until then.
 	lifecycle := plugin.NewLifecycle(pluginStore, rt)
+	lifecycle.SetRuntimeReady(false)
 	lifecycle.SetProxy(plugin.NewProxy())
 	lifecycle.SetLXCPath(lxcPathFromConfig())
 	if catalog != nil {
@@ -377,18 +370,36 @@ func setupPluginRuntime(pluginStore *plugin.Store, catalog *plugin.Catalog) (*pl
 	// against the same runtime socket, materialised under /var/lib/smoothnas/compose.
 	lifecycle.SetComposeBackend(compose.NewBackend(compose.New(socketPath, nil), "/var/lib/smoothnas/compose"))
 
-	reconciler := plugin.NewReconciler(pluginStore, rt)
-	syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if err := reconciler.Sync(syncCtx); err != nil {
-		log.Printf("plugin runtime reconcile: %v", err)
-	}
-	syncCancel()
-
 	watchCtx, stopWatch := context.WithCancel(context.Background())
-	go reconciler.WatchEvents(watchCtx)
-	go runRuntimeLXCCleanupLoop(watchCtx, lifecycle)
-	go runComposeReconcileLoop(watchCtx, lifecycle)
 	go func() {
+		readyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := rt.WaitForReady(readyCtx)
+		cancel()
+		if err != nil {
+			log.Printf("plugin runtime unavailable at %s: %v (plugin features stay disabled until it becomes reachable)", socketPath, err)
+			return
+		}
+		if info, err := rt.Info(context.Background()); err != nil {
+			log.Printf("plugin runtime ready at %s; info unavailable: %v", socketPath, err)
+		} else {
+			log.Printf("plugin runtime ready at %s: version=%s driver=%s containers=%d images=%d",
+				socketPath, info.ServerVersion, info.Driver, info.Containers, info.Images)
+		}
+
+		reconciler := plugin.NewReconciler(pluginStore, rt)
+		syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := reconciler.Sync(syncCtx); err != nil {
+			log.Printf("plugin runtime reconcile: %v", err)
+		}
+		syncCancel()
+
+		// Flip verbs live only after a successful sync, so the UI does not offer
+		// actions against a half-reconciled runtime.
+		lifecycle.SetRuntimeReady(true)
+
+		go reconciler.WatchEvents(watchCtx)
+		go runRuntimeLXCCleanupLoop(watchCtx, lifecycle)
+		go runComposeReconcileLoop(watchCtx, lifecycle)
 		if err := lifecycle.AutostartAll(context.Background()); err != nil {
 			log.Printf("plugin runtime autostart: %v", err)
 		}

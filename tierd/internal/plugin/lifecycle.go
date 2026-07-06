@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
@@ -81,12 +82,35 @@ type Lifecycle struct {
 	catalog *Catalog
 	backend *compose.Backend // plugins-11: compose-format plugins route here
 	tier    TierProvider     // plugins-11 Phase 2: compose tiered-volume resolution
+	// ready reports whether the underlying container runtime has been confirmed
+	// reachable. Defaults true (a directly-constructed Lifecycle is assumed
+	// usable); the daemon's startup path flips it false and back to true from a
+	// background goroutine so waiting on the runtime never blocks HTTP readiness.
+	ready atomic.Bool
 }
 
 // NewLifecycle constructs a Lifecycle around an existing Store and a
 // runtime client.
 func NewLifecycle(s *Store, rt RuntimeClient) *Lifecycle {
-	return &Lifecycle{store: s, rt: rt}
+	l := &Lifecycle{store: s, rt: rt}
+	l.ready.Store(true) // usable by default; the daemon defers this during boot
+	return l
+}
+
+// SetRuntimeReady records whether the container runtime has been confirmed
+// reachable. The daemon sets it false at construction and true once a
+// background probe succeeds, so plugin verbs return 503 (not a runtime-call
+// error) while the runtime is still warming up.
+func (l *Lifecycle) SetRuntimeReady(ready bool) {
+	if l != nil {
+		l.ready.Store(ready)
+	}
+}
+
+// RuntimeReady reports whether the container runtime is confirmed reachable.
+// A nil Lifecycle is never ready.
+func (l *Lifecycle) RuntimeReady() bool {
+	return l != nil && l.ready.Load()
 }
 
 // SetProxy attaches the nginx route manager.
@@ -166,7 +190,37 @@ func (l *Lifecycle) composeSpecResolved(rec *PluginRecord) (compose.ProjectSpec,
 			return compose.ProjectSpec{}, err
 		}
 	}
-	return compose.SpecFromSingle(rec.Plugin.Name, string(yamlBytes), nil), nil
+	spec := compose.SpecFromSingle(rec.Plugin.Name, string(yamlBytes), nil)
+	// Render operator config into the compose .env: every non-secret
+	// x-smoothnas.config key gets the operator's answer or the schema default,
+	// so a ${KEY} reference never resolves empty. Secrets are NOT here — they go
+	// to the up-subprocess env via GetComposeSecrets at Start (never on disk).
+	env, err := l.composeConfigEnv(rec, yamlBytes)
+	if err != nil {
+		return compose.ProjectSpec{}, err
+	}
+	spec.Env = env
+	return spec, nil
+}
+
+// composeConfigEnv resolves the non-secret operator config for a compose plugin
+// into the .env map: the declared x-smoothnas.config schema, filled from the
+// stored answers (plugin_compose_config) with schema defaults for unset keys,
+// type-validated. Returns nil when the plugin declares no config.
+func (l *Lifecycle) composeConfigEnv(rec *PluginRecord, yamlBytes []byte) (map[string]string, error) {
+	schema, err := compose.ConfigSchema(yamlBytes)
+	if err != nil {
+		return nil, err
+	}
+	if len(schema) == 0 {
+		return nil, nil
+	}
+	answers, err := l.store.GetComposeConfig(rec.Plugin.Name)
+	if err != nil {
+		return nil, err
+	}
+	env, _, err := compose.ResolveConfigEnv(schema, answers)
+	return env, err
 }
 
 // isCompose reports whether a stored plugin is compose-format and a backend is

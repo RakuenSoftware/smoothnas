@@ -105,6 +105,7 @@ func parseBuiltinCatalog(fsys fs.FS) (map[string]*pluginCatalogLatestResponse, e
 			if err := plugin.ValidateManifest(manifest); err != nil {
 				return nil, fmt.Errorf("validate builtin manifest %s/%s: %w", repo.ID, mname, err)
 			}
+			stampComposeVersion(manifest, resp.TagName)
 			resp.Manifests = append(resp.Manifests, pluginCatalogManifest{
 				AssetName:    mname,
 				DownloadURL:  "", // bundled — no external URL
