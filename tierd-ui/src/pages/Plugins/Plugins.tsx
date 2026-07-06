@@ -254,6 +254,13 @@ function PluginCard({
   const containerRefs = plugin.containerRefs ?? [];
   const visibleContainerRefs = containerRefs.slice(0, 6);
   const remainingContainerRefs = containerRefs.length - visibleContainerRefs.length;
+  // Show the container's version. A compose plugin has no meaningful manifest
+  // version (0.0.0), so fall back to the distinct image tag(s) of its containers.
+  const imageVersions = Array.from(
+    new Set(containerRefs.map(r => imageTag(r.resolvedRef || r.imageRef)).filter(Boolean)),
+  );
+  const displayVersion =
+    plugin.version && plugin.version !== '0.0.0' ? plugin.version : imageVersions.join(', ');
 
   return (
     <div className="plugin-card">
@@ -261,7 +268,9 @@ function PluginCard({
         <div>
           <h3>{plugin.name}</h3>
           <div className="plugin-card-meta">
-            <span>{t('plugins.label.version')}: {plugin.version}</span>
+            {displayVersion && (
+              <span>{t('plugins.label.version')}: {displayVersion}</span>
+            )}
             {update && (
               <>
                 <span>·</span>
@@ -432,6 +441,19 @@ function containerRefVersion(ref: PluginContainerRef): string {
 
 function shortContainerRef(ref: string): string {
   return ref.replace(/sha256:([0-9a-f]{12})[0-9a-f]+/i, 'sha256:$1...');
+}
+
+// imageTag extracts the container's version from an image ref: the tag (after
+// the final ':' that isn't part of a registry host:port), or a short digest for
+// a digest-pinned ref. An untagged image is implicitly "latest".
+function imageTag(ref: string): string {
+  if (!ref) return '';
+  const at = ref.indexOf('@');
+  if (at >= 0) return shortContainerRef(ref.slice(at + 1));
+  const slash = ref.lastIndexOf('/');
+  const colon = ref.lastIndexOf(':');
+  if (colon > slash) return ref.slice(colon + 1);
+  return 'latest';
 }
 
 function compareSemver(a: string, b: string): number {

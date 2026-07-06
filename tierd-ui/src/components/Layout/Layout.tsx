@@ -30,7 +30,7 @@ function buildNavItems(t: ReturnType<typeof useI18n>['t']): NavItem[] {
     storage: t('nav.section.storage', undefined, 'Storage'),
     sharing: t('nav.section.sharing', undefined, 'Sharing'),
     system: t('nav.section.system', undefined, 'System'),
-    plugins: t('nav.section.plugins', undefined, 'Plugins'),
+    plugins: t('nav.section.plugins', undefined, 'Containers'),
   };
   return [
     { label: t('nav.dashboard'),       icon: '■',  route: '/dashboard',      section: sec.overview },
