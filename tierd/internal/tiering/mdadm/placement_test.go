@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -607,6 +608,66 @@ func TestMoveForPlacementDoesNotOverwriteExistingDestination(t *testing.T) {
 	}
 }
 
+// After moving a file out-of-band (copy + os.Remove of the source), tierd must
+// tell smoothfs to drop the replay pin on the removed source inode, else its
+// backing blocks leak until unmount. This asserts the forget_lower call fires
+// with the correct pool, source tier rank, and the source's lower inode number.
+func TestMoveForPlacementForgetsLowerInodeAfterMove(t *testing.T) {
+	origMountReady := backingMountActive
+	backingMountActive = func(string) bool { return true }
+	t.Cleanup(func() { backingMountActive = origMountReady })
+
+	type forgetCall struct {
+		pool string
+		tier int
+		ino  uint64
+	}
+	var calls []forgetCall
+	origForget := forgetLowerInode
+	forgetLowerInode = func(_ *Adapter, poolName string, tierRank int, lowerIno uint64) {
+		calls = append(calls, forgetCall{poolName, tierRank, lowerIno})
+	}
+	t.Cleanup(func() { forgetLowerInode = origForget })
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	rel := "dir/file.txt"
+	if err := os.MkdirAll(srcDir+"/dir", 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	if err := writeFile(srcDir+"/"+rel, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	// Capture the source's lower inode before the move unlinks it.
+	fi, err := os.Stat(srcDir + "/" + rel)
+	if err != nil {
+		t.Fatalf("stat src: %v", err)
+	}
+	srcIno := fi.Sys().(*syscall.Stat_t).Ino
+
+	a := &Adapter{}
+	if err := a.moveForPlacement(
+		db.MdadmManagedNamespaceRow{PoolName: "pool1", NamespaceID: "ns1"},
+		rel,
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "src", MountPath: srcDir},
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "dst", MountPath: dstDir},
+		1, 2,
+	); err != nil {
+		t.Fatalf("moveForPlacement: %v", err)
+	}
+	if _, err := os.Stat(srcDir + "/" + rel); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source not removed: %v", err)
+	}
+
+	if len(calls) != 1 {
+		t.Fatalf("forgetLowerInode called %d times, want 1: %+v", len(calls), calls)
+	}
+	if calls[0].pool != "pool1" || calls[0].tier != 1 || calls[0].ino != srcIno {
+		t.Fatalf("forgetLowerInode = {pool:%q tier:%d ino:%d}, want {pool1 1 %d}",
+			calls[0].pool, calls[0].tier, calls[0].ino, srcIno)
+	}
+}
+
 func TestMoveForPlacementCompletesstalledMoveWhenDestMatchesSrc(t *testing.T) {
 	origMountReady := backingMountActive
 	backingMountActive = func(string) bool { return true }
@@ -656,6 +717,104 @@ func TestMoveForPlacementCompletesstalledMoveWhenDestMatchesSrc(t *testing.T) {
 	}
 }
 
+// A byte-identical destination duplicate whose mtime differs from the source
+// (a tier copy that did not preserve mtime) must still reconcile — otherwise the
+// scanner re-queues the same doomed move forever. Regression for the reconcile
+// loop that flooded the log and starved image pulls.
+func TestMoveForPlacementReconcilesIdenticalDestWithMtimeSkew(t *testing.T) {
+	origMountReady := backingMountActive
+	backingMountActive = func(string) bool { return true }
+	t.Cleanup(func() { backingMountActive = origMountReady })
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	rel := "dir/file.txt"
+	content := []byte("identical bytes across tiers")
+
+	for _, dir := range []string{srcDir + "/dir", dstDir + "/dir"} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	if err := writeFile(srcDir+"/"+rel, content, 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if err := writeFile(dstDir+"/"+rel, content, 0o644); err != nil {
+		t.Fatalf("write dst: %v", err)
+	}
+	// Same content, deliberately different mtimes.
+	if err := os.Chtimes(srcDir+"/"+rel, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("chtimes src: %v", err)
+	}
+	if err := os.Chtimes(dstDir+"/"+rel, time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC), time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("chtimes dst: %v", err)
+	}
+
+	a := &Adapter{}
+	err := a.moveForPlacement(
+		db.MdadmManagedNamespaceRow{PoolName: "pool1", NamespaceID: "ns1"},
+		rel,
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "src", MountPath: srcDir},
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "dst", MountPath: dstDir},
+		1, 2,
+	)
+	if err != nil {
+		t.Fatalf("moveForPlacement should reconcile identical dup with mtime skew, got: %v", err)
+	}
+	if _, err := os.Stat(srcDir + "/" + rel); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale source should have been removed, got: %v", err)
+	}
+	got, err := readFile(dstDir + "/" + rel)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("dst contents = %q, want %q", got, content)
+	}
+}
+
+// A same-size but content-DIFFERENT destination is a genuine conflict: it must
+// still error and preserve both files (never silently overwrite), even though
+// the reconcile path now falls back to a content compare.
+func TestMoveForPlacementSameSizeDifferentContentStillErrors(t *testing.T) {
+	origMountReady := backingMountActive
+	backingMountActive = func(string) bool { return true }
+	t.Cleanup(func() { backingMountActive = origMountReady })
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	rel := "dir/file.txt"
+	for _, dir := range []string{srcDir + "/dir", dstDir + "/dir"} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	if err := writeFile(srcDir+"/"+rel, []byte("AAAA"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if err := writeFile(dstDir+"/"+rel, []byte("BBBB"), 0o644); err != nil {
+		t.Fatalf("write dst: %v", err)
+	}
+
+	a := &Adapter{}
+	err := a.moveForPlacement(
+		db.MdadmManagedNamespaceRow{PoolName: "pool1", NamespaceID: "ns1"},
+		rel,
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "src", MountPath: srcDir},
+		db.MdadmManagedTargetRow{PoolName: "pool1", TierName: "dst", MountPath: dstDir},
+		1, 2,
+	)
+	if err == nil || !strings.Contains(err.Error(), "destination already exists") {
+		t.Fatalf("moveForPlacement error = %v, want destination exists", err)
+	}
+	if got, _ := readFile(srcDir + "/" + rel); string(got) != "AAAA" {
+		t.Fatalf("src altered: %q", got)
+	}
+	if got, _ := readFile(dstDir + "/" + rel); string(got) != "BBBB" {
+		t.Fatalf("dst altered: %q", got)
+	}
+}
+
 func TestInstallPlacementCopyDoesNotOverwriteExistingDestination(t *testing.T) {
 	dir := t.TempDir()
 	tmp := dir + "/file.tierd-move"
@@ -676,5 +835,50 @@ func TestInstallPlacementCopyDoesNotOverwriteExistingDestination(t *testing.T) {
 	}
 	if string(got) != "old" {
 		t.Fatalf("dst contents = %q, want old", got)
+	}
+}
+
+func TestTierTargetCapBytes(t *testing.T) {
+	const tib = int64(1) << 40
+	cases := []struct {
+		name     string
+		total    int64
+		fillPct  int
+		wantCap  int64
+	}{
+		{"write-cache tier holds nothing", tib, 0, 0},
+		{"half fill", tib, 50, tib / 2},
+		{"one percent", 100 << 30, 1, 1 << 30},
+		{"full", tib, 100, tib},
+		{"negative clamps to zero", tib, -5, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := tierTargetCapBytes(c.total, c.fillPct); got != c.wantCap {
+				t.Fatalf("tierTargetCapBytes(%d, %d) = %d, want %d", c.total, c.fillPct, got, c.wantCap)
+			}
+		})
+	}
+}
+
+func TestTierFullCapBytes(t *testing.T) {
+	const tib = int64(1) << 40
+	cases := []struct {
+		name    string
+		total   int64
+		fullPct int
+		want    int64
+	}{
+		{"evacuated tier caps at zero", tib, 0, 0},
+		{"normal write cap", tib, 95, tib * 95 / 100},
+		{"full", tib, 100, tib},
+		{"negative clamps to zero", tib, -3, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := tierFullCapBytes(c.total, c.fullPct); got != c.want {
+				t.Fatalf("tierFullCapBytes(%d, %d) = %d, want %d", c.total, c.fullPct, got, c.want)
+			}
+		})
 	}
 }

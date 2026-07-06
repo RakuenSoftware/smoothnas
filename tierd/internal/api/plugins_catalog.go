@@ -150,6 +150,7 @@ func (h *PluginsHandler) fetchLatestPluginRelease(ctx context.Context, owner, na
 		if err := plugin.ValidateManifest(manifest); err != nil {
 			return nil, fmt.Errorf("validate %s: %w", asset.Name, err)
 		}
+		stampComposeVersion(manifest, out.TagName)
 		out.Manifests = append(out.Manifests, pluginCatalogManifest{
 			AssetName:    asset.Name,
 			DownloadURL:  asset.BrowserDownloadURL,
@@ -158,6 +159,18 @@ func (h *PluginsHandler) fetchLatestPluginRelease(ctx context.Context, owner, na
 		})
 	}
 	return out, nil
+}
+
+// stampComposeVersion gives a plain-compose plugin its display version from the
+// catalog release tag (e.g. "v0.2.5" -> "0.2.5"). Native manifests carry their
+// own metadata.version and are left untouched; a compose manifest has no version
+// field, so without this the catalog UI would show it blank.
+func stampComposeVersion(m *plugin.Manifest, tagName string) {
+	if m != nil && m.IsCompose() && m.Metadata.Version == "" {
+		// Strip a leading v/V (v0.2.5 -> 0.2.5); tolerate either case since
+		// release tags are not otherwise constrained here.
+		m.Metadata.Version = strings.TrimPrefix(strings.TrimPrefix(tagName, "v"), "V")
+	}
 }
 
 func (h *PluginsHandler) fetchCatalogJSON(ctx context.Context, rawURL string, out any) error {

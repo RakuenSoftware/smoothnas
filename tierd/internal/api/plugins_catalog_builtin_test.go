@@ -40,7 +40,11 @@ func TestBuiltinCatalog_SnapshotLoadsAndValidates(t *testing.T) {
 			t.Fatalf("%s has no manifests", repo)
 		}
 		for _, m := range resp.Manifests {
-			if m.Manifest == nil || m.Manifest.APIVersion != "smoothnas.io/v1" || m.Manifest.Kind != "Plugin" {
+			// A bundled manifest is valid either as native (apiVersion+kind) or
+			// as a plain-compose plugin (compose-migration: named, IsCompose).
+			nativeOK := m.Manifest != nil && m.Manifest.APIVersion == "smoothnas.io/v1" && m.Manifest.Kind == "Plugin"
+			composeOK := m.Manifest != nil && m.Manifest.IsCompose() && m.Manifest.Metadata.Name != ""
+			if !nativeOK && !composeOK {
 				t.Fatalf("%s asset %q failed manifest invariants", repo, m.AssetName)
 			}
 			if m.ManifestYAML == "" {

@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
@@ -80,12 +82,35 @@ type Lifecycle struct {
 	catalog *Catalog
 	backend *compose.Backend // plugins-11: compose-format plugins route here
 	tier    TierProvider     // plugins-11 Phase 2: compose tiered-volume resolution
+	// ready reports whether the underlying container runtime has been confirmed
+	// reachable. Defaults true (a directly-constructed Lifecycle is assumed
+	// usable); the daemon's startup path flips it false and back to true from a
+	// background goroutine so waiting on the runtime never blocks HTTP readiness.
+	ready atomic.Bool
 }
 
 // NewLifecycle constructs a Lifecycle around an existing Store and a
 // runtime client.
 func NewLifecycle(s *Store, rt RuntimeClient) *Lifecycle {
-	return &Lifecycle{store: s, rt: rt}
+	l := &Lifecycle{store: s, rt: rt}
+	l.ready.Store(true) // usable by default; the daemon defers this during boot
+	return l
+}
+
+// SetRuntimeReady records whether the container runtime has been confirmed
+// reachable. The daemon sets it false at construction and true once a
+// background probe succeeds, so plugin verbs return 503 (not a runtime-call
+// error) while the runtime is still warming up.
+func (l *Lifecycle) SetRuntimeReady(ready bool) {
+	if l != nil {
+		l.ready.Store(ready)
+	}
+}
+
+// RuntimeReady reports whether the container runtime is confirmed reachable.
+// A nil Lifecycle is never ready.
+func (l *Lifecycle) RuntimeReady() bool {
+	return l != nil && l.ready.Load()
 }
 
 // SetProxy attaches the nginx route manager.
@@ -165,7 +190,37 @@ func (l *Lifecycle) composeSpecResolved(rec *PluginRecord) (compose.ProjectSpec,
 			return compose.ProjectSpec{}, err
 		}
 	}
-	return compose.SpecFromSingle(rec.Plugin.Name, string(yamlBytes), nil), nil
+	spec := compose.SpecFromSingle(rec.Plugin.Name, string(yamlBytes), nil)
+	// Render operator config into the compose .env: every non-secret
+	// x-smoothnas.config key gets the operator's answer or the schema default,
+	// so a ${KEY} reference never resolves empty. Secrets are NOT here — they go
+	// to the up-subprocess env via GetComposeSecrets at Start (never on disk).
+	env, err := l.composeConfigEnv(rec, yamlBytes)
+	if err != nil {
+		return compose.ProjectSpec{}, err
+	}
+	spec.Env = env
+	return spec, nil
+}
+
+// composeConfigEnv resolves the non-secret operator config for a compose plugin
+// into the .env map: the declared x-smoothnas.config schema, filled from the
+// stored answers (plugin_compose_config) with schema defaults for unset keys,
+// type-validated. Returns nil when the plugin declares no config.
+func (l *Lifecycle) composeConfigEnv(rec *PluginRecord, yamlBytes []byte) (map[string]string, error) {
+	schema, err := compose.ConfigSchema(yamlBytes)
+	if err != nil {
+		return nil, err
+	}
+	if len(schema) == 0 {
+		return nil, nil
+	}
+	answers, err := l.store.GetComposeConfig(rec.Plugin.Name)
+	if err != nil {
+		return nil, err
+	}
+	env, _, err := compose.ResolveConfigEnv(schema, answers)
+	return env, err
 }
 
 // isCompose reports whether a stored plugin is compose-format and a backend is
@@ -390,6 +445,19 @@ func currentDiscovery(rec *PluginRecord, svcMap map[string]*Service) map[string]
 // Idempotent: an existing container that still matches the desired
 // payload is reused.
 func (l *Lifecycle) Materialise(ctx context.Context, name string) error {
+	// Serialize Materialise per plugin. It is invoked from many concurrent sites
+	// (the plugin API handlers, AutostartAll at daemon startup, scale, and resume),
+	// and the create loop below only skips creation when the DB already records a
+	// ContainerID for the instance. Two applies that both observe an empty
+	// ContainerID each proceed to createInstance; on a runtime that does not reject
+	// a duplicate container name (the LXC2Docker shim, unlike real Docker) that
+	// yields several containers for one instance — observed as 4x
+	// aimee-llm-gpu-mid-llm created in the same second, thrashing the GPU. The lock
+	// makes the first apply record the ID so the rest take the idempotent reuse path.
+	mu := pluginMaterialiseLock(name)
+	mu.Lock()
+	defer mu.Unlock()
+
 	rec, err := l.store.Get(name)
 	if err != nil {
 		return err
@@ -608,6 +676,27 @@ func (l *Lifecycle) checkComposeHostPortConflicts(name, composeYAML string) erro
 // its ID, and marks the unit stopped (ready to start).
 func (l *Lifecycle) createInstance(ctx context.Context, name string, p *PluginRow, svc *Service, instance, count int, payload runtime.CreateContainerRequest) error {
 	containerName := ContainerName(name, svc.Name, instance, count)
+
+	// Idempotency by name (defense-in-depth beyond the Materialise lock). A managed
+	// container with this deterministic name may already exist in the runtime with
+	// no ID recorded in our DB — a create that landed before SetInstanceContainerID
+	// persisted, or a concurrent apply on a runtime that (unlike real Docker) does
+	// not reject a duplicate name. Adopt one that matches the desired payload rather
+	// than creating a second; replace a stale one so the create below is clean.
+	if existingID, ferr := l.findManagedContainerByName(ctx, containerName); ferr == nil && existingID != "" {
+		if insp, ierr := l.rt.InspectContainer(ctx, existingID); ierr == nil {
+			if containerMatchesDesired(insp, payload) {
+				if err := l.store.SetInstanceContainerID(name, svc.Name, instance, existingID); err != nil {
+					return fmt.Errorf("adopt existing container %q for %s/%d: %w", containerName, svc.Name, instance, err)
+				}
+				_ = l.setInstanceState(name, svc.Name, instance, mapDockerState(insp.State.Status), "")
+				return nil
+			}
+			_ = l.rt.StopContainer(ctx, existingID, DefaultStopTimeoutSeconds)
+			_ = l.removeContainerWithCleanup(ctx, existingID, true)
+		}
+	}
+
 	_ = l.setInstanceState(name, svc.Name, instance, StateCreating, "")
 	resp, err := l.rt.CreateContainer(ctx, containerName, payload)
 	if err != nil && runtime.IsConflict(err) {
@@ -633,6 +722,35 @@ func (l *Lifecycle) createInstance(ctx context.Context, name string, p *PluginRo
 	}
 	_ = l.setInstanceState(name, svc.Name, instance, StateStopped, "")
 	return nil
+}
+
+// findManagedContainerByName returns the ID of a tierd-managed container whose
+// name matches (the runtime reports names with a leading "/"). Empty ID, nil
+// error when none exists.
+func (l *Lifecycle) findManagedContainerByName(ctx context.Context, name string) (string, error) {
+	managed, err := l.rt.ListManagedContainers(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, c := range managed {
+		for _, n := range c.Names {
+			if n == name || n == "/"+name {
+				return c.ID, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// pluginMaterialiseLocks serializes Materialise per plugin so concurrent applies
+// cannot each create a container for the same instance (see Materialise). A
+// separate lock from composeScaleLocks: scale calls Materialise while holding the
+// scale lock, so reusing it would self-deadlock.
+var pluginMaterialiseLocks sync.Map // plugin name -> *sync.Mutex
+
+func pluginMaterialiseLock(name string) *sync.Mutex {
+	mu, _ := pluginMaterialiseLocks.LoadOrStore(name, &sync.Mutex{})
+	return mu.(*sync.Mutex)
 }
 
 // AutostartAll materialises and starts every installed plugin that is not

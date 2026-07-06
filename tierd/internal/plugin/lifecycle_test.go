@@ -42,6 +42,7 @@ type fakeRuntime struct {
 	commitErr      error
 	inspectMissing map[string]bool // container IDs that 404 on inspect
 	containers     map[string]runtime.CreateContainerRequest
+	managed        []runtime.ContainerSummary // what ListManagedContainers returns
 	// bridgeIP is what InspectContainerBridgeIP returns. Default
 	// empty string makes captureBridgeIP retry; tests that exercise
 	// the success path set this to a real-looking IP.
@@ -66,7 +67,9 @@ func (f *fakeRuntime) InspectContainerBridgeIP(ctx context.Context, id string) (
 	return f.bridgeIP, nil
 }
 func (f *fakeRuntime) ListManagedContainers(ctx context.Context) ([]runtime.ContainerSummary, error) {
-	return nil, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.managed, nil
 }
 func (f *fakeRuntime) ListContainers(ctx context.Context) ([]runtime.ContainerSummary, error) {
 	f.mu.Lock()
@@ -359,6 +362,59 @@ func TestDigestPinnedImageRefStripsTag(t *testing.T) {
 				t.Fatalf("digestPinnedImageRef() = %q want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestLifecycle_Materialise_AdoptsOrphanContainer covers the duplicate-container
+// bug: a container for the instance exists in the runtime but the DB has no
+// recorded ID (a create that landed before its ID persisted, or a concurrent
+// apply on a runtime that does not reject a duplicate name). Materialise must
+// ADOPT that container, not create a second one.
+func TestLifecycle_Materialise_AdoptsOrphanContainer(t *testing.T) {
+	lc, rt, store := installFixture(t, "llama.yaml")
+	if _, err := store.db.Exec(
+		`UPDATE plugin_volume_paths SET host_path = '/mnt/media/.plugins/llama-cpp/models' WHERE plugin_name = 'llama-cpp'`,
+	); err != nil {
+		t.Fatalf("fake tier resolution: %v", err)
+	}
+	if err := lc.Materialise(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("materialise 1: %v", err)
+	}
+	if len(rt.createCalls) != 1 {
+		t.Fatalf("first materialise create calls = %d want 1", len(rt.createCalls))
+	}
+	cname := rt.createNames[0]
+	cid := "fake-" + cname // fakeRuntime.CreateContainer's ID scheme
+	rec, err := store.Get("llama-cpp")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	svc := rec.Instances[0].Service
+
+	// Simulate the orphan: DB forgets the container, but the runtime still has it
+	// and reports it as managed under the same deterministic name.
+	if err := store.SetInstanceContainerID("llama-cpp", svc, rec.Instances[0].Instance, ""); err != nil {
+		t.Fatalf("clear id: %v", err)
+	}
+	rt.managed = []runtime.ContainerSummary{{
+		ID:     cid,
+		Names:  []string{"/" + cname},
+		Labels: rt.createCalls[0].Labels,
+	}}
+
+	if err := lc.Materialise(context.Background(), "llama-cpp"); err != nil {
+		t.Fatalf("materialise 2: %v", err)
+	}
+	// The key assertion: no SECOND create — the existing container was adopted.
+	if len(rt.createCalls) != 1 {
+		t.Fatalf("second materialise created a duplicate: create calls = %d want 1", len(rt.createCalls))
+	}
+	rec2, err := store.Get("llama-cpp")
+	if err != nil {
+		t.Fatalf("get 2: %v", err)
+	}
+	if got := rec2.Instances[0].ContainerID; got != cid {
+		t.Fatalf("adopted container id = %q want %q", got, cid)
 	}
 }
 
@@ -1232,5 +1288,28 @@ func TestBuildSetupCmd_DistroDispatch(t *testing.T) {
 		if !strings.Contains(got, tc.mustContain) {
 			t.Errorf("distro=%s: got=%q, want it to contain %q", tc.distro, got, tc.mustContain)
 		}
+	}
+}
+
+// TestLifecycleRuntimeReadiness covers the readiness gate that lets the daemon
+// bring up the HTTP API before the container runtime is confirmed reachable:
+// a directly-constructed Lifecycle defaults ready (so existing callers/tests
+// are unchanged), the daemon can toggle it, and a nil Lifecycle is never ready.
+func TestLifecycleRuntimeReadiness(t *testing.T) {
+	var nilLC *Lifecycle
+	if nilLC.RuntimeReady() {
+		t.Fatal("nil Lifecycle must never report ready")
+	}
+	lc := NewLifecycle(nil, &fakeRuntime{})
+	if !lc.RuntimeReady() {
+		t.Fatal("NewLifecycle should default to ready")
+	}
+	lc.SetRuntimeReady(false)
+	if lc.RuntimeReady() {
+		t.Fatal("SetRuntimeReady(false) should mark not ready")
+	}
+	lc.SetRuntimeReady(true)
+	if !lc.RuntimeReady() {
+		t.Fatal("SetRuntimeReady(true) should mark ready")
 	}
 }

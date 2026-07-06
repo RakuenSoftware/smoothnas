@@ -1022,8 +1022,11 @@ func (s *Store) MarkTierReconciled(name string) error {
 }
 
 // SetTierSlotFill updates the target-fill and full-threshold percentages for a
-// named tier slot within a pool. Values must be in the range [1, 100]. The fill
-// target is the migration/drain target; the full threshold is the write hard cap.
+// named tier slot within a pool. Both are in [0, 100] and target_fill_pct must
+// not exceed full_threshold_pct (equal is allowed). 0/0 fully evacuates a tier
+// (no resident data, zero write cap); target_fill_pct 0 alone makes it a pure
+// write-cache. The fill target is the migration/drain target; the full
+// threshold is the write hard cap.
 func (s *Store) SetTierSlotFill(poolName, slotName string, targetFillPct, fullThresholdPct int) error {
 	if err := ValidateTierInstanceName(poolName); err != nil {
 		return err
@@ -1032,14 +1035,18 @@ func (s *Store) SetTierSlotFill(poolName, slotName string, targetFillPct, fullTh
 	if slotName == "" {
 		return fmt.Errorf("tier slot name is required")
 	}
-	if targetFillPct < 1 || targetFillPct > 100 {
-		return fmt.Errorf("target_fill_pct must be between 1 and 100")
+	// Both percentages may be 0 to fully evacuate a tier: target_fill_pct == 0
+	// keeps no resident data, full_threshold_pct == 0 caps it at zero bytes.
+	// target must be <= full (equal allowed, e.g. 0/0); only target above full
+	// is contradictory.
+	if targetFillPct < 0 || targetFillPct > 100 {
+		return fmt.Errorf("target_fill_pct must be between 0 and 100")
 	}
-	if fullThresholdPct < 1 || fullThresholdPct > 100 {
-		return fmt.Errorf("full_threshold_pct must be between 1 and 100")
+	if fullThresholdPct < 0 || fullThresholdPct > 100 {
+		return fmt.Errorf("full_threshold_pct must be between 0 and 100")
 	}
-	if targetFillPct >= fullThresholdPct {
-		return fmt.Errorf("target_fill_pct must be less than full_threshold_pct")
+	if targetFillPct > fullThresholdPct {
+		return fmt.Errorf("target_fill_pct must not exceed full_threshold_pct")
 	}
 
 	res, err := s.db.Exec(
@@ -1060,8 +1067,9 @@ func (s *Store) SetTierSlotFill(poolName, slotName string, targetFillPct, fullTh
 }
 
 // AddTierSlot inserts a new tier slot (level) into an existing pool. rank must
-// be unique within the pool and positive. targetFillPct must be less than
-// fullThresholdPct; both must be in [1, 100].
+// be unique within the pool and positive. targetFillPct and fullThresholdPct
+// are both in [0, 100] and targetFillPct must not exceed fullThresholdPct
+// (equal is allowed; 0/0 fully evacuates the tier).
 func (s *Store) AddTierSlot(poolName, slotName string, rank, targetFillPct, fullThresholdPct int) error {
 	if err := ValidateTierInstanceName(poolName); err != nil {
 		return err
@@ -1073,14 +1081,18 @@ func (s *Store) AddTierSlot(poolName, slotName string, rank, targetFillPct, full
 	if rank <= 0 {
 		return fmt.Errorf("rank must be a positive integer")
 	}
-	if targetFillPct < 1 || targetFillPct > 100 {
-		return fmt.Errorf("target_fill_pct must be between 1 and 100")
+	// Both percentages may be 0 to fully evacuate a tier: target_fill_pct == 0
+	// keeps no resident data, full_threshold_pct == 0 caps it at zero bytes.
+	// target must be <= full (equal allowed, e.g. 0/0); only target above full
+	// is contradictory.
+	if targetFillPct < 0 || targetFillPct > 100 {
+		return fmt.Errorf("target_fill_pct must be between 0 and 100")
 	}
-	if fullThresholdPct < 1 || fullThresholdPct > 100 {
-		return fmt.Errorf("full_threshold_pct must be between 1 and 100")
+	if fullThresholdPct < 0 || fullThresholdPct > 100 {
+		return fmt.Errorf("full_threshold_pct must be between 0 and 100")
 	}
-	if targetFillPct >= fullThresholdPct {
-		return fmt.Errorf("target_fill_pct must be less than full_threshold_pct")
+	if targetFillPct > fullThresholdPct {
+		return fmt.Errorf("target_fill_pct must not exceed full_threshold_pct")
 	}
 
 	tx, err := s.db.Begin()
