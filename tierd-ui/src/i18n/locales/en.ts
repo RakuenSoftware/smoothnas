@@ -56,14 +56,14 @@ const en: LanguageTranslations = {
   'nav.terminal': 'Terminal',
   'nav.updates': 'Updates',
   'nav.settings': 'Settings',
-  'nav.plugins': 'Plugins',
+  'nav.plugins': 'Containers',
 
   'nav.section.overview': 'Overview',
   'nav.section.hardware': 'Hardware',
   'nav.section.storage': 'Storage',
   'nav.section.sharing': 'Sharing',
   'nav.section.system': 'System',
-  'nav.section.plugins': 'Plugins',
+  'nav.section.plugins': 'Containers',
 
   'topbar.language.label': 'Language',
   'topbar.language.tooltip': 'Interface language',
@@ -1235,7 +1235,7 @@ const en: LanguageTranslations = {
   'namespaceFiles.title': 'Files in namespace',
 
   // --- Plugins (phase 06b list page; 6c install wizard, 6d detail) ---
-  'plugins.title': 'Plugins',
+  'plugins.title': 'Containers',
   'plugins.subtitle': 'Co-located workloads — local LLMs, build runners, sync agents — using SmoothNAS storage and hardware.',
   'plugins.empty.title': 'No plugins installed',
   'plugins.empty.body': 'Install a plugin to run additional workloads on this appliance with full integration into the named-tier model and the SmoothNAS UI.',
