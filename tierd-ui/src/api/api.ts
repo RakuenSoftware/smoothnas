@@ -96,7 +96,11 @@ export const api = {
       ...(tiers ? { tiers } : {}),
       ...(metaOnFastest ? { meta_on_fastest: true } : {}),
     }),
-  deleteTier: (name: string) => apiFetch('DELETE', `/tiers/${name}`, { confirm_pool_name: name }),
+  // force=false is the first confirm (refused with 409 requires_force if the
+  // pool is still in use); force=true is the second confirm that force-removes
+  // every consumer and destroys the pool regardless.
+  deleteTier: (name: string, force = false) =>
+    apiFetch('DELETE', `/tiers/${name}`, { confirm_pool_name: name, force }),
   assignTierArray: (poolName: string, slotName: string, arrayId: number) =>
     apiFetch('PUT', `/tiers/${poolName}/tiers/${slotName}`, { kind: 'mdadm', array_id: arrayId }),
   assignTierBacking: (poolName: string, slotName: string, kind: string, ref: string) =>

@@ -44,6 +44,12 @@ type assignTierArrayRequest struct {
 
 type deleteTierRequest struct {
 	ConfirmPoolName string `json:"confirm_pool_name"`
+	// Force skips the "still in use" guard. When false (the first confirm) a
+	// pool with consumers is refused with 409 + requires_force so the UI can ask
+	// a second time; when true (the second confirm) every remaining consumer
+	// (SMB/NFS share, iSCSI target, plugin volume) is force-removed during
+	// teardown and the pool is destroyed regardless.
+	Force bool `json:"force"`
 }
 
 type createTierDefinitionResponse struct {
@@ -196,6 +202,10 @@ var (
 	statfsPath              = syscall.Statfs
 	remountNoatime          = remountPathNoatime
 	readMountInfo           = func() ([]byte, error) { return os.ReadFile("/proc/self/mountinfo") }
+	// reconcileSharingConfig regenerates smb.conf + /etc/exports from the DB and
+	// reloads Samba / re-runs exportfs -ra. Indirected as a var so consumer
+	// release is testable without touching the host's real sharing config.
+	reconcileSharingConfig = ReconcileSharingConfig
 )
 
 func validateTierNameRequest(w http.ResponseWriter, tierName string) bool {
@@ -615,7 +625,6 @@ func poolSpindownIneligibleReasons(pool db.TierInstance, slots []db.TierSlot, wa
 	_ = warmFill
 	return reasons
 }
-
 
 func poolSpindownSSDTargetFill(pool db.TierInstance, slots []db.TierSlot) poolSpindownWarmFillResponse {
 	resp := poolSpindownWarmFillResponse{
@@ -1320,12 +1329,18 @@ func (h *ArraysHandler) deleteTier(w http.ResponseWriter, r *http.Request, tierN
 		serverError(w, fmt.Errorf("list tier consumers: %w", err))
 		return
 	}
-	if len(consumers) > 0 {
+	// First confirm: if anything still uses the pool, don't destroy it yet —
+	// report what's holding it and ask the caller to confirm again with force.
+	// Second confirm (force=true): fall through and blow it all away; teardown
+	// force-removes every consumer before unmounting.
+	if len(consumers) > 0 && !req.Force {
 		unlock()
 		w.WriteHeader(http.StatusConflict)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"error":     "pool has active consumers; remove them before deleting",
-			"consumers": consumers,
+			"error":          "pool is still in use; confirm again to force-delete",
+			"code":           "tiers.consumers_present",
+			"consumers":      consumers,
+			"requires_force": true,
 		})
 		return
 	}
@@ -1416,9 +1431,99 @@ func (h *ArraysHandler) tierConsumers(poolName string) ([]string, error) {
 	return consumers, nil
 }
 
+// releaseTierConsumers force-removes every consumer still holding poolName —
+// SMB shares and NFS exports whose path is under the pool mount, iSCSI targets
+// backed by the pool's data LV, and plugin volumes — then regenerates and
+// reloads the sharing config so the kernel drops its NFS export / Samba hold on
+// the mount. Best-effort: each failure is logged, never fatal, because teardown
+// must proceed even if one consumer resists (the aggressive unmount downstream
+// is the backstop). It is the counterpart of tierConsumers: what that preflight
+// reports, this removes once the operator has confirmed the force-delete.
+func (h *ArraysHandler) releaseTierConsumers(poolName string) {
+	mountPoint := db.TierMountPoint(poolName)
+	underMount := func(p string) bool {
+		return p == mountPoint || strings.HasPrefix(p, mountPoint+"/")
+	}
+	sharingChanged := false
+
+	if shares, err := h.store.ListSmbShares(); err != nil {
+		log.Printf("destroy pool %s: list smb shares: %v", poolName, err)
+	} else {
+		for _, s := range shares {
+			if !underMount(s.Path) {
+				continue
+			}
+			if err := h.store.DeleteSmbShare(s.Name); err != nil {
+				log.Printf("destroy pool %s: remove smb share %s: %v", poolName, s.Name, err)
+				continue
+			}
+			sharingChanged = true
+			log.Printf("destroy pool %s: force-removed smb share %s (%s)", poolName, s.Name, s.Path)
+		}
+	}
+
+	if exports, err := h.store.ListNfsExports(); err != nil {
+		log.Printf("destroy pool %s: list nfs exports: %v", poolName, err)
+	} else {
+		for _, e := range exports {
+			if !underMount(e.Path) {
+				continue
+			}
+			if err := h.store.DeleteNfsExport(e.ID); err != nil {
+				log.Printf("destroy pool %s: remove nfs export %s: %v", poolName, e.Path, err)
+				continue
+			}
+			sharingChanged = true
+			log.Printf("destroy pool %s: force-removed nfs export %s", poolName, e.Path)
+		}
+	}
+
+	// iSCSI targets backed by the pool's data LV keep the LV busy and must go
+	// before the LV teardown below can remove it.
+	lvPath := "/dev/tier-" + poolName + "/data"
+	if targets, err := h.store.ListIscsiTargets(); err != nil {
+		log.Printf("destroy pool %s: list iscsi targets: %v", poolName, err)
+	} else {
+		for _, tgt := range targets {
+			if tgt.BlockDevice != lvPath {
+				continue
+			}
+			if err := h.store.DeleteIscsiTarget(tgt.IQN); err != nil {
+				log.Printf("destroy pool %s: remove iscsi target %s: %v", poolName, tgt.IQN, err)
+				continue
+			}
+			log.Printf("destroy pool %s: force-removed iscsi target %s", poolName, tgt.IQN)
+		}
+	}
+
+	// Regenerate smb.conf + /etc/exports and reload — this is what actually
+	// unexports the removed NFS paths (exportfs -ra) and drops the Samba shares,
+	// releasing the kernel's hold on the mount. Only needed when a share row
+	// changed; iSCSI is torn down independently by the LV teardown path.
+	if sharingChanged {
+		if err := reconcileSharingConfig(h.store); err != nil {
+			log.Printf("destroy pool %s: reconcile sharing after consumer release: %v", poolName, err)
+		}
+	}
+
+	if h.pluginTierForceDetach != nil {
+		if err := h.pluginTierForceDetach(poolName); err != nil {
+			log.Printf("destroy pool %s: force-detach plugin volumes: %v", poolName, err)
+		}
+	}
+}
+
 func (h *ArraysHandler) destroyTierPool(pool *db.TierInstance) error {
 	const lvName = "data"
 	vg := "tier-" + pool.Name
+
+	// Reaching teardown means deletion is authorised: either the pool had no
+	// consumers, or the operator gave the second (force) confirmation. Release
+	// everything still holding the pool — shares, iSCSI targets, plugin volumes —
+	// and reload the sharing services so the mount is not pinned when we unmount
+	// it. Unconditional (also covers ResumeDestroyingPools reruns after a
+	// restart, where the pool is already in the destroying state).
+	h.releaseTierConsumers(pool.Name)
 
 	// Cancel and remove any backup_configs pointing at this pool's mount
 	// before tearing down the filesystem. Otherwise a running rsync will

@@ -1258,6 +1258,81 @@ func TestDeleteTierRejectsActiveConsumers(t *testing.T) {
 	if !ok || len(consumers) != 2 {
 		t.Fatalf("expected 2 consumers, got %#v", got["consumers"])
 	}
+	// Without force the response must invite a second, forcing confirm rather
+	// than a dead-end refusal.
+	if rf, _ := got["requires_force"].(bool); !rf {
+		t.Fatalf("expected requires_force=true, got %#v", got["requires_force"])
+	}
+	// The pool must stay usable — a refused first confirm does not start teardown.
+	if inst, err := h.store.GetTierInstance("media"); err != nil {
+		t.Fatalf("get tier: %v", err)
+	} else if inst.State == db.TierPoolStateDestroying {
+		t.Fatalf("pool moved to destroying on a non-force delete")
+	}
+}
+
+func TestDeleteTierForceReleasesConsumersAndDestroys(t *testing.T) {
+	oldMountRoot := db.TierMountRoot
+	db.TierMountRoot = t.TempDir()
+	t.Cleanup(func() { db.TierMountRoot = oldMountRoot })
+
+	h := newTestHandler(t)
+	if err := h.store.CreateTierInstance("media"); err != nil {
+		t.Fatalf("create tier: %v", err)
+	}
+	if err := h.store.AddArrayToTierSlot("media", db.TierSlotNVME, "md0"); err != nil {
+		t.Fatalf("assign nvme: %v", err)
+	}
+	if err := h.store.TransitionTierInstanceState("media", db.TierPoolStateHealthy); err != nil {
+		t.Fatalf("transition healthy: %v", err)
+	}
+	if err := os.MkdirAll(db.TierMountPoint("media"), 0755); err != nil {
+		t.Fatalf("create mount dir: %v", err)
+	}
+
+	mp := db.TierMountPoint("media")
+	if _, err := h.store.CreateSmbShare(db.SmbShare{Name: "media-share", Path: mp + "/shared"}); err != nil {
+		t.Fatalf("create smb share: %v", err)
+	}
+	if _, err := h.store.CreateNfsExport(db.NfsExport{Path: mp + "/exports"}); err != nil {
+		t.Fatalf("create nfs export: %v", err)
+	}
+
+	// Stub the host-touching pieces: sharing reload and LVM/unmount.
+	oldReconcile := reconcileSharingConfig
+	reconcileCalled := false
+	reconcileSharingConfig = func(*db.Store) error { reconcileCalled = true; return nil }
+	t.Cleanup(func() { reconcileSharingConfig = oldReconcile })
+	isMountPathBusy = func(string) bool { return false }
+	removePVLabel = func(string) error { return nil }
+	removePoolVG = func(string) error { return nil }
+
+	// force:true = the operator's second confirm → blow it all away.
+	req := httptest.NewRequest(http.MethodDelete, "/api/tiers/media",
+		stringBody(`{"confirm_pool_name":"media","force":true}`))
+	w := httptest.NewRecorder()
+	h.Route(w, req)
+	<-h.asyncDone
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !reconcileCalled {
+		t.Fatalf("expected sharing config to be reconciled after consumer release")
+	}
+	if shares, err := h.store.ListSmbShares(); err != nil {
+		t.Fatalf("list smb: %v", err)
+	} else if len(shares) != 0 {
+		t.Fatalf("expected smb shares removed, got %#v", shares)
+	}
+	if exports, err := h.store.ListNfsExports(); err != nil {
+		t.Fatalf("list nfs: %v", err)
+	} else if len(exports) != 0 {
+		t.Fatalf("expected nfs exports removed, got %#v", exports)
+	}
+	if _, err := h.store.GetTierInstance("media"); err != db.ErrNotFound {
+		t.Fatalf("expected pool row deleted, got err=%v", err)
+	}
 }
 
 func TestDeleteTierDestroysPoolStorageAndDBRows(t *testing.T) {
