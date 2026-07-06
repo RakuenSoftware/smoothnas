@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -636,20 +637,23 @@ func (h *PluginsHandler) install(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.runtimeReady() {
-		opCtx := detachRequest(r)
-		if err := h.lifecycle.Materialise(opCtx, rec.Plugin.Name); err != nil {
-			jsonErrorCoded(w, fmt.Sprintf("autostart materialise: %v", err), http.StatusInternalServerError, "plugins.lifecycle_failed")
-			return
-		}
-		if err := h.lifecycle.Start(opCtx, rec.Plugin.Name); err != nil {
-			jsonErrorCoded(w, fmt.Sprintf("autostart start: %v", err), http.StatusInternalServerError, "plugins.lifecycle_failed")
-			return
-		}
-		rec, err = h.store.Get(rec.Plugin.Name)
-		if err != nil {
-			serverError(w, err)
-			return
-		}
+		// Materialise (pull image + create containers) and Start can take many
+		// minutes for a large image. Run them in the BACKGROUND so the install
+		// request returns as soon as the plugin is registered — the operator
+		// leaves the install flow immediately and a slow pull is never surfaced
+		// as a request timeout / false error. Progress (installed -> pulling ->
+		// creating -> running, or failed) is visible via GET /api/plugins.
+		name := rec.Plugin.Name
+		opCtx := detachRequest(r) // survives the request; captured before we return
+		go func() {
+			if err := h.lifecycle.Materialise(opCtx, name); err != nil {
+				log.Printf("plugins: background materialise %q: %v", name, err)
+				return // state is recorded as failed by the lifecycle/store
+			}
+			if err := h.lifecycle.Start(opCtx, name); err != nil {
+				log.Printf("plugins: background start %q: %v", name, err)
+			}
+		}()
 	}
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(toPluginDetail(rec))
