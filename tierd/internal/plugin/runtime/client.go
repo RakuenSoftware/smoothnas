@@ -135,15 +135,15 @@ func (c *Client) Info(ctx context.Context) (Info, error) {
 // Adding fields here is cheap; new fields just default to zero when
 // the daemon doesn't supply them.
 type Info struct {
-	ServerVersion  string `json:"ServerVersion"`
+	ServerVersion   string `json:"ServerVersion"`
 	OperatingSystem string `json:"OperatingSystem"`
-	KernelVersion  string `json:"KernelVersion"`
-	NCPU           int    `json:"NCPU"`
-	MemTotal       int64  `json:"MemTotal"`
-	Driver         string `json:"Driver"`
-	Containers     int    `json:"Containers"`
-	Images         int    `json:"Images"`
-	Name           string `json:"Name"`
+	KernelVersion   string `json:"KernelVersion"`
+	NCPU            int    `json:"NCPU"`
+	MemTotal        int64  `json:"MemTotal"`
+	Driver          string `json:"Driver"`
+	Containers      int    `json:"Containers"`
+	Images          int    `json:"Images"`
+	Name            string `json:"Name"`
 }
 
 // APIError is the typed error returned for non-2xx responses with a

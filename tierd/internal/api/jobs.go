@@ -90,7 +90,15 @@ func (jt *JobTracker) UpdateProgress(id, progress string) {
 func (jt *JobTracker) Get(id string) *JobStatus {
 	jt.mu.RLock()
 	defer jt.mu.RUnlock()
-	return jt.jobs[id]
+	j, ok := jt.jobs[id]
+	if !ok {
+		return nil
+	}
+	// Return a snapshot under the lock: the job goroutine mutates the stored
+	// struct (Complete/Fail/UpdateProgress), so handing out the shared pointer
+	// races any caller that reads its fields (UI polling, waitForJobDone).
+	cp := *j
+	return &cp
 }
 
 // ListByTag returns all jobs with the given tag.
