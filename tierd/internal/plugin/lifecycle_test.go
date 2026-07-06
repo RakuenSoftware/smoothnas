@@ -1290,3 +1290,26 @@ func TestBuildSetupCmd_DistroDispatch(t *testing.T) {
 		}
 	}
 }
+
+// TestLifecycleRuntimeReadiness covers the readiness gate that lets the daemon
+// bring up the HTTP API before the container runtime is confirmed reachable:
+// a directly-constructed Lifecycle defaults ready (so existing callers/tests
+// are unchanged), the daemon can toggle it, and a nil Lifecycle is never ready.
+func TestLifecycleRuntimeReadiness(t *testing.T) {
+	var nilLC *Lifecycle
+	if nilLC.RuntimeReady() {
+		t.Fatal("nil Lifecycle must never report ready")
+	}
+	lc := NewLifecycle(nil, &fakeRuntime{})
+	if !lc.RuntimeReady() {
+		t.Fatal("NewLifecycle should default to ready")
+	}
+	lc.SetRuntimeReady(false)
+	if lc.RuntimeReady() {
+		t.Fatal("SetRuntimeReady(false) should mark not ready")
+	}
+	lc.SetRuntimeReady(true)
+	if !lc.RuntimeReady() {
+		t.Fatal("SetRuntimeReady(true) should mark ready")
+	}
+}

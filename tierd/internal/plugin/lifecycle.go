@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin/compose"
@@ -81,12 +82,35 @@ type Lifecycle struct {
 	catalog *Catalog
 	backend *compose.Backend // plugins-11: compose-format plugins route here
 	tier    TierProvider     // plugins-11 Phase 2: compose tiered-volume resolution
+	// ready reports whether the underlying container runtime has been confirmed
+	// reachable. Defaults true (a directly-constructed Lifecycle is assumed
+	// usable); the daemon's startup path flips it false and back to true from a
+	// background goroutine so waiting on the runtime never blocks HTTP readiness.
+	ready atomic.Bool
 }
 
 // NewLifecycle constructs a Lifecycle around an existing Store and a
 // runtime client.
 func NewLifecycle(s *Store, rt RuntimeClient) *Lifecycle {
-	return &Lifecycle{store: s, rt: rt}
+	l := &Lifecycle{store: s, rt: rt}
+	l.ready.Store(true) // usable by default; the daemon defers this during boot
+	return l
+}
+
+// SetRuntimeReady records whether the container runtime has been confirmed
+// reachable. The daemon sets it false at construction and true once a
+// background probe succeeds, so plugin verbs return 503 (not a runtime-call
+// error) while the runtime is still warming up.
+func (l *Lifecycle) SetRuntimeReady(ready bool) {
+	if l != nil {
+		l.ready.Store(ready)
+	}
+}
+
+// RuntimeReady reports whether the container runtime is confirmed reachable.
+// A nil Lifecycle is never ready.
+func (l *Lifecycle) RuntimeReady() bool {
+	return l != nil && l.ready.Load()
 }
 
 // SetProxy attaches the nginx route manager.
