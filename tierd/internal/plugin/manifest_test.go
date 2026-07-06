@@ -288,19 +288,6 @@ func TestValidateManifest_FailureModes(t *testing.T) {
 			wantField: "services[0].volumes[0].bind",
 		},
 		{
-			name:      "tier-bound volume missing slot",
-			mutate:    func(m *Manifest) { m.Services[0].Volumes[0].Slot = "" },
-			wantField: "services[0].volumes[0].slot",
-		},
-		{
-			name: "flat volume with slot set",
-			mutate: func(m *Manifest) {
-				m.Services[0].Volumes[0].Mode = VolumeModeFlat
-				// Slot left non-empty from the fixture.
-			},
-			wantField: "services[0].volumes[0].slot",
-		},
-		{
 			name: "duplicate volume name",
 			mutate: func(m *Manifest) {
 				m.Services[0].Volumes = append(m.Services[0].Volumes, m.Services[0].Volumes[0])
@@ -469,6 +456,27 @@ func TestValidateManifest_AllowsServiceDiscovery(t *testing.T) {
 	}
 	if err := ValidateManifest(m); err != nil {
 		t.Fatalf("ValidateManifest: %v", err)
+	}
+}
+
+func TestValidateManifest_SlotIsDeprecatedAndIgnored(t *testing.T) {
+	// slot no longer pins a volume to an array: a tier-bound volume without
+	// a slot is valid, and a leftover slot on either mode is accepted (parsed
+	// but ignored) so existing/third-party manifests keep loading.
+	m := loadFixture(t, "llama.yaml")
+	m.Services[0].Volumes[0].Slot = ""
+	if err := ValidateManifest(m); err != nil {
+		t.Fatalf("tier-bound without slot should be valid: %v", err)
+	}
+
+	m.Services[0].Volumes[0].Slot = "NVME"
+	if err := ValidateManifest(m); err != nil {
+		t.Fatalf("tier-bound with leftover slot should be accepted: %v", err)
+	}
+
+	m.Services[0].Volumes[0].Mode = VolumeModeFlat
+	if err := ValidateManifest(m); err != nil {
+		t.Fatalf("flat with leftover slot should be accepted: %v", err)
 	}
 }
 

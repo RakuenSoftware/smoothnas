@@ -15,7 +15,6 @@ import (
 // real tier subsystem.
 type TierProvider interface {
 	GetTierInstance(name string) (*db.TierInstance, error)
-	ListTierSlots(poolName string) ([]db.TierSlot, error)
 }
 
 // Statfser returns the available bytes at a path. The default
@@ -54,8 +53,7 @@ func (a TierAssignments) Resolve(service, volumeName string) string {
 type VolumePlacement struct {
 	Service  string
 	Volume   string
-	Pool     string // empty when Errors is non-empty and pool couldn't be resolved
-	Slot     string
+	Pool     string   // empty when Errors is non-empty and pool couldn't be resolved
 	HostPath string   // empty when Errors is non-empty
 	Errors   []string // any error blocks install
 	Warnings []string // surfaced to the operator but do not block
@@ -94,18 +92,19 @@ func servicePathSegment(pluginName, service string) string {
 // can be rendered by the UI verbatim. Does not write to disk and
 // does not modify the database.
 //
-// Gates per the phase 03 proposal:
+// Gates:
 //
 //  1. Tier exists                — GetTierInstance returns a row
-//  2. Slot exists                — slot is one of the seeded defaults
-//     (NVME/SSD/HDD) or appears in ListTierSlots
-//  3. Tier mounted               — pool.State is healthy or degraded
+//  2. Tier mounted               — pool.State is healthy or degraded
 //     (a degraded pool is still writable)
-//  4. Free space                 — statfs(mountpoint).avail ≥ minSize
+//  3. Free space                 — statfs(mountpoint).avail ≥ minSize
 //     (warn-only; some plugins legitimately
 //     ignore minSize)
-//  5. No path conflict           — the would-be host path does not yet
+//  4. No path conflict           — the would-be host path does not yet
 //     exist (a leftover from a prior install)
+//
+// A tier-bound volume is placed across the tier's arrays by the tiering
+// engine like any other file, so there is no per-array slot to validate.
 //
 // Flat-mode volumes are reported as a single Placement with the
 // flat host path filled in and zero errors — they bypass the gates
@@ -125,7 +124,6 @@ func PreflightTierAssignments(tp TierProvider, statfs Statfser, m *Manifest, ass
 			p := VolumePlacement{
 				Service: svc.Name,
 				Volume:  vol.Name,
-				Slot:    vol.Slot,
 			}
 
 			switch vol.Mode {
@@ -157,12 +155,6 @@ func PreflightTierAssignments(tp TierProvider, statfs Statfser, m *Manifest, ass
 					out.OK = false
 					out.Placements = append(out.Placements, p)
 					continue
-				}
-
-				if !slotExists(tp, poolName, vol.Slot) {
-					p.Errors = append(p.Errors,
-						fmt.Sprintf("slot %q does not exist on tier %q", vol.Slot, poolName))
-					out.OK = false
 				}
 
 				if !poolReady(pool) {
@@ -200,29 +192,6 @@ func PreflightTierAssignments(tp TierProvider, statfs Statfser, m *Manifest, ass
 		}
 	}
 	return out, nil
-}
-
-// slotExists checks that slot is one of the seeded defaults (which
-// are always present on a freshly-created tier) or appears in the
-// tier_slots table for the pool. The seeded defaults are accepted
-// even when ListTierSlots returns empty so a brand-new tier — not
-// yet populated by the tiering subsystem — still passes preflight
-// for an NVME/SSD/HDD-typed plugin.
-func slotExists(tp TierProvider, poolName, slot string) bool {
-	switch slot {
-	case "NVME", "SSD", "HDD":
-		return true
-	}
-	rows, err := tp.ListTierSlots(poolName)
-	if err != nil {
-		return false
-	}
-	for _, r := range rows {
-		if r.Name == slot {
-			return true
-		}
-	}
-	return false
 }
 
 // poolReady is true when the tier is in a state operators can write

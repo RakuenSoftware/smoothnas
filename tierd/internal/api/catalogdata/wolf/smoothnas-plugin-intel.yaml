@@ -32,7 +32,6 @@ services:
     volumes:
       - name: state
         mode: tier-bound
-        slot: SSD
         minSize: 100G
         bind: /etc/wolf
       - name: runtime

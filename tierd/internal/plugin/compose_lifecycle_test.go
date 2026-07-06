@@ -171,7 +171,7 @@ func TestLifecycle_ComposeTieredVolumeRewrite(t *testing.T) {
 	if _, err := NewInstaller(store).Install([]byte(proj)); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}, slots: map[string][]db.TierSlot{}}
+	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}}
 	tp.put("fast", "/mnt/fast", "healthy")
 
 	root := t.TempDir()
@@ -201,7 +201,7 @@ func TestLifecycle_ComposeTieredVolumePinGuardsRetier(t *testing.T) {
 	if _, err := NewInstaller(store).Install([]byte(fast)); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}, slots: map[string][]db.TierSlot{}}
+	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}}
 	tp.put("fast", "/mnt/fast", "healthy")
 	tp.put("slow", "/mnt/slow", "healthy")
 	lc := NewLifecycle(store, &fakeRuntime{})
@@ -301,7 +301,7 @@ func TestLifecycle_ComposeInstanceExpansion(t *testing.T) {
 	if rec.Plugin.InstanceCount != 2 || !rec.Plugin.InstanceConfigurable {
 		t.Fatalf("expected count=2 configurable, got %d/%v", rec.Plugin.InstanceCount, rec.Plugin.InstanceConfigurable)
 	}
-	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}, slots: map[string][]db.TierSlot{}}
+	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}}
 	tp.put("fast", "/mnt/fast", "healthy")
 	root := t.TempDir()
 	lc := NewLifecycle(store, &fakeRuntime{})
@@ -370,7 +370,7 @@ func TestLifecycle_ComposeScale(t *testing.T) {
 	if _, err := NewInstaller(store).Install([]byte(proj)); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}, slots: map[string][]db.TierSlot{}}
+	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}}
 	tp.put("fast", "/mnt/fast", "healthy")
 	root := t.TempDir()
 	r := &recRunner{}
@@ -440,7 +440,7 @@ func TestGHRunner_ComposeEndToEnd(t *testing.T) {
 	if strings.Contains(rec.Plugin.ManifestYAML, "AABBCC") {
 		t.Fatal("secret leaked into stored compose")
 	}
-	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}, slots: map[string][]db.TierSlot{}}
+	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}}
 	tp.put("runner-ssd", "/mnt/ssd", "healthy")
 	root := t.TempDir()
 	r := &recRunner{}

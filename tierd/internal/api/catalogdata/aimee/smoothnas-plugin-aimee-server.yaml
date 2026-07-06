@@ -37,13 +37,11 @@ services:
       # SmoothNAS tiers' forced owner (requires the runtime from v0.1.20+).
       - name: home
         mode: tier-bound
-        slot: HDD
         bind: /var/lib/aimee
       # Mirror tier (AIMEE_WORKSPACES_DIR): per-workspace bare mirrors +
       # reconstructed worktrees. Large, durable, separate backup lifecycle.
       - name: workspaces
         mode: tier-bound
-        slot: HDD
         bind: /var/lib/aimee-workspaces
     ports:
       # Authenticated JSON API (bearer required on every request) — published on

@@ -9,7 +9,7 @@ import (
 )
 
 func TestResolveComposeTierVolumes(t *testing.T) {
-	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}, slots: map[string][]db.TierSlot{}}
+	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}}
 	tp.put("fast", "/mnt/fast", "healthy")
 
 	binds, err := ResolveComposeTierVolumes(tp, "app", []compose.TieredVolume{{Name: "data", Tier: "fast"}})

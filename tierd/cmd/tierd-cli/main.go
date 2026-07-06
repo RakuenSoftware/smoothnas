@@ -565,8 +565,8 @@ func printPluginRecord(rec *plugin.PluginRecord) {
 		fmt.Println()
 		fmt.Println("Volumes:")
 		for _, v := range rec.Volumes {
-			fmt.Printf("  %s: mode=%s slot=%s tier=%s perInstance=%v bind=%s\n",
-				v.Name, v.Mode, orDash(v.Slot), orDash(v.TierPool), v.PerInstance, v.BindPath)
+			fmt.Printf("  %s: mode=%s tier=%s perInstance=%v bind=%s\n",
+				v.Name, v.Mode, orDash(v.TierPool), v.PerInstance, v.BindPath)
 			for inst, host := range v.Paths {
 				fmt.Printf("    instance %d → %s\n", inst, orDash(host))
 			}
