@@ -59,6 +59,11 @@ type ArraysHandler struct {
 	// so the api package does not depend on the plugin package
 	// directly.
 	pluginTierConsumers func(poolName string) ([]string, error)
+	// pluginTierForceDetach removes/releases every plugin volume holding the
+	// given pool during a force-delete teardown. Wired by the server at startup;
+	// defaults to a no-op so the api package does not depend on the plugin
+	// package directly and a build without plugins stays correct.
+	pluginTierForceDetach func(poolName string) error
 	// asyncDone is an optional channel signalled when an async goroutine
 	// (tier assign/delete) completes. Used by tests to wait for background
 	// work. Nil in production.
@@ -82,6 +87,7 @@ func NewArraysHandler(store *db.Store) *ArraysHandler {
 		destroyPoolNamespaces:   func(string) error { return nil },
 		setTierSlotPolicy:       store.SetTierSlotFill,
 		pluginTierConsumers:     func(string) ([]string, error) { return nil, nil },
+		pluginTierForceDetach:   func(string) error { return nil },
 	}
 }
 
@@ -92,6 +98,16 @@ func (h *ArraysHandler) SetPluginTierConsumers(fn func(poolName string) ([]strin
 		fn = func(string) ([]string, error) { return nil, nil }
 	}
 	h.pluginTierConsumers = fn
+}
+
+// SetPluginTierForceDetach wires the plugin-subsystem callback that releases
+// every plugin volume on a pool during a force-delete. Called from server
+// startup; a nil fn resets to the no-op default.
+func (h *ArraysHandler) SetPluginTierForceDetach(fn func(poolName string) error) {
+	if fn == nil {
+		fn = func(string) error { return nil }
+	}
+	h.pluginTierForceDetach = fn
 }
 
 // SetEnsureNamespace sets the callback used to create a smoothfs-backed namespace

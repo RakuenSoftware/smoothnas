@@ -8,4 +8,4 @@
 // any thrown ApiError before falling back to the server's English
 // message. Local re-exports avoid scattering @rakuensoftware/smoothgui
 // imports through every page touch site.
-export { extractError, useExtractError } from '@rakuensoftware/smoothgui';
+export { extractError, useExtractError, isApiError } from '@rakuensoftware/smoothgui';
