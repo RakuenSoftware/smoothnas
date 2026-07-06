@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
@@ -475,6 +476,58 @@ func (s *Store) InsertCompose(name, version string) error {
 		return fmt.Errorf("insert compose plugin: expected 1 row, got %d", n)
 	}
 	return nil
+}
+
+// RecordComposeImages registers a compose plugin's service images as
+// plugin_services + plugin_container_refs rows (images maps service -> image).
+// InsertCompose deliberately writes neither table, which is why compose plugins
+// never surfaced an Update button: containerUpdateAvailable is
+// hasMutableContainerRef(rec.ContainerRefs), and with no refs it is always false.
+// Recording the images (mutable tags, no @sha256) makes the button appear; the
+// refresh-containers apply path already handles compose (Materialise=`compose
+// pull` + Start=`compose up`).
+//
+// These rows are INERT for lifecycle: every Lifecycle op branches on
+// ArtifactCompose before touching plugin_services, and the reconciler iterates
+// plugin_instances (which compose plugins have none of), so nothing tries to
+// manifest-materialise them. Call once, at install, after InsertCompose.
+func (s *Store) RecordComposeImages(name string, images map[string]string) error {
+	if len(images) == 0 {
+		return nil
+	}
+	services := make([]string, 0, len(images))
+	for svc := range images {
+		services = append(services, svc)
+	}
+	sort.Strings(services) // deterministic ordinals
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for ordinal, svc := range services {
+		image := images[svc]
+		if _, err := tx.Exec(
+			`INSERT INTO plugin_services
+			 (plugin_name, service, artifact_type, image_ref, ordinal)
+			 VALUES (?, ?, ?, ?, ?)`,
+			name, svc, ArtifactOCIImage, sqlNullable(image), ordinal,
+		); err != nil {
+			return fmt.Errorf("insert plugin_services[%s/%s]: %w", name, svc, err)
+		}
+		// The compose service's image is its one tracked ("primary") OCI ref.
+		if _, err := tx.Exec(
+			`INSERT INTO plugin_container_refs
+			 (plugin_name, service, ref_name, image_ref, digest, resolved_ref)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			name, svc, "primary", image, sqlNullable(""), sqlNullable(image),
+		); err != nil {
+			return fmt.Errorf("insert plugin_container_refs[%s/%s]: %w", name, svc, err)
+		}
+	}
+	return tx.Commit()
 }
 
 // SetPluginState sets the plugin-level state column directly. Used for compose

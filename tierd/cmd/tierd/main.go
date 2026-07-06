@@ -369,6 +369,12 @@ func setupPluginRuntime(pluginStore *plugin.Store, catalog *plugin.Catalog) (*pl
 	// plugins-11: drive compose-format plugins as real docker-compose projects
 	// against the same runtime socket, materialised under /var/lib/smoothnas/compose.
 	lifecycle.SetComposeBackend(compose.NewBackend(compose.New(socketPath, nil), "/var/lib/smoothnas/compose"))
+	// One-time on upgrade: give compose plugins installed before image-ref
+	// tracking an Update button by recording their service images (no reinstall).
+	// Pure DB work, independent of runtime readiness.
+	if err := lifecycle.BackfillComposeImageRefs(context.Background()); err != nil {
+		log.Printf("backfill compose image refs: %v", err)
+	}
 
 	watchCtx, stopWatch := context.WithCancel(context.Background())
 	go func() {
