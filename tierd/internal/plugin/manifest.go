@@ -343,6 +343,7 @@ func manifestFromCompose(data []byte) (*Manifest, error) {
 	if meta.UI != nil {
 		m.UI = &UI{Embed: UIEmbed{
 			Path:    meta.UI.Path,
+			Auth:    meta.UI.Auth,
 			Service: meta.UI.Service,
 			Port:    meta.UI.Port,
 		}}

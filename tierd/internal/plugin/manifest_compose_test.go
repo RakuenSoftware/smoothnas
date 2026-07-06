@@ -183,3 +183,14 @@ x-smoothnas:
 		t.Errorf("config[1] should be secret: %+v", m.Config[1])
 	}
 }
+
+func TestParseManifest_Compose_UIAuth(t *testing.T) {
+	y := "name: p\nservices:\n  web: { image: x }\nx-smoothnas:\n  ui: { service: web, port: 80, path: /, auth: bearer-injected }\n"
+	m, err := ParseManifest([]byte(y))
+	if err != nil {
+		t.Fatalf("ParseManifest: %v", err)
+	}
+	if m.UI == nil || m.UI.Embed.Auth != "bearer-injected" {
+		t.Fatalf("ui auth not carried: %+v", m.UI)
+	}
+}

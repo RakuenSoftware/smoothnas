@@ -36,6 +36,7 @@ type MetaUI struct {
 	Service string
 	Port    int
 	Path    string
+	Auth    string // embed auth mode (e.g. "bearer-injected"); how the console wires auth
 }
 
 // xsDoc mirrors just the top-level x-smoothnas block we read here. Other x-
@@ -49,6 +50,7 @@ type xsDoc struct {
 			Service string `yaml:"service"`
 			Port    int    `yaml:"port"`
 			Path    string `yaml:"path"`
+			Auth    string `yaml:"auth"`
 		} `yaml:"ui"`
 	} `yaml:"x-smoothnas"`
 }
@@ -66,7 +68,7 @@ func ParseMeta(composeYAML []byte) (Meta, error) {
 	}
 	m := Meta{Description: doc.XS.Description, Vendor: doc.XS.Vendor, Homepage: doc.XS.Homepage}
 	if doc.XS.UI != nil {
-		m.UI = &MetaUI{Service: doc.XS.UI.Service, Port: doc.XS.UI.Port, Path: doc.XS.UI.Path}
+		m.UI = &MetaUI{Service: doc.XS.UI.Service, Port: doc.XS.UI.Port, Path: doc.XS.UI.Path, Auth: doc.XS.UI.Auth}
 	}
 	return m, nil
 }
