@@ -1312,7 +1312,6 @@ const en: LanguageTranslations = {
   'plugins.install.tiers.description': 'Each tier-bound volume needs a tier to live on. Tier-bound preflight runs against your choices and blocks install on any error.',
   'plugins.install.tiers.noTierBound': 'This plugin has no tier-bound volumes — nothing to choose here.',
   'plugins.install.tiers.volumeLabel': 'Volume',
-  'plugins.install.tiers.slotLabel': 'Slot',
   'plugins.install.tiers.tierLabel': 'Tier',
   'plugins.install.tiers.placeholder': '— choose a tier —',
   'plugins.install.tiers.preflightOk': 'All volumes resolve to a writable tier.',

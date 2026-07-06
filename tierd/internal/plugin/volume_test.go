@@ -9,27 +9,22 @@ import (
 )
 
 // fakeTierProvider is an in-memory TierProvider used by preflight
-// tests. Tests register tiers + slots and pick the failure modes
-// they want to exercise.
+// tests. Tests register tiers and pick the failure modes they want to
+// exercise.
 type fakeTierProvider struct {
 	tiers map[string]*db.TierInstance
-	slots map[string][]db.TierSlot
 }
 
 func newFakeTP() *fakeTierProvider {
 	return &fakeTierProvider{
 		tiers: map[string]*db.TierInstance{},
-		slots: map[string][]db.TierSlot{},
 	}
 }
 
-func (f *fakeTierProvider) put(name, mountpoint, state string, slotNames ...string) {
+// put registers a tier. Any trailing slot names are accepted but ignored —
+// slot is deprecated and no longer influences placement or preflight.
+func (f *fakeTierProvider) put(name, mountpoint, state string, _ ...string) {
 	f.tiers[name] = &db.TierInstance{Name: name, MountPoint: mountpoint, State: state}
-	var ss []db.TierSlot
-	for i, s := range slotNames {
-		ss = append(ss, db.TierSlot{PoolName: name, Name: s, Rank: i + 1})
-	}
-	f.slots[name] = ss
 }
 
 func (f *fakeTierProvider) GetTierInstance(name string) (*db.TierInstance, error) {
@@ -37,10 +32,6 @@ func (f *fakeTierProvider) GetTierInstance(name string) (*db.TierInstance, error
 		return t, nil
 	}
 	return nil, db.ErrNotFound
-}
-
-func (f *fakeTierProvider) ListTierSlots(poolName string) ([]db.TierSlot, error) {
-	return f.slots[poolName], nil
 }
 
 // fakeStatfs returns whatever the test sets for "available bytes".
@@ -189,12 +180,12 @@ func TestPreflight_PerVolumeOverridesDefault(t *testing.T) {
 	}
 }
 
-func TestPreflight_UnknownSlotBlocks(t *testing.T) {
+func TestPreflight_LeftoverSlotIgnored(t *testing.T) {
 	tp := newFakeTP()
-	// Create a tier with only a custom non-default slot. Plugin asks
-	// for NVME — which is in the seeded defaults so it's accepted.
-	// Test a slot that isn't NVME/SSD/HDD and isn't in ListTierSlots.
-	tp.put("media", "/mnt/media", db.TierPoolStateHealthy, "FLOPPY")
+	// A tier with no matching slot at all. The manifest carries a leftover
+	// slot that isn't NVME/SSD/HDD — slot is deprecated, so preflight ignores
+	// it and the install proceeds against the tier as a whole.
+	tp.put("media", "/mnt/media", db.TierPoolStateHealthy)
 
 	yaml := []byte(`apiVersion: smoothnas.io/v1
 kind: Plugin
@@ -224,29 +215,21 @@ services:
 	}
 	res, _ := PreflightTierAssignments(tp, fakeStatfs{}.avail, m,
 		TierAssignments{Default: "media"}, "/x")
-	if res.OK {
-		t.Fatal("expected slot-not-found failure")
-	}
-	found := false
-	for _, e := range res.Placements[0].Errors {
-		if strings.Contains(e, "slot") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected slot error, got: %v", res.Placements[0].Errors)
+	if !res.OK {
+		t.Fatalf("leftover slot should be ignored, got errors: %+v", res.Placements[0].Errors)
 	}
 }
 
-func TestPreflight_SeededSlotAcceptedEvenOnEmptyTier(t *testing.T) {
+func TestPreflight_TierBoundNeedsNoSlot(t *testing.T) {
 	tp := newFakeTP()
-	// Brand-new tier with no slots populated yet. Plugin asks NVME.
+	// A healthy tier is all a tier-bound volume needs — there is no slot to
+	// validate anymore.
 	tp.put("media", "/mnt/media", db.TierPoolStateHealthy)
 	m := mustParse(t, "llama.yaml")
 	res, _ := PreflightTierAssignments(tp, fakeStatfs{}.avail, m,
 		TierAssignments{Default: "media"}, "/x")
 	if !res.OK {
-		t.Errorf("NVME should be accepted as a seeded default: %+v", res.Placements[0].Errors)
+		t.Errorf("tier-bound volume should resolve against a healthy tier: %+v", res.Placements[0].Errors)
 	}
 }
 

@@ -89,7 +89,6 @@ function allServiceImages(m: ParsedManifest | null | undefined): string {
 type ManifestVolume = {
   name: string;
   mode: string;       // 'tier-bound' | 'flat'
-  slot?: string;      // present when tier-bound
   bind: string;
   perInstance?: boolean;
   minSize?: string;
@@ -842,7 +841,7 @@ function PreviewStep({ manifest }: { manifest: ParsedManifest }) {
                       {' → '}
                       <span className="mono">{v.bind}</span>
                       {' ('}
-                      {v.mode === 'tier-bound' ? `tier-bound, ${v.slot}` : 'flat'}
+                      {v.mode === 'tier-bound' ? 'tier-bound' : 'flat'}
                       {v.perInstance ? ', perInstance' : ''}
                       {')'}
                     </li>
@@ -892,7 +891,6 @@ function TierStep({
       {volumes.map(v => (
         <div key={v.name} className="wizard-tier-row">
           <span className="volume-name">{v.name}</span>
-          <span className="slot-name">{v.slot}</span>
           <select
             value={choices[v.name] ?? ''}
             onChange={e => onChange(v.name, e.target.value)}

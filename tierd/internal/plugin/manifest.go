@@ -199,8 +199,12 @@ type Instances struct {
 // Volume describes one persistent mount. PerInstance has no effect
 // when Count == 1.
 type Volume struct {
-	Name        string `json:"name" yaml:"name"`
-	Mode        string `json:"mode" yaml:"mode"`
+	Name string `json:"name" yaml:"name"`
+	Mode string `json:"mode" yaml:"mode"`
+	// Slot is deprecated and ignored. Tier-bound volumes live on the tier's
+	// smoothfs mount and are placed across the tier's arrays by the tiering
+	// engine like any other file. Still parsed so manifests that carry it
+	// keep loading.
 	Slot        string `json:"slot,omitempty" yaml:"slot,omitempty"`
 	MinSize     string `json:"minSize,omitempty" yaml:"minSize,omitempty"`
 	Bind        string `json:"bind" yaml:"bind"`
@@ -746,16 +750,12 @@ func validateVolumes(v *ValidationError, prefix string, vols []Volume) {
 		seen[vol.Name] = true
 
 		switch vol.Mode {
-		case VolumeModeTierBound:
-			if vol.Slot == "" {
-				v.add(field+".slot", "is required when mode is %q", VolumeModeTierBound)
-			}
-			// Slot value enumeration against tier_levels is phase 03;
-			// here we just require non-empty.
-		case VolumeModeFlat:
-			if vol.Slot != "" {
-				v.add(field+".slot", "must be empty when mode is %q", VolumeModeFlat)
-			}
+		case VolumeModeTierBound, VolumeModeFlat:
+			// slot is deprecated: a tier-bound volume lives on the tier's
+			// smoothfs mount and is placed across the tier's arrays by the
+			// tiering engine like any other file, so a per-array slot is
+			// neither required nor honored. The field is still parsed for
+			// backward-compat with manifests that carry it, but ignored.
 		case "":
 			v.add(field+".mode", "is required (%q or %q)", VolumeModeTierBound, VolumeModeFlat)
 		default:

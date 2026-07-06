@@ -40,7 +40,6 @@ instances:
 volumes:
   - name: workspace
     mode: tier-bound
-    slot: SSD
     minSize: 100G
     bind: /home/runner/_work
     perInstance: false

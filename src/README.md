@@ -294,7 +294,7 @@ SmoothNAS runs co-located workloads as managed containers rather than hand-rolle
 
 Plugins are LXC system containers spoken to over the Docker Engine API. tierd treats LXC2Docker the same way it treats `mdadm` or `nginx` — an external binary with a stable interface. Operators never reach around tierd to the runtime directly.
 
-Two artifact shapes resolve to the same managed-container model: published OCI images, and distro templates with an optional package + setup overlay. Plugin volumes can bind to a specific slot of a named tier, ports are reverse-proxied through nginx to the container's bridge IP (no host port publishing by default), and uninstall is all-or-none — container, image cache, network, firewall holes, and volumes go together.
+Two artifact shapes resolve to the same managed-container model: published OCI images, and distro templates with an optional package + setup overlay. Plugin volumes bind to a named tier — never to a specific slot/array; the data rides the tier's smoothfs mount and is placed across its arrays by the tiering engine like any other file. Ports are reverse-proxied through nginx to the container's bridge IP (no host port publishing by default), and uninstall is all-or-none — container, image cache, network, firewall holes, and volumes go together.
 
 The design history and phase breakdown live in [../docs/proposals/pending/smoothnas-plugins.md](../docs/proposals/pending/smoothnas-plugins.md).
 

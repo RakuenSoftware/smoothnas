@@ -31,7 +31,6 @@ container:
 volumes:
   - name: models
     mode: tier-bound
-    slot: NVME
     minSize: 50G
     bind: /models
 ports:

@@ -45,7 +45,6 @@ services:
     volumes:
       - name: pgdata
         mode: tier-bound
-        slot: HDD
         bind: /var/lib/postgresql/data
     health:
       test: ["CMD-SHELL", "pg_isready -U aimee -d aimee_shared"]
@@ -62,7 +61,6 @@ services:
     volumes:
       - name: models
         mode: tier-bound
-        slot: HDD
         bind: /opt/models
     ports:
       - name: http
@@ -98,11 +96,9 @@ services:
     volumes:
       - name: home
         mode: tier-bound
-        slot: HDD
         bind: /var/lib/aimee
       - name: workspaces
         mode: tier-bound
-        slot: HDD
         bind: /var/lib/aimee-workspaces
     ports:
       # The server /v1 listener is the container's public contract.

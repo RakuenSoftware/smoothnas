@@ -45,8 +45,10 @@ the built-in storage subsystems do.
    same kind of object: a managed container with the same lifecycle,
    the same volume bindings, the same networking, the same logs.
 4. First-class integration with the named-tier model: plugin volumes
-   may bind to a specific slot of a specific tier instance, so
-   "models on the NVME slot of `media`" is a one-line manifest entry.
+   bind to a tier instance, so "models on `media`" is a one-line
+   manifest entry. The data then rides the tier's smoothfs mount and
+   is placed across its arrays by the tiering engine like any other
+   file — never pinned to a specific array.
 5. UI parity with built-in subsystems: install / start / stop /
    configure / uninstall / view logs / open the plugin's own UI from
    the SmoothNAS browser.
@@ -209,9 +211,10 @@ instances:                         # optional; default: { count: 1, configurable
 
 volumes:
   - name: models
-    mode: tier-bound               # or "flat"
-    slot: NVME                     # required when tier-bound
-    minSize: 50G                   # advisory; tierd warns if slot smaller
+    mode: tier-bound               # or "flat"; tier-bound lives on a tier's
+                                   # smoothfs mount and is placed across arrays
+                                   # by the tiering engine like any other file
+    minSize: 50G                   # advisory; tierd warns if the tier is smaller
     bind: /models                  # mountpoint inside the container
     perInstance: false             # if true and count > 1, one volume dir per instance
 
@@ -256,9 +259,10 @@ template. Both are first-class.
   `/var/lib/smoothnas/runtime/lxc/<container-id>/`.
 - **Flat volumes:** `/var/lib/smoothnas/plugins/<name>/<volume>/`,
   bind-mounted into the container.
-- **Tier-bound volumes:** under the resolved tier slot path,
-  e.g. `/mnt/media/.plugins/<plugin-name>/<volume>/`. Path
-  resolution is the job of phase 03.
+- **Tier-bound volumes:** under the tier's smoothfs mount,
+  e.g. `/mnt/media/.plugins/<plugin-name>/<volume>/`. The tiering
+  engine places the data across the tier's arrays like any other
+  file — the volume is bound to a tier, not pinned to an array.
 - **Bridge network:** `smoothnas-plugins` bridge (managed by
   tierd via LXC2Docker), `10.66.0.0/16`, one stable IP per
   container.
