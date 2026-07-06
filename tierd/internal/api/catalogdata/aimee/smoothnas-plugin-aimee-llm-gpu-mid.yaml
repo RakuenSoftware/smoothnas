@@ -1,60 +1,96 @@
-# aimee-llm (GPU, mid tier) — a plain docker-compose plugin. Unified Vulkan
-# llama.cpp: embeddings, reranking, and Gemma-4-26B-A4B (MoE, 4B active) synthesis from baked-in GGUFs. Standalone;
-# back the aimee-kb plugin's embedder/LLM endpoint with it. ~14GB fits a 24GB card.
+# aimee-llm (GPU, mid tier) — the unified Vulkan llama.cpp backend, standalone.
 #
-# GPU passthrough is PLAIN compose (no SmoothNAS profile catalog): devices +
-# device_cgroup_rules bind the host /dev/dri render tree and grant char-major 226
-# (DRM) — the same access the native gpu-amd profile applied. pids_limit +
-# oom_score_adj carry the native default-limits. The only SmoothNAS extension is
-# the top-level x-smoothnas block (display + operator config); no volumes (GGUFs
-# are baked into the image), API-only so no ui block.
-name: aimee-llm-gpu-mid
+# One GPU-offloaded llama.cpp (Vulkan) runtime + the aimee-llm gateway, serving
+# embeddings (/embed, /embed_batch), reranking (/rerank), and synthesis
+# (/v1/chat/completions) from baked-in GGUFs. No external infrastructure and no
+# tiered volume — the models are baked into the image.
+#
+# MID tier: Qwen3-Embedding-4B (2560-dim) + ettin-reranker-400m +
+# Gemma-4-26B-A4B (MoE, 4B active, qat-UD-Q4_K_XL, FA+K8V4). ~14GB fits a 24GB
+# card fully GPU-resident (baked N_CPU_MOE=0, SYNTH_SLOTS=2). For a smaller card,
+# install aimee-llm-gpu-small (dense Gemma-4-12B) instead.
+#
+# GPU: passed through with the built-in `gpu-amd` profile (the same one Wolf/Steam
+# use) — the host /dev/dri render path, render-node-number-agnostic. Verified on an
+# AMD 7900 XTX (RADV GFX1100). For NVIDIA/Intel, swap the profile to the matching
+# built-in vendor profile.
+#
+# Wiring: publishes its gateway on the HOST at :8742 (hostExpose). Point the
+# aimee-kb plugin's AIMEE_EMBEDDER_URL / LLM_ENDPOINT at http://10.100.0.1:8742
+# (the runtime bridge gateway). Runs auth-off by default — the aimee-kb embed path
+# sends no bearer, so leave AIMEE_LLM_AUTH_TOKEN blank when this backs a kb.
+#
+# Image: ghcr.io/rakuensoftware/aimee-kb-gpu-mid
+apiVersion: smoothnas.io/v1
+kind: Plugin
+metadata:
+  name: aimee-llm-gpu-mid
+  version: 0.2.5
+  description: >-
+    aimee-llm (GPU, mid tier) — unified Vulkan llama.cpp: embeddings, reranking,
+    and Gemma-4-26B-A4B (MoE, 4B active) synthesis from baked-in GGUFs. Standalone;
+    back the aimee-kb plugin's embedder/LLM endpoint with it. ~14GB fits a 24GB card.
+  vendor: RakuenSoftware
+  homepage: https://github.com/RakuenSoftware/aimee
+profiles:
+  # Baseline container limits.
+  - default-limits
+  # GPU passthrough via the built-in AMD profile (host /dev/dri render path,
+  # render-node-number-agnostic; no tierd restart, no custom operator profile).
+  - gpu-amd
 services:
-  llm:
-    image: ghcr.io/rakuensoftware/aimee-kb-gpu-mid:latest
-    restart: unless-stopped
-    environment:
+  - name: llm
+    artifact:
+      type: oci-image
+      # MID synth tier (Gemma-4-26B-A4B MoE). embed+rerank are identical across
+      # the GPU tiers, so switching to aimee-llm-gpu-small is an image swap with no
+      # KB re-embed. Versioned + :latest publishing is owned by the aimee repo's
+      # release CI.
+      image: ghcr.io/rakuensoftware/aimee-kb-gpu-mid:latest
+    container:
+      restartPolicy: unless-stopped
+    env:
+      # Offload all layers to the GPU. The CPU image defaults NGL to 0; this GPU
+      # tier resides fully in VRAM (4B embed + ~14GB Gemma-26B-A4B MoE).
       AIMEE_LLM_NGL: "99"
+      # Gateway port. 8742 (aimee's 874x range: server 8740, kb 8741) — NOT 8080,
+      # which Wolf host-publishes. A hostExpose port is published on the HOST, so
+      # keep this off any port another installed plugin host-exposes.
       AIMEE_LLM_PORT: "8742"
-      AIMEE_LLM_SYNTH_CTX: "${AIMEE_LLM_SYNTH_CTX:-262144}"
-      AIMEE_LLM_AUTH_TOKEN: "${AIMEE_LLM_AUTH_TOKEN:-}"
     ports:
-      - "8742:8742" # OpenAI-compatible gateway
-    devices:
-      - "/dev/dri:/dev/dri" # AMD/Intel GPU render tree (gpu-amd equivalent)
-    device_cgroup_rules:
-      - "c 226:* rwm" # DRM char-major 226
-    pids_limit: 1024
-    oom_score_adj: 100
-    healthcheck:
+      # The embed/rerank/synth gateway. hostExpose so the aimee-kb plugin can reach
+      # it across the runtime bridge at http://10.100.0.1:8742. Not exposed off-host.
+      - name: gateway
+        port: 8742
+        protocol: tcp
+        expose: false
+        hostExpose: true
+    health:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8742/health"]
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 600s
-x-smoothnas:
-  description: >-
-    aimee-llm (GPU, mid tier) — unified Vulkan llama.cpp: embeddings, reranking,
-    and Gemma-4-26B-A4B (MoE, 4B active) synthesis from baked-in GGUFs. Standalone; back the aimee-kb plugin's
-    embedder/LLM endpoint with it.
-  vendor: RakuenSoftware
-  homepage: https://github.com/RakuenSoftware/aimee
-  config:
-    - key: AIMEE_LLM_SYNTH_CTX
-      label: Synthesis context (tokens)
-      type: number
-      default: "262144"
-      min: "4096"
-      unit: tokens
-      description: >-
-        Context window for the synthesis model. gpu-mid bakes SYNTH_SLOTS=2, so this is split 2 x 128K. Gemma's sliding-window KV is cheap; 256K total fits alongside the resident MoE synth on a 24GB card. Lower it only if the
-        container logs a VRAM allocation failure.
-    - key: AIMEE_LLM_AUTH_TOKEN
-      label: Bearer token (optional)
-      type: string
-      secret: true
-      description: >-
-        Optional. When set, the gateway requires Authorization: Bearer <token> on
-        every request. LEAVE BLANK when this backs aimee-kb (the kb embed path
-        sends no bearer and would get 401s). Provide from the secret store at
-        deploy time, never checked into git.
+      # Generous: the GPU runtime loads multi-GB GGUFs before it reports healthy.
+      startPeriod: 600s
+    config:
+      - key: AIMEE_LLM_SYNTH_CTX
+        type: number
+        label: Synthesis context (tokens)
+        default: "262144"
+        min: "4096"
+        description: >-
+          Context window for the synthesis model. gpu-mid bakes SYNTH_SLOTS=2, so
+          this is split 2 × 128K. Gemma's sliding-window KV is cheap; 256K total
+          fits alongside the resident MoE synth on a 24GB card. Lower it (or raise
+          the baked N_CPU_MOE) only if the container logs a VRAM allocation failure.
+      - key: AIMEE_LLM_AUTH_TOKEN
+        type: string
+        label: Bearer token (optional)
+        default: ""
+        secret: true
+        description: >-
+          Optional. When set, the gateway requires `Authorization: Bearer <token>`
+          on every request. LEAVE BLANK when this backs aimee-kb — the kb embed
+          path sends no bearer and would get 401s. Only set a token if all callers
+          are bearer-capable. Provide it from the secret store at deploy time, never
+          checked into git.

@@ -4,6 +4,16 @@
 **Part of:** smoothnas-plugins (Step 3 of 9)
 **Depends on:** plugins-02-runtime-integration, mdadm-heat-engine-01-schema
 
+> **Update — the `slot` concept was retired.** A tier-bound volume is
+> now bound to a **tier** only, never to a slot/array. Its data lives on
+> the tier's smoothfs mount and is placed across the tier's arrays by the
+> tiering engine exactly like any other file — so plugins are treated like
+> ordinary NAS files, not pinned to a specific array. The manifest `slot`
+> field is deprecated: still parsed for backward-compat with older
+> manifests, but ignored, absent from preflight, and dropped from the
+> UI, the first-party catalog, and the "Slot exists" gate below. The rest
+> of this document is preserved as the original design intent.
+
 ---
 
 ## Problem

@@ -1,240 +1,231 @@
-# llama-cpp — plain docker-compose plugin (compose-migration). GPU/runtime access is standard
-# compose devices/device_cgroup_rules/cap_add; operator config is x-smoothnas.config.
-# Converted from the native manifest.
-name: llama-cpp
-services:
-  llama-cpp:
-    image: ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp:0.8.1-cpu@sha256:0435aeadb124edde5d5b1b3196edc5a5e4ebe6782667c2f9202977f0f27bb560
-    restart: unless-stopped
-    command:
-    - --temp
-    - ${LLAMA_ARG_TEMP:-0.8}
-    - --ctx-size
-    - ${CTX_SIZE:-32768}
-    - --parallel
-    - ${PARALLEL_SLOTS:-1}
-    - --reasoning-format
-    - ${LLAMA_ARG_REASONING_FORMAT:-auto}
-    - --threads
-    - ${THREADS:-0}
-    mem_limit: ${MEMORY_LIMIT:-32GiB}
-    pids_limit: 1024
-    oom_score_adj: 100
-    environment:
-      MODEL_URL: ${MODEL_URL:-}
-      LLAMA_ARG_TEMP: ${LLAMA_ARG_TEMP:-0.8}
-      CTX_SIZE: ${CTX_SIZE:-32768}
-      PARALLEL_SLOTS: ${PARALLEL_SLOTS:-1}
-      MEMORY_LIMIT: ${MEMORY_LIMIT:-32GiB}
-      LLAMA_ARG_FLASH_ATTN: ${LLAMA_ARG_FLASH_ATTN:-on}
-      LLAMA_ARG_CACHE_TYPE_K: ${LLAMA_ARG_CACHE_TYPE_K:-q8_0}
-      LLAMA_ARG_CACHE_TYPE_V: ${LLAMA_ARG_CACHE_TYPE_V:-q8_0}
-      LLAMA_ARG_REASONING_FORMAT: ${LLAMA_ARG_REASONING_FORMAT:-auto}
-      SPECULATIVE_MODE: ${SPECULATIVE_MODE:-none}
-      SPEC_DRAFT_MODEL_PATH: ${SPEC_DRAFT_MODEL_PATH:-}
-      SPEC_DRAFT_MODEL_URL: ${SPEC_DRAFT_MODEL_URL:-}
-      SPEC_DRAFT_BLOCK_SIZE: ${SPEC_DRAFT_BLOCK_SIZE:-3}
-      SPEC_DRAFT_MAX_TOKENS: ${SPEC_DRAFT_MAX_TOKENS:-8}
-      SPEC_DRAFT_N_MAX: ${SPEC_DRAFT_N_MAX:-3}
-      SPEC_DRAFT_MIN_TOKENS: ${SPEC_DRAFT_MIN_TOKENS:-0}
-      SPEC_DRAFT_P_MIN: ${SPEC_DRAFT_P_MIN:-0.75}
-      SPEC_DRAFT_P_SPLIT: ${SPEC_DRAFT_P_SPLIT:-0.10}
-      SPEC_DRAFT_CACHE_TYPE_K: ${SPEC_DRAFT_CACHE_TYPE_K:-q8_0}
-      SPEC_DRAFT_CACHE_TYPE_V: ${SPEC_DRAFT_CACHE_TYPE_V:-q8_0}
-      THREADS: ${THREADS:-0}
-      SMOOTHNAS_BEARER_EXPECTED: ${SMOOTHNAS_BEARER_EXPECTED:-}
-    volumes:
-    - models:/models
-    expose:
-    - '8080'
-volumes:
-  models:
-    x-smoothnas:
-      tier: SSD
-      minSize: 30G
-x-smoothnas:
-  description: llama.cpp inference server, CPU only, for quick experiments before selecting a GPU variant.
+apiVersion: smoothnas.io/v1
+kind: Plugin
+metadata:
+  name: llama-cpp
+  version: 0.8.1
+  description: >
+    llama.cpp inference server, CPU only, for quick experiments before selecting
+    a GPU variant.
   vendor: smoothnas
   homepage: https://github.com/RakuenSoftware/smoothnas-plugin-llama-cpp
-  ui:
-    service: llama-cpp
+artifact:
+  type: oci-image
+  image: ghcr.io/rakuensoftware/smoothnas-plugin-llama-cpp:0.8.1-cpu
+  digest: sha256:0435aeadb124edde5d5b1b3196edc5a5e4ebe6782667c2f9202977f0f27bb560
+container:
+  command:
+    - '--temp'
+    - ${LLAMA_ARG_TEMP}
+    - '--ctx-size'
+    - ${CTX_SIZE}
+    - '--parallel'
+    - ${PARALLEL_SLOTS}
+    - '--reasoning-format'
+    - ${LLAMA_ARG_REASONING_FORMAT}
+    - '--threads'
+    - ${THREADS}
+  restartPolicy: unless-stopped
+  resources:
+    memory: ${MEMORY_LIMIT}
+volumes:
+  - name: models
+    mode: tier-bound
+    minSize: 30G
+    bind: /models
+ports:
+  - name: http
     port: 8080
+    protocol: tcp
+    expose: true
+ui:
+  embed:
     path: /
     auth: bearer-injected
-  config:
+profiles:
+  - default-limits
+config:
   - key: MODEL_URL
-    label: Model download URL
     type: string
-    description: 'HTTP(S) URL for the GGUF model this one-model container should run.
-
-      On start, the wrapper caches this URL under /models using the GGUF filename
-
-      inside the container, leaving other cached GGUFs in place when the URL changes.
-
-      '
+    label: Model download URL
     default: ''
+    description: >
+      HTTP(S) URL for the GGUF model this one-model container should run.
+
+      On start, the wrapper caches this URL under /models using the GGUF
+      filename
+
+      inside the container, leaving other cached GGUFs in place when the URL
+      changes.
   - key: LLAMA_ARG_TEMP
-    label: Temperature
     type: number
-    description: Sampling temperature passed to llama.cpp. Lower values are more deterministic.
+    label: Temperature
+    default: '0.8'
     min: '0'
     max: '2'
     step: '0.01'
-    default: '0.8'
+    description: >-
+      Sampling temperature passed to llama.cpp. Lower values are more
+      deterministic.
   - key: CTX_SIZE
-    label: Context window
     type: number
-    description: Total server context in tokens. Increase after confirming the selected model fits without
-      exhausting host memory.
+    label: Context window
+    default: '32768'
     min: '1024'
     step: '1024'
     unit: tokens
-    default: '32768'
+    description: >-
+      Total server context in tokens. Increase after confirming the selected
+      model fits without exhausting host memory.
   - key: PARALLEL_SLOTS
-    label: Request slots
     type: number
-    description: llama.cpp parallel request slots passed to --parallel.
+    label: Request slots
+    default: '1'
     min: '1'
     max: '16'
     step: '1'
-    default: '1'
+    description: llama.cpp parallel request slots passed to --parallel.
   - key: MEMORY_LIMIT
-    label: Container memory
     type: string
-    description: LXC memory limit for the llama.cpp container.
+    label: Container memory
     default: 32GiB
+    description: LXC memory limit for the llama.cpp container.
   - key: LLAMA_ARG_FLASH_ATTN
-    label: Flash attention
     type: select
-    description: Enables llama.cpp flash attention.
+    label: Flash attention
     default: 'on'
     options:
-    - value: 'on'
-    - value: 'off'
+      - value: 'on'
+      - value: 'off'
+    description: Enables llama.cpp flash attention.
   - key: LLAMA_ARG_CACHE_TYPE_K
+    type: select
     label: K cache type
-    type: select
+    default: q8_0
+    options:
+      - value: q8_0
+      - value: q5_0
+      - value: q4_0
     description: KV cache K quantization.
-    default: q8_0
-    options:
-    - value: q8_0
-    - value: q5_0
-    - value: q4_0
   - key: LLAMA_ARG_CACHE_TYPE_V
-    label: V cache type
     type: select
-    description: KV cache V quantization.
+    label: V cache type
     default: q8_0
     options:
-    - value: q8_0
-    - value: q5_0
-    - value: q4_0
+      - value: q8_0
+      - value: q5_0
+      - value: q4_0
+    description: KV cache V quantization.
   - key: LLAMA_ARG_REASONING_FORMAT
-    label: Reasoning output format
     type: select
-    description: Controls llama.cpp reasoning extraction. Use none to keep thinking in message.content
-      instead of emitting message.reasoning_content.
+    label: Reasoning output format
     default: auto
     options:
-    - value: auto
-    - value: none
-    - value: deepseek
-    - value: deepseek-legacy
+      - value: auto
+      - value: none
+      - value: deepseek
+      - value: deepseek-legacy
+    description: >-
+      Controls llama.cpp reasoning extraction. Use none to keep thinking in
+      message.content instead of emitting message.reasoning_content.
   - key: SPECULATIVE_MODE
-    label: Speculative decoding
     type: select
-    description: Enables llama.cpp speculative decoding. Use mtp for Gemma4 assistant drafting with an
-      MTP head GGUF, or nextn for Qwen3.6 built-in MTP heads.
+    label: Speculative decoding
     default: none
     options:
-    - value: none
-    - value: mtp
-    - value: draft
-    - value: nextn
+      - value: none
+      - value: mtp
+      - value: draft
+      - value: nextn
+    description: >-
+      Enables llama.cpp speculative decoding. Use mtp for Gemma4 assistant
+      drafting with an MTP head GGUF, or nextn for Qwen3.6 built-in MTP heads.
   - key: SPEC_DRAFT_MODEL_PATH
+    type: string
     label: MTP head GGUF path
-    type: string
-    description: Gemma4 assistant GGUF path inside the container. With SPECULATIVE_MODE=mtp this is passed
-      as --mtp-head. With SPECULATIVE_MODE=nextn, set this to the cached target model path for combined
-      Qwen3.6 MTP GGUFs.
     default: ''
+    description: >-
+      Gemma4 assistant GGUF path inside the container. With SPECULATIVE_MODE=mtp
+      this is passed as --mtp-head. With SPECULATIVE_MODE=nextn, set this to the
+      cached target model path for combined Qwen3.6 MTP GGUFs.
   - key: SPEC_DRAFT_MODEL_URL
-    label: MTP head download URL
     type: string
-    description: Optional HTTP(S) URL for the Gemma4 assistant GGUF. When set, the wrapper downloads it
-      before startup and uses it as the --mtp-head model.
+    label: MTP head download URL
     default: ''
+    description: >-
+      Optional HTTP(S) URL for the Gemma4 assistant GGUF. When set, the wrapper
+      downloads it before startup and uses it as the --mtp-head model.
   - key: SPEC_DRAFT_BLOCK_SIZE
-    label: Draft block size
     type: number
-    description: Gemma4 MTP draft block size passed to --draft-block-size.
+    label: Draft block size
+    default: '3'
     min: '2'
     step: '1'
-    default: '3'
+    description: Gemma4 MTP draft block size passed to --draft-block-size.
   - key: SPEC_DRAFT_MAX_TOKENS
+    type: number
     label: Draft max tokens
-    type: number
-    description: Maximum number of draft tokens proposed during speculative decoding.
-    min: '1'
-    step: '1'
     default: '8'
-  - key: SPEC_DRAFT_N_MAX
-    label: Built-in MTP heads
-    type: number
-    description: Number of Qwen NextN draft tokens passed to --draft-max.
     min: '1'
     step: '1'
+    description: Maximum number of draft tokens proposed during speculative decoding.
+  - key: SPEC_DRAFT_N_MAX
+    type: number
+    label: Built-in MTP heads
     default: '3'
+    min: '1'
+    step: '1'
+    description: Number of Qwen NextN draft tokens passed to --draft-max.
   - key: SPEC_DRAFT_MIN_TOKENS
+    type: number
     label: Draft min tokens
-    type: number
+    default: '0'
+    min: '0'
+    step: '1'
     description: Minimum number of draft tokens used during speculative decoding.
-    min: '0'
-    step: '1'
-    default: '0'
   - key: SPEC_DRAFT_P_MIN
+    type: number
     label: Draft probability floor
-    type: number
-    description: Minimum speculative decoding probability passed to --draft-p-min.
-    min: '0'
-    max: '1'
-    step: '0.01'
     default: '0.75'
-  - key: SPEC_DRAFT_P_SPLIT
-    label: Draft split probability
-    type: number
-    description: Speculative decoding split probability for compatible non-server speculative runtimes;
-      ignored by llama-server.
     min: '0'
     max: '1'
     step: '0.01'
-    default: '0.10'
-  - key: SPEC_DRAFT_CACHE_TYPE_K
-    label: Draft K cache type
-    type: select
-    description: KV cache K quantization for the draft/MTP model.
-    default: q8_0
-    options:
-    - value: q8_0
-    - value: q5_0
-    - value: q4_0
-  - key: SPEC_DRAFT_CACHE_TYPE_V
-    label: Draft V cache type
-    type: select
-    description: KV cache V quantization for the draft/MTP model.
-    default: q8_0
-    options:
-    - value: q8_0
-    - value: q5_0
-    - value: q4_0
-  - key: THREADS
-    label: CPU threads
+    description: Minimum speculative decoding probability passed to --draft-p-min.
+  - key: SPEC_DRAFT_P_SPLIT
     type: number
-    description: CPU threads. 0 = let llama.cpp auto-detect.
+    label: Draft split probability
+    default: '0.10'
+    min: '0'
+    max: '1'
+    step: '0.01'
+    description: >-
+      Speculative decoding split probability for compatible non-server
+      speculative runtimes; ignored by llama-server.
+  - key: SPEC_DRAFT_CACHE_TYPE_K
+    type: select
+    label: Draft K cache type
+    default: q8_0
+    options:
+      - value: q8_0
+      - value: q5_0
+      - value: q4_0
+    description: KV cache K quantization for the draft/MTP model.
+  - key: SPEC_DRAFT_CACHE_TYPE_V
+    type: select
+    label: Draft V cache type
+    default: q8_0
+    options:
+      - value: q8_0
+      - value: q5_0
+      - value: q4_0
+    description: KV cache V quantization for the draft/MTP model.
+  - key: THREADS
+    type: number
+    label: CPU threads
+    default: '0'
     min: '0'
     step: '1'
-    default: '0'
+    description: CPU threads. 0 = let llama.cpp auto-detect.
   - key: SMOOTHNAS_BEARER_EXPECTED
     type: string
-    description: Auto-populated by SmoothNAS; do not edit manually.
     secret: true
+    description: Auto-populated by SmoothNAS; do not edit manually.

@@ -1,109 +1,151 @@
-# aimee-combined — server + knowledge base in one plugin, with bundled pgvector
-# Postgres and embedder, as a plain docker-compose project. The full /v1 surface
-# AND the webchat browser UI (HTTPS :8443) plus shared/vector memory as a single
-# self-contained plugin, wired by compose service discovery. The only SmoothNAS
-# extensions are the top-level x-smoothnas block (display + UI embed + operator
-# config) and x-smoothnas.tier on the named volumes.
-name: aimee-combined
+# aimee-combined — aimee-server + aimee-kb co-located, with bundled datastores.
+#
+# The aimee-server-kb container runs BOTH aimee binaries: the kb listens on
+# loopback :8741 inside the container and the server (published on :8740)
+# reaches it over loopback HTTP. As a compose-style SmoothNAS plugin, this also
+# brings up its OWN pgvector Postgres and embedder as sibling services — the
+# full split server+kb stack in one managed plugin, with nothing external to
+# configure.
+#
+# NOTE: the server's worker threads need a 64 MB stack. The plugin manifest
+# cannot yet raise the container stack rlimit; if the aimee-server-kb container
+# segfaults on startup, raise its stack rlimit at the runtime level (see the
+# repo README, "Stack rlimit").
+#
+# Images:
+#   ghcr.io/rakuensoftware/aimee-server-kb   (combined server+kb)
+#   pgvector/pgvector:pg17                    (Postgres, public)
+#   ghcr.io/rakuensoftware/aimee-embedder     (embedder)
+apiVersion: smoothnas.io/v1
+kind: Plugin
+metadata:
+  name: aimee-combined
+  version: 0.2.5
+  description: >-
+    aimee server + knowledge base in one container, with bundled pgvector
+    Postgres and embedder — the full /v1 surface and shared/vector memory as a
+    single self-contained plugin. No external database or embedder to configure.
+  vendor: RakuenSoftware
+  homepage: https://github.com/RakuenSoftware/aimee
 services:
-  # pgvector Postgres. uid 1000:1000 matches the smoothfs forced-owner on the
-  # tier-bound data volume so the server can write its data dir.
-  postgres:
-    image: pgvector/pgvector:pg17
-    user: "1000:1000"
-    restart: unless-stopped
-    environment:
+  - name: postgres
+    artifact:
+      type: oci-image
+      image: pgvector/pgvector:pg17
+    container:
+      restartPolicy: unless-stopped
+      # Run as uid 1000 to match the smoothfs tier's forced owner (the stock
+      # postgres image otherwise drops to its own user and can't access its
+      # uid-1000-owned data dir). Requires SmoothNAS v0.1.20+ runtime.
+      user: "1000:1000"
+    env:
       POSTGRES_DB: aimee_shared
       POSTGRES_USER: aimee
       POSTGRES_PASSWORD: aimee
     volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
+      - name: pgdata
+        mode: tier-bound
+        bind: /var/lib/postgresql/data
+    health:
       test: ["CMD-SHELL", "pg_isready -U aimee -d aimee_shared"]
       interval: 10s
       timeout: 5s
       retries: 5
-  # Embedding service; internal-only (reached as embedder:8080), no published port.
-  embedder:
-    image: ghcr.io/rakuensoftware/aimee-embedder:latest
-    restart: unless-stopped
+
+  - name: embedder
+    artifact:
+      type: oci-image
+      image: ghcr.io/rakuensoftware/aimee-embedder:latest
+    container:
+      restartPolicy: unless-stopped
     volumes:
-      - models:/opt/models
-    healthcheck:
+      - name: models
+        mode: tier-bound
+        bind: /opt/models
+    ports:
+      - name: http
+        port: 8080
+        protocol: tcp
+        expose: false
+    health:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 30s
-  server-kb:
-    image: ghcr.io/rakuensoftware/aimee-server-kb:latest
-    restart: unless-stopped
-    depends_on:
-      postgres: { condition: service_healthy }
-      embedder: { condition: service_healthy }
-    environment:
-      AIMEE_DB2_URL: postgresql://aimee:aimee@postgres:5432/aimee_shared
-      AIMEE_EMBEDDER_URL: http://embedder:8080
+      startPeriod: 30s
+
+  - name: server-kb
+    artifact:
+      type: oci-image
+      image: ghcr.io/rakuensoftware/aimee-server-kb:latest
+    container:
+      # The entrypoint starts the kb, waits for its health, then execs the
+      # server (server↔kb wiring is internal: AIMEE_KB_API_URL=
+      # http://127.0.0.1:8741 is baked in). No command override needed.
+      restartPolicy: unless-stopped
+    dependsOn:
+      postgres:
+        condition: service_healthy
+      embedder:
+        condition: service_healthy
+    env:
+      AIMEE_DB2_URL: postgresql://aimee:aimee@{{service.postgres.host}}:5432/aimee_shared
+      AIMEE_EMBEDDER_URL: http://{{service.embedder.host}}:8080
       AIMEE_SERVER_HTTP_BIND: "1"
       AIMEE_KB_HTTP_BIND: "1"
-      LLM_ENDPOINT: "${LLM_ENDPOINT:-}"
-      LLM_MODEL: "${LLM_MODEL:-}"
-      AIMEE_WEBCHAT_ENABLED: "${AIMEE_WEBCHAT_ENABLED:-true}"
-      AIMEE_WEBCHAT_USER: "${AIMEE_WEBCHAT_USER:-}"
-      AIMEE_WEBCHAT_PASSWORD: "${AIMEE_WEBCHAT_PASSWORD:-}"
     volumes:
-      - home:/var/lib/aimee
-      - workspaces:/var/lib/aimee-workspaces
+      - name: home
+        mode: tier-bound
+        bind: /var/lib/aimee
+      - name: workspaces
+        mode: tier-bound
+        bind: /var/lib/aimee-workspaces
     ports:
-      - "8740:8740" # authenticated /v1 JSON API
-      - "8443:8443" # webchat UI (HTTPS)
-volumes:
-  pgdata:
-    x-smoothnas: { tier: HDD }
-  models:
-    x-smoothnas: { tier: HDD }
-  home:
-    x-smoothnas: { tier: HDD }
-  workspaces:
-    x-smoothnas: { tier: HDD }
-x-smoothnas:
-  description: >-
-    aimee server + knowledge base in one plugin, with bundled pgvector Postgres
-    and embedder — the full /v1 surface, webchat UI, and shared/vector memory as
-    a single self-contained plugin. No external database or embedder to configure.
-  vendor: RakuenSoftware
-  homepage: https://github.com/RakuenSoftware/aimee
-  ui:
-    service: server-kb
-    port: 8443
-    path: /
-  config:
-    - key: LLM_ENDPOINT
-      label: LLM endpoint (optional)
-      type: string
-      default: ""
-      description: >-
-        Optional. OpenAI-compatible endpoint to enable the kb synthesis / curator
-        passes. Blank = disabled.
-    - key: LLM_MODEL
-      label: LLM model (optional)
-      type: string
-      default: ""
-      description: Optional. Model name to request from the LLM endpoint.
-    - key: AIMEE_WEBCHAT_ENABLED
-      label: Browser webchat UI
-      type: bool
-      default: "true"
-      description: >-
-        Browser UI on HTTPS :8443 (first-class, on by default). Turn off to serve
-        the /v1 API only.
-    - key: AIMEE_WEBCHAT_USER
-      label: Webchat login user
-      type: string
-      default: ""
-      description: PAM login username for the browser UI (set with a password to enable sign-in).
-    - key: AIMEE_WEBCHAT_PASSWORD
-      label: Webchat login password
-      type: string
-      secret: true
-      description: PAM login password for the browser UI (set alongside the user).
+      # The server /v1 listener is the container's public contract.
+      - name: api
+        port: 8740
+        protocol: tcp
+        expose: false
+        hostExpose: true
+      # Browser webchat UI (HTTPS). First-class and on by default in the image;
+      # published so it is reachable from the host/LAN.
+      - name: webchat
+        port: 8443
+        protocol: tcp
+        expose: false
+        hostExpose: true
+    config:
+      - key: LLM_ENDPOINT
+        type: string
+        label: LLM endpoint (optional)
+        default: ""
+        description: >-
+          Optional. OpenAI-compatible endpoint to enable the kb synthesis /
+          curator passes. Blank = disabled.
+      - key: LLM_MODEL
+        type: string
+        label: LLM model (optional)
+        default: ""
+        description: Optional. Model name to request from the LLM endpoint.
+      - key: AIMEE_WEBCHAT_ENABLED
+        type: boolean
+        label: Browser webchat UI
+        default: true
+        description: >-
+          Browser UI on HTTPS :8443 (first-class, on by default). Turn off to
+          serve the /v1 API only.
+      - key: AIMEE_WEBCHAT_USER
+        type: string
+        label: Webchat login user
+        default: ""
+        description: >-
+          PAM login username for the browser UI. Set this together with a
+          password to enable sign-in; leave blank to serve the login page with
+          no account.
+      - key: AIMEE_WEBCHAT_PASSWORD
+        type: string
+        label: Webchat login password
+        default: ""
+        secret: true
+        description: >-
+          PAM login password for the browser UI (set alongside the user).

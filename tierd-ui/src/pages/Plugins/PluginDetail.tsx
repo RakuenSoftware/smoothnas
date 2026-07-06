@@ -348,7 +348,7 @@ function OverviewTab({ detail, name, onChanged }: { detail: Detail; name: string
               {detail.volumes.map(v => (
                 <tr key={v.Name}>
                   <td className="mono">{v.Name}</td>
-                  <td>{v.Mode}{v.Slot ? ` (${v.Slot})` : ''}</td>
+                  <td>{v.Mode}</td>
                   <td className="mono">{v.TierPool || '—'}</td>
                   <td className="mono">{v.BindPath}</td>
                   <td className="mono">
