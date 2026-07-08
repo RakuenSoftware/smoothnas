@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -185,6 +186,17 @@ func (l *Lifecycle) composeSpecResolved(rec *PluginRecord) (compose.ProjectSpec,
 		binds, err := l.resolveAndPinComposeVolumes(rec.Plugin.Name, tvols)
 		if err != nil {
 			return compose.ProjectSpec{}, err
+		}
+		// Create each tiered bind-source dir before it is mounted. The native
+		// install path mkdirs its volume dirs (see Installer.resolveVolumePaths);
+		// the compose flow only REWRITES mounts to these host paths, so without
+		// this nothing creates the source and lxc-start aborts with ENOENT on the
+		// bind mount ("Failed to mount .../compose/<vol>"). Idempotent; matches the
+		// native 0o750.
+		for _, hostPath := range binds {
+			if err := os.MkdirAll(hostPath, 0o750); err != nil {
+				return compose.ProjectSpec{}, fmt.Errorf("create tiered volume dir %s: %w", hostPath, err)
+			}
 		}
 		if yamlBytes, err = compose.RewriteTieredBinds(yamlBytes, binds); err != nil {
 			return compose.ProjectSpec{}, err

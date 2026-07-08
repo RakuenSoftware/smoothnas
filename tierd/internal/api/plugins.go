@@ -99,6 +99,7 @@ func NewPluginsHandler(
 //
 //	GET    /api/plugins                       list
 //	POST   /api/plugins/preflight             preflight a manifest
+//	GET    /api/plugins/catalog/local         in-tree (repo-less) plugins
 //	POST   /api/plugins/install               install (manifest URL or body)
 //	GET    /api/plugins/<name>                detail
 //	DELETE /api/plugins/<name>                full uninstall
@@ -143,6 +144,12 @@ func (h *PluginsHandler) Route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.catalogLatest(w, r)
+	case path == "/catalog/local":
+		if r.Method != http.MethodGet {
+			jsonMethodNotAllowed(w)
+			return
+		}
+		h.catalogLocal(w, r)
 	case path == "/gpus":
 		if r.Method != http.MethodGet {
 			jsonMethodNotAllowed(w)
