@@ -430,6 +430,11 @@ jobs:
           name: smoothnas-${{ matrix.deb_arch }}
           path: stage
           if-no-files-found: error
+          # Intra-run handoff only: the release job downloads and merges these
+          # into the GitHub Release, after which they are dead weight. Expire
+          # fast so per-arch build images (~300 MB each) do not accumulate in
+          # Actions storage across every release run.
+          retention-days: 1
 
   release:
     needs: [meta, build]
