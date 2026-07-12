@@ -28,37 +28,50 @@ import (
 // path so tierd does not collide with an operator-installed Docker.
 const DefaultSocketPath = "/run/smoothnas-runtime/docker.sock"
 
+// defaultResponseHeaderTimeout guards the normal client against a daemon that
+// accepts a request but never replies. Container create bypasses it via the
+// slow client (see Client.httpSlow). A package var so tests can shorten it.
+var defaultResponseHeaderTimeout = 60 * time.Second
+
 // Client is a Docker Engine API client over a unix socket. Safe for
 // concurrent use by multiple goroutines.
 type Client struct {
 	socketPath string
 	http       *http.Client
+	// httpSlow has no ResponseHeaderTimeout: container create clones a
+	// possibly multi-GB image rootfs before the daemon writes response
+	// headers, which routinely exceeds the default 60s. Bounded instead by the
+	// caller's context deadline (see CreateContainer).
+	httpSlow *http.Client
 }
 
 // NewClient constructs a client pointed at the given unix socket.
 // Pass DefaultSocketPath in production; tests pass an httptest
 // socket path.
 func NewClient(socketPath string) *Client {
-	tr := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socketPath)
-		},
-		// LXC2Docker terminates idle connections aggressively; keep
-		// this small so we don't pile up half-dead conns during
-		// reconnection storms.
-		MaxIdleConns:        4,
-		IdleConnTimeout:     30 * time.Second,
-		DisableCompression:  true,
-		ResponseHeaderTimeout: 60 * time.Second,
+	dial := func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", socketPath)
+	}
+	transport := func(headerTimeout time.Duration) *http.Transport {
+		return &http.Transport{
+			DialContext: dial,
+			// LXC2Docker terminates idle connections aggressively; keep
+			// this small so we don't pile up half-dead conns during
+			// reconnection storms.
+			MaxIdleConns:          4,
+			IdleConnTimeout:       30 * time.Second,
+			DisableCompression:    true,
+			ResponseHeaderTimeout: headerTimeout,
+		}
 	}
 	return &Client{
 		socketPath: socketPath,
-		http: &http.Client{
-			Transport: tr,
-			// No global timeout — long-running streams (logs, events)
-			// need to stay open. Per-call contexts handle cancellation.
-		},
+		// No global timeout — long-running streams (logs, events) need to stay
+		// open. Per-call contexts handle cancellation; ResponseHeaderTimeout
+		// guards against a daemon that accepts but never replies.
+		http:     &http.Client{Transport: transport(defaultResponseHeaderTimeout)},
+		httpSlow: &http.Client{Transport: transport(0)},
 	}
 }
 
@@ -122,15 +135,15 @@ func (c *Client) Info(ctx context.Context) (Info, error) {
 // Adding fields here is cheap; new fields just default to zero when
 // the daemon doesn't supply them.
 type Info struct {
-	ServerVersion  string `json:"ServerVersion"`
+	ServerVersion   string `json:"ServerVersion"`
 	OperatingSystem string `json:"OperatingSystem"`
-	KernelVersion  string `json:"KernelVersion"`
-	NCPU           int    `json:"NCPU"`
-	MemTotal       int64  `json:"MemTotal"`
-	Driver         string `json:"Driver"`
-	Containers     int    `json:"Containers"`
-	Images         int    `json:"Images"`
-	Name           string `json:"Name"`
+	KernelVersion   string `json:"KernelVersion"`
+	NCPU            int    `json:"NCPU"`
+	MemTotal        int64  `json:"MemTotal"`
+	Driver          string `json:"Driver"`
+	Containers      int    `json:"Containers"`
+	Images          int    `json:"Images"`
+	Name            string `json:"Name"`
 }
 
 // APIError is the typed error returned for non-2xx responses with a
@@ -170,6 +183,12 @@ func IsConflict(err error) bool {
 // query, when non-nil, is appended as a URL query string. body, when
 // non-nil, is JSON-encoded and sent with Content-Type: application/json.
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body any) (*http.Response, error) {
+	return c.doVia(ctx, c.http, method, path, query, body)
+}
+
+// doVia is do() with an explicit http client, so slow operations (container
+// create) can use httpSlow (no ResponseHeaderTimeout).
+func (c *Client) doVia(ctx context.Context, cl *http.Client, method, path string, query url.Values, body any) (*http.Response, error) {
 	full := "http://unix" + path
 	if len(query) > 0 {
 		full += "?" + query.Encode()
@@ -192,7 +211,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := c.http.Do(req)
+	resp, err := cl.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("runtime %s %s: %w", method, path, err)
 	}
@@ -231,7 +250,12 @@ func (c *Client) getJSON(ctx context.Context, path string, query url.Values, out
 // and closes the body. out may be nil if the caller doesn't care
 // about the response body.
 func (c *Client) postJSON(ctx context.Context, path string, query url.Values, body, out any) error {
-	resp, err := c.do(ctx, http.MethodPost, path, query, body)
+	return c.postJSONVia(ctx, c.http, path, query, body, out)
+}
+
+// postJSONVia is postJSON with an explicit http client (see doVia).
+func (c *Client) postJSONVia(ctx context.Context, cl *http.Client, path string, query url.Values, body, out any) error {
+	resp, err := c.doVia(ctx, cl, http.MethodPost, path, query, body)
 	if err != nil {
 		return err
 	}

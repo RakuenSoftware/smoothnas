@@ -189,7 +189,6 @@ export default function PluginInstall() {
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
 
   // Pre-fetch tiers as soon as the wizard mounts so the picker step
   // is ready by the time the operator gets there. Cheap call; no
@@ -288,10 +287,10 @@ export default function PluginInstall() {
       : undefined;
     api.installPlugin({ manifest: manifestText, tierAssignments, config: { ...configValues } })
       .then(() => {
-        setSuccess(t('plugins.install.success', { name: parsed.metadata.name }));
-        // Brief delay so the operator sees the success banner,
-        // then bounce back to /plugins.
-        setTimeout(() => navigate('/plugins'), 1200);
+        // Install registers immediately and materialises in the background, so
+        // leave the flow right away — the new plugin shows up in the list in its
+        // pulling/creating state. No waiting on a multi-minute image pull.
+        navigate('/plugins');
       })
       .catch(e => setError(extractError(e, t('plugins.install.error.generic'))))
       .finally(() => setBusy(false));
@@ -323,9 +322,6 @@ export default function PluginInstall() {
           <div className="wizard-error">
             <pre>{error}</pre>
           </div>
-        )}
-        {success && (
-          <div className="wizard-success">{success}</div>
         )}
 
         <div className="wizard-step">
@@ -391,7 +387,7 @@ export default function PluginInstall() {
               <button
                 className="btn primary"
                 onClick={install}
-                disabled={busy || !!success}
+                disabled={busy}
               >
                 {busy
                   ? t('plugins.install.action.installing')
