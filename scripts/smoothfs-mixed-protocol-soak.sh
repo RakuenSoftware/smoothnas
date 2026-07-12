@@ -6,6 +6,15 @@ if [[ ${EUID} -ne 0 ]]; then
     exit 1
 fi
 
+# Like the protocol gate, this soak only runs on a self-hosted runner
+# provisioned with the SmoothFS stack. Its workflow is documented to "cleanly
+# skip when no such runner exists", so exit 0 with a SKIP notice when a
+# prerequisite is missing instead of failing CI on every branch.
+skip() {
+    echo "SKIP: mixed protocol soak — $1."
+    exit 0
+}
+
 ROOT="${SMOOTHFS_SOAK_ROOT:-/tmp/smoothnas-smoothfs-soak}"
 UUID="${SMOOTHFS_SOAK_UUID:-66666666-6666-6666-6666-666666666666}"
 PORT="${SMOOTHFS_SOAK_SMB_PORT:-9445}"
@@ -15,8 +24,7 @@ SMBD_PID=""
 
 require_cmd() {
     if ! command -v "$1" >/dev/null 2>&1; then
-        echo "ERROR: required command missing: $1" >&2
-        exit 1
+        skip "required command '$1' not present on this runner"
     fi
 }
 
@@ -37,6 +45,12 @@ require_cmd mkfs.xfs
 require_cmd exportfs
 require_cmd smbd
 require_cmd mount.cifs
+
+# The soak mounts smoothfs directly; without the kernel module this runner
+# cannot host the test, so skip rather than fail.
+if ! lsmod 2>/dev/null | grep -q '^smoothfs' && ! modinfo smoothfs >/dev/null 2>&1; then
+    skip "smoothfs kernel module not available on this runner"
+fi
 
 echo "=== preparing smoothfs two-tier loopback pool ==="
 cleanup
