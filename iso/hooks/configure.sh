@@ -125,7 +125,11 @@ GPUUNIT
 chroot "$TARGET" systemctl enable smoothnas-gpu-init.service >/dev/null 2>&1 || true
 
 # journald: don't forward messages to /dev/console so the login VT is
-# not polluted by service log output once the system is up.
+# not polluted by service log output once the system is up. Also CAP the
+# journal so it can't grow unbounded on the small root LV — the OS disk is
+# ~22 GB and persistent tierd/plugin logs otherwise fill it (observed at ~1 GB
+# and climbing). 200 MB is plenty for boot/diagnostics; the rest lives on the
+# storage tiers, not root.
 mkdir -p "$TARGET/etc/systemd/journald.conf.d"
 cat > "$TARGET/etc/systemd/journald.conf.d/00-smoothnas-quiet.conf" << 'JOURNALD'
 [Journal]
@@ -133,6 +137,8 @@ ForwardToConsole=no
 ForwardToWall=no
 MaxLevelConsole=emerg
 MaxLevelWall=emerg
+SystemMaxUse=200M
+SystemKeepFree=500M
 JOURNALD
 
 # /etc/issue: just the SmoothNAS banner with the IP and a hint that the

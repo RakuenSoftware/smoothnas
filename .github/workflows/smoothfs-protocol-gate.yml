@@ -15,22 +15,67 @@ permissions:
 jobs:
   linux-protocol-gate:
     name: protocol and mixed-client soak
-    # Requires a self-hosted Linux runner labelled `smoothnas-protocol`
-    # (mounts SmoothFS, loads kernel modules, runs as root). The repo
-    # variable SMOOTHNAS_PROTOCOL_GATE_ENABLED gates this job so it
-    # cleanly skips when no such runner exists instead of queuing
-    # indefinitely. Set the variable to "true" once the runner is wired up.
-    if: vars.SMOOTHNAS_PROTOCOL_GATE_ENABLED == 'true'
-    runs-on: [self-hosted, smoothnas-protocol]
-    timeout-minutes: 90
+    # Runs on a stock GitHub-hosted runner. SmoothFS needs a >=6.18 kernel
+    # (mnt_idmap VFS API) that GitHub's runner images do not ship, so we
+    # boot a clean >=6.18 mainline kernel under virtme-ng/QEMU (KVM via the
+    # runner's /dev/kvm), build the module + Samba VFS against it, and run
+    # the protocol gate + mixed soak inside that guest.
+    #
+    # The whole job runs inside a debian:trixie container: the SmoothFS
+    # Samba VFS module (vfs_smoothfs.c) targets the trixie Samba 4.22 ABI
+    # and build.sh pins a Debian vendor-suffix, so the userspace Samba the
+    # guest links against must be Debian's — not the runner's Ubuntu build.
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+      # --privileged + /dev/kvm let virtme-ng launch a KVM-accelerated guest
+      # and set up loop devices / virtiofs from inside the job container.
+      options: --privileged --device /dev/kvm
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v6
+      - name: Install git for checkout
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
 
-      - name: Run SmoothFS protocol conformance gate
-        run: sudo -E bash scripts/smoothfs-protocol-gate.sh
+      - name: Check out smoothnas
+        uses: actions/checkout@v6
 
-      - name: Run mixed NFS/SMB/local SmoothFS soak
-        run: sudo -E SMOOTHFS_SOAK_SECONDS=120 bash scripts/smoothfs-mixed-protocol-soak.sh
+      - name: Resolve pinned SmoothFS ref
+        id: pin
+        run: |
+          set -euo pipefail
+          # Track the same ref the ISO/build path consumes, extracted from
+          # `SMOOTHFS_REPO_REF="${SMOOTHFS_REPO_REF:-<ref>}"` in build-iso.sh.
+          ref="$(grep -oE 'SMOOTHFS_REPO_REF:-[^}]+' iso/build-iso.sh | head -n1 | sed 's/.*:-//')"
+          [ -n "$ref" ] || { echo "could not extract SMOOTHFS_REPO_REF from iso/build-iso.sh" >&2; exit 1; }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Pinned SmoothFS ref: $ref"
+
+      - name: Check out SmoothFS at pinned ref
+        uses: actions/checkout@v6
+        with:
+          repository: RakuenSoftware/smoothfs
+          ref: ${{ steps.pin.outputs.ref }}
+          path: deps/smoothfs
+
+      - name: Run SmoothFS protocol gate + mixed soak in a >=6.18 guest
+        run: bash scripts/ci/smoothfs-protocol-gate-ci.sh
+        env:
+          SMOOTHFS_CHECKOUT: deps/smoothfs
+          SMOOTHFS_SOAK_SECONDS: '120'
+
+      - name: Upload gate logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoothfs-protocol-gate-logs-${{ github.run_attempt }}
+          path: |
+            /tmp/smoothfs-vfs-configure.log
+            /tmp/smoothfs-vfs-build.log
+            ${{ github.workspace }}/gate-logs/**
+          if-no-files-found: ignore
 
   windows-smb-soak:
     if: vars.SMOOTHNAS_WINDOWS_SMB_SERVER != '' && vars.SMOOTHNAS_WINDOWS_SMB_SHARE != ''

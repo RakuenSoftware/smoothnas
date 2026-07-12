@@ -172,7 +172,7 @@ func TestLifecycle_ComposeTieredVolumeRewrite(t *testing.T) {
 		t.Fatalf("install: %v", err)
 	}
 	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}}
-	tp.put("fast", "/mnt/fast", "healthy")
+	mnt := tp.putTemp(t, "fast")
 
 	root := t.TempDir()
 	lc := NewLifecycle(store, &fakeRuntime{})
@@ -186,8 +186,13 @@ func TestLifecycle_ComposeTieredVolumeRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(written), "/mnt/fast") || strings.Contains(string(written), "x-smoothnas") {
+	if !strings.Contains(string(written), mnt) || strings.Contains(string(written), "x-smoothnas") {
 		t.Fatalf("compose not rewritten to tier bind:\n%s", written)
+	}
+	// Materialise must create the bind-source dir, or lxc-start aborts on the
+	// mount (ENOENT). It lives under <mount>/.plugins/<plugin>/compose/<vol>.
+	if _, err := os.Stat(filepath.Join(mnt, ".plugins", "app", "compose", "data")); err != nil {
+		t.Fatalf("tiered bind dir not created: %v", err)
 	}
 }
 
@@ -202,8 +207,8 @@ func TestLifecycle_ComposeTieredVolumePinGuardsRetier(t *testing.T) {
 		t.Fatalf("install: %v", err)
 	}
 	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}}
-	tp.put("fast", "/mnt/fast", "healthy")
-	tp.put("slow", "/mnt/slow", "healthy")
+	tp.putTemp(t, "fast")
+	tp.putTemp(t, "slow")
 	lc := NewLifecycle(store, &fakeRuntime{})
 	lc.SetComposeBackend(compose.NewBackend(compose.New("", &recRunner{}), t.TempDir()))
 	lc.SetTierProvider(tp)
@@ -302,7 +307,7 @@ func TestLifecycle_ComposeInstanceExpansion(t *testing.T) {
 		t.Fatalf("expected count=2 configurable, got %d/%v", rec.Plugin.InstanceCount, rec.Plugin.InstanceConfigurable)
 	}
 	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}}
-	tp.put("fast", "/mnt/fast", "healthy")
+	mnt := tp.putTemp(t, "fast")
 	root := t.TempDir()
 	lc := NewLifecycle(store, &fakeRuntime{})
 	lc.SetComposeBackend(compose.NewBackend(compose.New("", &recRunner{}), root))
@@ -315,7 +320,7 @@ func TestLifecycle_ComposeInstanceExpansion(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(written)
-	for _, want := range []string{"gh-runner-1:", "gh-runner-2:", "/mnt/fast", "gh-runner-1-work", "gh-runner-2-work"} {
+	for _, want := range []string{"gh-runner-1:", "gh-runner-2:", mnt, "gh-runner-1-work", "gh-runner-2-work"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("expanded compose missing %q:\n%s", want, s)
 		}
@@ -371,7 +376,7 @@ func TestLifecycle_ComposeScale(t *testing.T) {
 		t.Fatalf("install: %v", err)
 	}
 	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}}
-	tp.put("fast", "/mnt/fast", "healthy")
+	tp.putTemp(t, "fast")
 	root := t.TempDir()
 	r := &recRunner{}
 	lc := NewLifecycle(store, &fakeRuntime{})
@@ -441,7 +446,7 @@ func TestGHRunner_ComposeEndToEnd(t *testing.T) {
 		t.Fatal("secret leaked into stored compose")
 	}
 	tp := &fakeTierProvider{tiers: map[string]*db.TierInstance{}}
-	tp.put("runner-ssd", "/mnt/ssd", "healthy")
+	mnt := tp.putTemp(t, "runner-ssd")
 	root := t.TempDir()
 	r := &recRunner{}
 	lc := NewLifecycle(store, &fakeRuntime{})
@@ -455,7 +460,7 @@ func TestGHRunner_ComposeEndToEnd(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	written, _ := os.ReadFile(filepath.Join(root, "gh-runner", "compose.yaml"))
-	for _, want := range []string{"gh-runner-1:", "gh-runner-2:", "gh-runner-1-work", "/mnt/ssd"} {
+	for _, want := range []string{"gh-runner-1:", "gh-runner-2:", "gh-runner-1-work", mnt} {
 		if !strings.Contains(string(written), want) {
 			t.Fatalf("materialised compose missing %q:\n%s", want, written)
 		}

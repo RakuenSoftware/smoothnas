@@ -358,7 +358,7 @@ export const api = {
       releaseUrl: string;
       // 'builtin' when served from the appliance's bundled snapshot (offline,
       // can't be rate-limited); 'github' when fetched live. Absent on old servers.
-      source?: 'builtin' | 'github';
+      source?: 'builtin' | 'github' | 'local';
       manifests: Array<{
         assetName: string;
         downloadUrl: string;
@@ -366,6 +366,22 @@ export const api = {
         manifest: any;
       }>;
     }>('GET', `/plugins/catalog/latest?repo=${encodeURIComponent(repo)}`),
+  // In-tree (repo-less) first-party plugins shipped inside the smoothnas repo
+  // and served from the appliance as source:'local'. Returns one entry per
+  // plugin; always available offline. Absent (404) on old servers.
+  getPluginCatalogLocal: () =>
+    apiFetch<Array<{
+      repo: string;
+      tagName: string;
+      releaseUrl: string;
+      source?: 'builtin' | 'github' | 'local';
+      manifests: Array<{
+        assetName: string;
+        downloadUrl: string;
+        manifestYaml: string;
+        manifest: any;
+      }>;
+    }>>('GET', '/plugins/catalog/local'),
   getPluginGPUs: () => apiFetch<{ gpus: any[] }>('GET', '/plugins/gpus'),
   preflightPlugin: (req: { manifest: string; tierAssignments?: { default?: string; perVolume?: Record<string, string> } }) =>
     apiFetch<any>('POST', '/plugins/preflight', req),

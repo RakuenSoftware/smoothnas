@@ -1,0 +1,168 @@
+# Plex Media Server — SmoothNAS in-tree plugin (plain docker-compose).
+#
+# This plugin ships INSIDE the smoothnas repo (no dedicated plugin repo, no
+# release to sync): tierd embeds this tree and serves it as a "local" catalog
+# source. It is a plain compose project — `docker compose up` runs it
+# unchanged — annotated with the narrow x-smoothnas extension for catalog
+# display, the console UI embed, operator config, and smoothfs tier placement.
+#
+# Storage: config (Plex database/metadata) and media (your library) are
+# tier-bound named volumes; the operator picks the real tier at install
+# (x-smoothnas.tier here is just the default). transcode is a separate
+# tier-bound scratch volume — NOT a host root-fs path, which fills a small
+# boot disk and fails container-create.
+#
+# GPU: hardware transcoding is plain-compose `devices:` — no profile needed.
+# PLEX_TRANSCODE_DEVICE defaults to the whole /dev/dri tree; set it to a
+# specific render node (e.g. /dev/dri/renderD129 for an AMD 780M/"phoenix"
+# iGPU) to pin transcoding to that GPU and leave a discrete card free for
+# other workloads. Hosts with no render node should clear it (CPU transcode).
+
+name: plex
+
+x-smoothnas:
+  description: >
+    Plex Media Server — organise and stream your movies, TV, music, and
+    photos to any device. Official plexinc/pms-docker image, with its
+    database on a tier-bound volume, your media library on a second
+    tier-bound volume, a tier-bound transcode scratch dir, and optional
+    AMD VAAPI / Intel QuickSync hardware transcoding via /dev/dri.
+  vendor: smoothnas
+  homepage: https://www.plex.tv
+  ui:
+    service: plex
+    port: 32400
+    path: /web
+    # Plex authenticates every session against plex.tv, so the console does
+    # not inject auth — the plugin owns its own login.
+    auth: none
+  config:
+    - key: PLEX_CLAIM
+      label: Claim token
+      type: string
+      default: ''
+      # Deliberately non-secret: a claim token is single-use and expires
+      # ~4 min after issue (inert once Plex consumes it on first boot), so a
+      # visible field lets the operator verify the full "claim-…" paste.
+      description: >
+        One-time server claim token from https://www.plex.tv/claim — links
+        this server to your Plex account on first start. Looks like
+        "claim-xxxxxxxxxxxxxxxxxxxx" and expires ~4 minutes after you
+        generate it, so grab a fresh one and paste it right before you click
+        Install. Leave blank to claim later at http://<host>:32400/web.
+    - key: ADVERTISE_IP
+      label: Advertise URL
+      type: string
+      default: ''
+      description: >
+        Optional explicit access URL Plex advertises to clients, e.g.
+        http://192.168.1.10:32400/ . Leave blank to auto-detect.
+    - key: TZ
+      label: Timezone
+      type: string
+      default: Etc/UTC
+      description: Container timezone (IANA name, e.g. America/New_York).
+    - key: PLEX_UID
+      label: Run as UID
+      type: number
+      default: '1000'
+      min: '0'
+      step: '1'
+      description: >
+        UID the Plex process runs as — set it to the owner of your media
+        files so Plex can read them; the config volume is chowned to match.
+    - key: PLEX_GID
+      label: Run as GID
+      type: number
+      default: '1000'
+      min: '0'
+      step: '1'
+      description: GID the Plex process runs as. Match your media files' group.
+    - key: PLEX_TRANSCODE_DEVICE
+      label: Transcode GPU device
+      type: string
+      default: /dev/dri
+      description: >
+        DRM device passed through for hardware transcoding. Default /dev/dri
+        exposes every render node and lets Plex choose. On a multi-GPU host,
+        set a specific render node (e.g. /dev/dri/renderD129 for an AMD 780M
+        iGPU) to pin transcoding to it and keep a discrete card free. Clear
+        it only if you have no GPU (Plex then transcodes on CPU — you must
+        also remove the devices entry).
+    - key: VERSION
+      label: Update channel
+      type: select
+      default: docker
+      options:
+        - value: docker
+        - value: latest
+        - value: public
+        - value: plexpass
+      description: >
+        In-container updater. "docker" pins to the shipped image
+        (recommended; SmoothNAS tracks new versions via the Update button).
+        "public"/"latest" download the newest public build on start;
+        "plexpass" the newest Plex Pass beta (needs a linked Plex Pass account).
+    - key: MEMORY_LIMIT
+      label: Container memory
+      type: string
+      default: 4GiB
+      description: Memory limit for the Plex container. Raise it for several simultaneous transcodes.
+
+services:
+  plex:
+    # Official Plex image, pinned to a concrete release. The in-container
+    # updater is off by default (VERSION=docker) so the running version
+    # tracks this image; SmoothNAS surfaces newer tags via the Update button.
+    image: plexinc/pms-docker:1.43.2.10687-563d026ea
+    restart: unless-stopped
+    # Main port routed for the console embed (x-smoothnas.ui) and published on
+    # the host for Plex apps / remote access / LAN clients. Companion, Roku,
+    # DLNA, and GDM discovery ports are host-published too. SSDP (1900) and
+    # mDNS (5353) are intentionally omitted — they collide with host services.
+    ports:
+      - "32400:32400"
+      - "3005:3005"
+      - "8324:8324"
+      - "32469:32469"
+      - "32410:32410/udp"
+      - "32412:32412/udp"
+      - "32413:32413/udp"
+      - "32414:32414/udp"
+    environment:
+      PLEX_CLAIM: "${PLEX_CLAIM:-}"
+      ADVERTISE_IP: "${ADVERTISE_IP:-}"
+      TZ: "${TZ:-Etc/UTC}"
+      PLEX_UID: "${PLEX_UID:-1000}"
+      PLEX_GID: "${PLEX_GID:-1000}"
+      VERSION: "${VERSION:-docker}"
+    # AMD VAAPI / Intel QuickSync: bind the render node(s) and grant the DRM
+    # char-major (226) cgroup. LXC2Docker maps this to the LXC device config.
+    devices:
+      - "${PLEX_TRANSCODE_DEVICE:-/dev/dri}:${PLEX_TRANSCODE_DEVICE:-/dev/dri}"
+    device_cgroup_rules:
+      - "c 226:* rwm"
+    mem_limit: "${MEMORY_LIMIT:-4GiB}"
+    volumes:
+      - "config:/config"
+      - "media:/data"
+      - "transcode:/transcode"
+
+volumes:
+  # Plex database/metadata — persistent, grows with library size.
+  config:
+    x-smoothnas:
+      tier: media
+      minSize: 50G
+  # The media library Plex scans and streams — the large one.
+  media:
+    x-smoothnas:
+      tier: media
+      minSize: 500G
+  # Transcode scratch — high-churn, disposable; the tiering engine keeps hot
+  # scratch on the fastest sub-tier. Tier-bound (not a root-fs path) so it
+  # never fills the boot disk.
+  transcode:
+    x-smoothnas:
+      tier: media
+      minSize: 20G

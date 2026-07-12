@@ -490,3 +490,37 @@ func contains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// A container create that clones a large image rootfs delays the daemon's
+// response beyond the normal ResponseHeaderTimeout. It must still succeed
+// (slow client, no header timeout), while an ordinary call against the same
+// delay trips the header timeout.
+func TestCreateContainer_ToleratesSlowResponseHeaders(t *testing.T) {
+	old := defaultResponseHeaderTimeout
+	defaultResponseHeaderTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { defaultResponseHeaderTimeout = old })
+
+	const delay = 300 * time.Millisecond
+	sock := newFakeRuntime(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(delay) // stall before writing any response headers
+		if r.URL.Path == "/containers/create" {
+			_ = json.NewEncoder(w).Encode(CreateContainerResponse{ID: "slow-ok"})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	c := NewClient(sock)
+
+	// Normal client: header timeout (50ms) < delay (300ms) -> must fail.
+	if err := c.Ping(context.Background()); err == nil {
+		t.Fatal("expected Ping to trip the response-header timeout")
+	}
+	// Create: slow client has no header timeout -> succeeds despite the stall.
+	resp, err := c.CreateContainer(context.Background(), "big-image", CreateContainerRequest{Image: "img:1"})
+	if err != nil {
+		t.Fatalf("CreateContainer under slow response headers: %v", err)
+	}
+	if resp.ID != "slow-ok" {
+		t.Fatalf("id = %q, want slow-ok", resp.ID)
+	}
+}

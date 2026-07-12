@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -526,12 +527,12 @@ func TestPluginsAPI_InstallAutostartsWhenRuntimeIsWired(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if detail.Plugin.State != plugin.StateRunning {
-		t.Fatalf("state = %q want running", detail.Plugin.State)
+	// Install returns immediately; materialise + start run in the background.
+	rt.waitCounts(t, 1, 1)
+	if c, s := rt.counts(); c != 1 || s != 1 {
+		t.Fatalf("runtime created=%d started=%d, want 1/1", c, s)
 	}
-	if len(rt.created) != 1 || len(rt.started) != 1 {
-		t.Fatalf("runtime created=%d started=%d", len(rt.created), len(rt.started))
-	}
+	waitPluginState(t, h.store, detail.Plugin.Name, plugin.StateRunning)
 }
 
 func TestPluginsAPI_RefreshContainersEndpoint(t *testing.T) {
@@ -568,8 +569,10 @@ func TestPluginsAPI_SetPinnedImageAppliesInPlace(t *testing.T) {
 	if install.Code != http.StatusCreated {
 		t.Fatalf("install status = %d body=%s", install.Code, install.Body.String())
 	}
-	createsAfterInstall := len(rt.created)
-	startsAfterInstall := len(rt.started)
+	// Install materialises in the background; wait for it to settle before
+	// snapshotting the create/start counts.
+	rt.waitCounts(t, 1, 1)
+	createsAfterInstall, startsAfterInstall := rt.counts()
 
 	const pinned = "ghcr.io/example/custom-llama:vulkan"
 	rr := doJSON(t, &routeHandler{h}, http.MethodPut, "/api/plugins/llama-cpp/image", map[string]any{
@@ -585,13 +588,14 @@ func TestPluginsAPI_SetPinnedImageAppliesInPlace(t *testing.T) {
 	// The pin must be applied in place: the running plugin is re-materialised
 	// (new container created onto the pinned image) and restarted. A plain
 	// restart would NOT re-resolve the image, so this guards the regression.
-	if len(rt.created) <= createsAfterInstall {
-		t.Fatalf("expected a new container create after pin; created=%d (was %d)", len(rt.created), createsAfterInstall)
+	createsNow, startsNow := rt.counts()
+	if createsNow <= createsAfterInstall {
+		t.Fatalf("expected a new container create after pin; created=%d (was %d)", createsNow, createsAfterInstall)
 	}
-	if len(rt.started) <= startsAfterInstall {
-		t.Fatalf("expected a restart after pin; started=%d (was %d)", len(rt.started), startsAfterInstall)
+	if startsNow <= startsAfterInstall {
+		t.Fatalf("expected a restart after pin; started=%d (was %d)", startsNow, startsAfterInstall)
 	}
-	last := rt.created[len(rt.created)-1]
+	last := rt.lastCreated()
 	if last.Image != pinned {
 		t.Fatalf("container created with image %q, want pinned %q", last.Image, pinned)
 	}
@@ -732,6 +736,9 @@ func TestPluginsAPI_ModelInstallDownloadsUpdatesConfigAndStarts(t *testing.T) {
 		"manifest":        readManifestFixture(t, "llama.yaml"),
 		"tierAssignments": map[string]any{"default": "media"},
 	})
+	// Wait for the async install materialise (create #1) before the model
+	// install re-materialises (create #2), so the two don't race.
+	rt.waitCounts(t, 1, 1)
 
 	modelBytes := []byte("GGUF test model")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -778,8 +785,8 @@ func TestPluginsAPI_ModelInstallDownloadsUpdatesConfigAndStarts(t *testing.T) {
 	if string(got) != string(modelBytes) {
 		t.Fatalf("model bytes = %q", string(got))
 	}
-	if len(rt.created) != 2 || len(rt.started) != 2 {
-		t.Fatalf("runtime created=%d started=%d", len(rt.created), len(rt.started))
+	if c, s := rt.counts(); c != 2 || s != 2 {
+		t.Fatalf("runtime created=%d started=%d, want 2/2", c, s)
 	}
 }
 
@@ -894,8 +901,54 @@ func waitForJobDone(t *testing.T, id string) *JobStatus {
 }
 
 type fakeModelRuntime struct {
+	mu      sync.Mutex
 	created []runtime.CreateContainerRequest
 	started []string
+}
+
+// counts returns the recorded create/start counts under the lock (install now
+// materialises in a background goroutine, so tests read these concurrently).
+func (f *fakeModelRuntime) counts() (int, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.created), len(f.started)
+}
+
+// lastCreated returns a copy of the most recent create request under the lock.
+func (f *fakeModelRuntime) lastCreated() runtime.CreateContainerRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.created[len(f.created)-1]
+}
+
+// waitCounts blocks until the runtime has recorded at least the given create +
+// start counts (background materialise), or fails after a short timeout.
+func (f *fakeModelRuntime) waitCounts(t *testing.T, created, started int) {
+	t.Helper()
+	for i := 0; i < 400; i++ {
+		if c, s := f.counts(); c >= created && s >= started {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	c, s := f.counts()
+	t.Fatalf("runtime did not reach created>=%d started>=%d (got created=%d started=%d)", created, started, c, s)
+}
+
+// waitPluginState polls the store until the plugin reaches want, or fails.
+func waitPluginState(t *testing.T, store *plugin.Store, name, want string) {
+	t.Helper()
+	var last string
+	for i := 0; i < 400; i++ {
+		if rec, err := store.Get(name); err == nil {
+			last = rec.Plugin.State
+			if last == want {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("plugin %q state = %q, want %q", name, last, want)
 }
 
 func (f *fakeModelRuntime) Ping(context.Context) error { return nil }
@@ -909,11 +962,15 @@ func (f *fakeModelRuntime) PullImage(_ context.Context, ref string, _ func(runti
 func (f *fakeModelRuntime) RemoveImage(context.Context, string) error { return nil }
 
 func (f *fakeModelRuntime) CreateContainer(_ context.Context, _ string, req runtime.CreateContainerRequest) (runtime.CreateContainerResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.created = append(f.created, req)
 	return runtime.CreateContainerResponse{ID: "ctr-1"}, nil
 }
 
 func (f *fakeModelRuntime) StartContainer(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.started = append(f.started, id)
 	return nil
 }

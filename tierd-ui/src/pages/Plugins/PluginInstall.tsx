@@ -118,8 +118,9 @@ type CatalogEntry = {
   tags: string[];
   variants: CatalogManifestVariant[];
   // 'builtin' = served from the appliance's bundled snapshot (works offline);
-  // 'github' = fetched live. Drives the "Bundled" card badge.
-  source?: 'builtin' | 'github';
+  // 'github' = fetched live; 'local' = authored in-tree in the smoothnas repo
+  // (repo-less). 'builtin' and 'local' both drive the "Bundled" card badge.
+  source?: 'builtin' | 'github' | 'local';
 };
 
 type CatalogManifestVariant = {
@@ -189,7 +190,6 @@ export default function PluginInstall() {
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
 
   // Pre-fetch tiers as soon as the wizard mounts so the picker step
   // is ready by the time the operator gets there. Cheap call; no
@@ -288,10 +288,10 @@ export default function PluginInstall() {
       : undefined;
     api.installPlugin({ manifest: manifestText, tierAssignments, config: { ...configValues } })
       .then(() => {
-        setSuccess(t('plugins.install.success', { name: parsed.metadata.name }));
-        // Brief delay so the operator sees the success banner,
-        // then bounce back to /plugins.
-        setTimeout(() => navigate('/plugins'), 1200);
+        // Install registers immediately and materialises in the background, so
+        // leave the flow right away — the new plugin shows up in the list in its
+        // pulling/creating state. No waiting on a multi-minute image pull.
+        navigate('/plugins');
       })
       .catch(e => setError(extractError(e, t('plugins.install.error.generic'))))
       .finally(() => setBusy(false));
@@ -323,9 +323,6 @@ export default function PluginInstall() {
           <div className="wizard-error">
             <pre>{error}</pre>
           </div>
-        )}
-        {success && (
-          <div className="wizard-success">{success}</div>
         )}
 
         <div className="wizard-step">
@@ -391,7 +388,7 @@ export default function PluginInstall() {
               <button
                 className="btn primary"
                 onClick={install}
-                disabled={busy || !!success}
+                disabled={busy}
               >
                 {busy
                   ? t('plugins.install.action.installing')
@@ -432,11 +429,25 @@ function SourceStep({
     let cancelled = false;
     setCatalogLoading(true);
     setCatalogError('');
-    Promise.all(pluginCatalogRepositories.map(repo =>
-      api.getPluginCatalogLatest(repo.repo)
-        .then(release => ({ entries: buildCatalogEntries(repo, release), error: '' }))
-        .catch(e => ({ entries: [] as CatalogEntry[], error: `${repo.repo}: ${extractError(e, 'Unable to load plugin catalog.')}` }))
-    ))
+    Promise.all([
+      // In-tree (repo-less) first-party plugins: one card per plugin, built
+      // from a synthetic repo pointer since there is no owner/name.
+      api.getPluginCatalogLocal()
+        .then(list => ({
+          entries: list.flatMap(release => {
+            const id = release.manifests[0]?.manifest?.metadata?.name || 'local';
+            return buildCatalogEntries({ id, repo: '' }, release);
+          }),
+          error: '',
+        }))
+        // Old servers without the local endpoint simply contribute nothing.
+        .catch(() => ({ entries: [] as CatalogEntry[], error: '' })),
+      ...pluginCatalogRepositories.map(repo =>
+        api.getPluginCatalogLatest(repo.repo)
+          .then(release => ({ entries: buildCatalogEntries(repo, release), error: '' }))
+          .catch(e => ({ entries: [] as CatalogEntry[], error: `${repo.repo}: ${extractError(e, 'Unable to load plugin catalog.')}` }))
+      ),
+    ])
       .then(results => {
         if (cancelled) return;
         const entries = results.flatMap(result => result.entries);
@@ -517,7 +528,7 @@ function SourceStep({
                   >
                     <div className="wizard-plugin-card-header">
                       <span className="wizard-plugin-card-name">{entry.name}</span>
-                      {entry.source === 'builtin' && (
+                      {(entry.source === 'builtin' || entry.source === 'local') && (
                         <span
                           className="wizard-plugin-card-badge"
                           title={t('plugins.install.source.catalog.bundledHint')}
@@ -587,7 +598,7 @@ function buildCatalogEntries(repo: CatalogRepository, release: {
   repo: string;
   tagName: string;
   releaseUrl: string;
-  source?: 'builtin' | 'github';
+  source?: 'builtin' | 'github' | 'local';
   manifests: Array<{ assetName: string; downloadUrl: string; manifestYaml: string; manifest: ParsedManifest }>;
 }): CatalogEntry[] {
   const grouped = new Map<string, typeof release.manifests>();
