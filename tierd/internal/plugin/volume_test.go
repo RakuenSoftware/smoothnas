@@ -27,6 +27,17 @@ func (f *fakeTierProvider) put(name, mountpoint, state string, _ ...string) {
 	f.tiers[name] = &db.TierInstance{Name: name, MountPoint: mountpoint, State: state}
 }
 
+// putTemp registers a healthy tier whose mount point is a real, writable temp
+// dir. Use it whenever the code under test provisions tier-bound directories
+// under the mount (compose Materialise mkdirs each bind source), which a fake
+// "/mnt/…" path can't satisfy. Returns the mount path for assertions.
+func (f *fakeTierProvider) putTemp(t *testing.T, name string) string {
+	t.Helper()
+	mp := t.TempDir()
+	f.put(name, mp, "healthy")
+	return mp
+}
+
 func (f *fakeTierProvider) GetTierInstance(name string) (*db.TierInstance, error) {
 	if t, ok := f.tiers[name]; ok {
 		return t, nil

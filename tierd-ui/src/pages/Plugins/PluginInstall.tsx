@@ -118,8 +118,9 @@ type CatalogEntry = {
   tags: string[];
   variants: CatalogManifestVariant[];
   // 'builtin' = served from the appliance's bundled snapshot (works offline);
-  // 'github' = fetched live. Drives the "Bundled" card badge.
-  source?: 'builtin' | 'github';
+  // 'github' = fetched live; 'local' = authored in-tree in the smoothnas repo
+  // (repo-less). 'builtin' and 'local' both drive the "Bundled" card badge.
+  source?: 'builtin' | 'github' | 'local';
 };
 
 type CatalogManifestVariant = {
@@ -428,11 +429,25 @@ function SourceStep({
     let cancelled = false;
     setCatalogLoading(true);
     setCatalogError('');
-    Promise.all(pluginCatalogRepositories.map(repo =>
-      api.getPluginCatalogLatest(repo.repo)
-        .then(release => ({ entries: buildCatalogEntries(repo, release), error: '' }))
-        .catch(e => ({ entries: [] as CatalogEntry[], error: `${repo.repo}: ${extractError(e, 'Unable to load plugin catalog.')}` }))
-    ))
+    Promise.all([
+      // In-tree (repo-less) first-party plugins: one card per plugin, built
+      // from a synthetic repo pointer since there is no owner/name.
+      api.getPluginCatalogLocal()
+        .then(list => ({
+          entries: list.flatMap(release => {
+            const id = release.manifests[0]?.manifest?.metadata?.name || 'local';
+            return buildCatalogEntries({ id, repo: '' }, release);
+          }),
+          error: '',
+        }))
+        // Old servers without the local endpoint simply contribute nothing.
+        .catch(() => ({ entries: [] as CatalogEntry[], error: '' })),
+      ...pluginCatalogRepositories.map(repo =>
+        api.getPluginCatalogLatest(repo.repo)
+          .then(release => ({ entries: buildCatalogEntries(repo, release), error: '' }))
+          .catch(e => ({ entries: [] as CatalogEntry[], error: `${repo.repo}: ${extractError(e, 'Unable to load plugin catalog.')}` }))
+      ),
+    ])
       .then(results => {
         if (cancelled) return;
         const entries = results.flatMap(result => result.entries);
@@ -513,7 +528,7 @@ function SourceStep({
                   >
                     <div className="wizard-plugin-card-header">
                       <span className="wizard-plugin-card-name">{entry.name}</span>
-                      {entry.source === 'builtin' && (
+                      {(entry.source === 'builtin' || entry.source === 'local') && (
                         <span
                           className="wizard-plugin-card-badge"
                           title={t('plugins.install.source.catalog.bundledHint')}
@@ -583,7 +598,7 @@ function buildCatalogEntries(repo: CatalogRepository, release: {
   repo: string;
   tagName: string;
   releaseUrl: string;
-  source?: 'builtin' | 'github';
+  source?: 'builtin' | 'github' | 'local';
   manifests: Array<{ assetName: string; downloadUrl: string; manifestYaml: string; manifest: ParsedManifest }>;
 }): CatalogEntry[] {
   const grouped = new Map<string, typeof release.manifests>();
