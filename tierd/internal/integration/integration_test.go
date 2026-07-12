@@ -20,6 +20,20 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/smart"
 )
 
+// TestMain dispatches the PAM helper subprocess. sgauth.PAMAuthenticate runs
+// the actual PAM check by re-executing this binary as
+// "<exe> __pam_auth <service> <username>" (privilege separation so a PAM hang
+// can't take down the server). The production tierd binary handles that arg in
+// main() (cmd/tierd/main.go); the test binary must do the same, otherwise the
+// re-exec just re-enters the test runner and every PAM login here fails with
+// invalid credentials.
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "__pam_auth" {
+		os.Exit(sgauth.RunPAMHelper(os.Args[2:]))
+	}
+	os.Exit(m.Run())
+}
+
 func skipIfNotRoot(t *testing.T) {
 	t.Helper()
 	if os.Getuid() != 0 {
