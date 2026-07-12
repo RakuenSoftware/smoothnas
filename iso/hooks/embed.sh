@@ -172,8 +172,46 @@ stage_usrmerge_firmware() {
     done
 }
 
+stage_installer_gpu_d3cold_guard() {
+    # The installer loads amdgpu/radeon (INSTALLER_GPU_KERNEL_MODULES) so the
+    # graphical SmoothGUI installer has a DRM render node. On several headless
+    # NAS boards the discrete AMD GPU powers up in D3cold; when amdgpu binds it
+    # cannot transition D3cold->D0 ("Unable to change power state from D3cold to
+    # D0"), the probe stalls, and the boot wedges on the console right before
+    # the graphical installer starts — the reported "freeze as it goes into the
+    # installer".
+    #
+    # The installed system avoids this with smoothnas-gpu-init.service (clears
+    # d3cold_allowed before udev triggers driver probing) plus amdgpu.runpm=0 on
+    # the kernel cmdline (see iso/hooks/configure.sh). The installer initrd has
+    # neither, so reproduce both here:
+    #   - a udev rule that clears d3cold_allowed / pins runtime power ON for AMD
+    #     display devices. It sorts before 80-drivers.rules, so for each device
+    #     the sysfs writes complete before udev's kmod builtin autoloads the
+    #     driver — the same "clear before probe" ordering gpu-init.sh relies on.
+    #   - modprobe options that keep amdgpu/radeon out of runtime D3cold, mirror-
+    #     ing the installed system's amdgpu.runpm=0 cmdline.
+    mkdir -p "${INITRD_TMP}/etc/udev/rules.d"
+    cat > "${INITRD_TMP}/etc/udev/rules.d/60-smoothnas-gpu-d3cold.rules" << 'RULES'
+# SmoothNAS: keep AMD display GPUs out of D3cold before their driver binds, so
+# amdgpu/radeon probe does not wedge the installer boot. Sorts before
+# 80-drivers.rules (kmod autoload) so the sysfs writes land first.
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1002", ATTR{class}=="0x03*", ATTR{d3cold_allowed}="0"
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1002", ATTR{class}=="0x03*", ATTR{power/control}="on"
+RULES
+
+    mkdir -p "${INITRD_TMP}/etc/modprobe.d"
+    cat > "${INITRD_TMP}/etc/modprobe.d/smoothnas-gpu.conf" << 'MODPROBE'
+# SmoothNAS: disable runtime D3cold for AMD GPUs during install (mirrors the
+# installed system's amdgpu.runpm=0 kernel cmdline).
+options amdgpu runpm=0
+options radeon runpm=0
+MODPROBE
+}
+
 stage_usrmerge_firmware
 stage_debian_gpu_modules
+stage_installer_gpu_d3cold_guard
 
 # simpledrm claims the UEFI GOP framebuffer on OVMF boot, preventing bochs-drm
 # from getting DRM control and causing all Xorg startup attempts to fail.
