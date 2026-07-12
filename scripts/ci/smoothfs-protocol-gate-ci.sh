@@ -15,15 +15,37 @@ set -euo pipefail
 
 log() { echo "== [gate-ci] $* =="; }
 
-WORKDIR="$(pwd)"
-SMOOTHFS_CHECKOUT="${SMOOTHFS_CHECKOUT:-deps/smoothfs}"
-SMOOTHFS_DIR="$(cd "${SMOOTHFS_CHECKOUT}/src/smoothfs" && pwd)"
-TEST_ROOT="${SMOOTHFS_DIR}/test"
-SOAK_SECONDS="${SMOOTHFS_SOAK_SECONDS:-120}"
-LOG_DIR="${WORKDIR}/gate-logs"
+# Host-side logs go to the checkout's gate-logs so the workflow's
+# upload-artifact step (which reads ${{ github.workspace }}/gate-logs) finds
+# them. Captured before we stage/cd elsewhere.
+LOG_DIR="$(pwd)/gate-logs"
 mkdir -p "${LOG_DIR}"
 
+SMOOTHFS_CHECKOUT="${SMOOTHFS_CHECKOUT:-deps/smoothfs}"
+SOAK_SECONDS="${SMOOTHFS_SOAK_SECONDS:-120}"
+
 export DEBIAN_FRONTEND=noninteractive
+
+# --------------------------------------------------------------------------
+# Phase 0 — stage the checkout under the container root filesystem.
+#
+# Inside a GitHub `container:` job the workspace (/__w/...) is a bind mount,
+# NOT part of the container's root fs. virtme-ng shares the container root
+# into the guest (with a writable overlay) but cannot overlay a separate
+# bind mount — so the guest would not see scripts / the smoothfs test tree
+# there, and `--rwdir <workspace>` fails with "path must be defined inside a
+# valid overlay". Copy everything under / (here /opt/gate) so virtme's
+# default root share carries it into the guest.
+# --------------------------------------------------------------------------
+WORKDIR=/opt/gate
+log "Phase 0: stage checkout to ${WORKDIR}"
+rm -rf "${WORKDIR}"
+mkdir -p "${WORKDIR}"
+cp -a ./. "${WORKDIR}/"
+cd "${WORKDIR}"
+
+SMOOTHFS_DIR="${WORKDIR}/${SMOOTHFS_CHECKOUT}/src/smoothfs"
+TEST_ROOT="${SMOOTHFS_DIR}/test"
 
 log "smoothfs source: ${SMOOTHFS_DIR}"
 [ -f "${SMOOTHFS_DIR}/dkms.conf" ] || { echo "missing ${SMOOTHFS_DIR}/dkms.conf" >&2; exit 1; }
@@ -90,8 +112,7 @@ ls -l "${SMOOTHFS_DIR}/smoothfs.ko"
 # --------------------------------------------------------------------------
 log "Phase 4: guest boot + module load smoke test"
 smoke_out="${LOG_DIR}/smoke.log"
-vng --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 2 --memory 2G \
-    --rwdir "${WORKDIR}" --user root \
+vng --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 2 --memory 2G --user root \
     -- bash -c 'modprobe smoothfs && lsmod | grep -q "^smoothfs" && echo GATE_SMOKE_OK' \
     2>&1 | tee "${smoke_out}"
 grep -q GATE_SMOKE_OK "${smoke_out}" || {
@@ -147,13 +168,13 @@ bash "${SMOOTHFS_DIR}/samba-vfs/build.sh"
 # gate or soak fails.
 # --------------------------------------------------------------------------
 log "Phase 8: protocol gate + mixed soak in-guest"
-vng --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 4 --memory 4G \
-    --rwdir "${WORKDIR}" --user root \
+cp -f /tmp/smoothfs-vfs-*.log "${LOG_DIR}/" 2>/dev/null || true
+vng --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 4 --memory 4G --user root \
     -- env \
       "SMOOTHFS_TEST_ROOT=${TEST_ROOT}" \
       "SMOOTHFS_SOAK_SECONDS=${SOAK_SECONDS}" \
       "SMOOTHFS_CI_WORKDIR=${WORKDIR}" \
-      "GATE_LOG_DIR=${LOG_DIR}" \
+      "GATE_LOG_DIR=${WORKDIR}/gate-logs" \
       bash "${WORKDIR}/scripts/ci/smoothfs-protocol-gate-invm.sh"
 
 log "gate complete"
