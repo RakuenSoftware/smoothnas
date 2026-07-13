@@ -30,6 +30,7 @@ container:
 volumes:
   - name: models
     mode: tier-bound
+    slot: SSD
     minSize: 30G
     bind: /models
 ports:
