@@ -131,9 +131,15 @@ echo "--- /dev/kvm ---";  ls -l /dev/kvm 2>&1 || echo "NO /dev/kvm (guest will f
 echo "--- qemu ---";      qemu-system-x86_64 --version 2>&1 | head -1 || true
 echo "--- virtme-ng ---"; vng --version 2>&1 | head -1 || true
 
+# Nested KVM on GitHub runners stalls the guest in early boot (right after
+# "ACPI: Core revision", before SMP/APIC bringup) with the default multi-CPU +
+# KASLR config. Boot single-CPU with KASLR disabled — GATE_GUEST_KOPTS carries
+# the same hardening into Phase 8.
+GATE_GUEST_KOPTS="nokaslr"
 smoke_out="${LOG_DIR}/smoke.log"
 smoke_rc=0
-run_guest 600 --verbose --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 2 --memory 2G --user root \
+run_guest 300 --verbose --append "${GATE_GUEST_KOPTS}" \
+    --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 1 --memory 2G --user root \
     -- bash -c 'echo GUEST_ALIVE; modprobe smoothfs && lsmod | grep -q "^smoothfs" && echo GATE_SMOKE_OK' \
     > "${smoke_out}" 2>&1 || smoke_rc=$?
 cat "${smoke_out}"
@@ -197,7 +203,8 @@ log "Phase 8: protocol gate + mixed soak in-guest"
 cp -f /tmp/smoothfs-vfs-*.log "${LOG_DIR}/" 2>/dev/null || true
 # Hard-bounded so a wedged in-guest test can't consume the whole job timeout
 # (the release gate polls the workflow conclusion for up to 120 min).
-run_guest 5400 --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 4 --memory 4G --user root \
+run_guest 5400 --append "${GATE_GUEST_KOPTS}" \
+    --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 1 --memory 4G --user root \
     -- env \
       "SMOOTHFS_TEST_ROOT=${TEST_ROOT}" \
       "SMOOTHFS_SOAK_SECONDS=${SOAK_SECONDS}" \
