@@ -45,6 +45,20 @@ require_cmd() {
 
 run_test() {
     local name="$1"
+    # Opt-in skip list (space-separated test basenames). Empty by default, so a
+    # provisioned runner (and the appliance) runs the full suite unchanged. Used
+    # by the GitHub-hosted CI gate to defer tests whose behaviour cannot be
+    # reproduced under CPU emulation on a mainline guest kernel (e.g. the deep
+    # SMB VFS lease-pin / fanotify lease-break conformance in smb_vfs_module.sh,
+    # which the production self-hosted runner still validates).
+    local s
+    for s in ${SMOOTHFS_GATE_SKIP:-}; do
+        if [[ "${s}" == "${name}" ]]; then
+            echo
+            echo "=== SKIP ${name} (SMOOTHFS_GATE_SKIP) ==="
+            return 0
+        fi
+    done
     local path="${TEST_ROOT}/${name}"
     if [[ ! -f "${path}" ]]; then
         echo "ERROR: missing smoothfs test ${name} under ${TEST_ROOT}" >&2
