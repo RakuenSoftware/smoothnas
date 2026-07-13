@@ -30,15 +30,32 @@ cat > "${SHIM_DIR}/systemctl" <<'SHIM'
 verb="${1:-}"; shift || true
 nfsd_up() {
     modprobe nfsd 2>/dev/null || true
+    modprobe nfsv4 2>/dev/null || true
+    # Dirs systemd's nfs-server + nfsdcld normally create. v4recovery is
+    # required for NFSv4 client-state tracking; without nfsdcld + this dir the
+    # v4 pseudo-fs LOOKUP fails and mounts get ENOENT ("No such file or
+    # directory") even though NFSv3 works.
+    mkdir -p /var/lib/nfs/rpc_pipefs /var/lib/nfs/v4recovery \
+             /var/lib/nfs/sm /var/lib/nfs/sm.bak /run/rpcbind 2>/dev/null || true
+    [ -f /var/lib/nfs/etab ] || : > /var/lib/nfs/etab 2>/dev/null || true
     mountpoint -q /proc/fs/nfsd || mount -t nfsd nfsd /proc/fs/nfsd 2>/dev/null || true
-    mkdir -p /var/lib/nfs/rpc_pipefs /run/rpcbind /run/sendsigs.omit.d 2>/dev/null || true
     mountpoint -q /var/lib/nfs/rpc_pipefs || \
         mount -t rpc_pipefs sunrpc /var/lib/nfs/rpc_pipefs 2>/dev/null || true
     pgrep -x rpcbind >/dev/null 2>&1 || rpcbind 2>/dev/null || true
+    # NFSv4 client-tracking daemon — modern nfsd needs it running before it
+    # will serve v4 (systemd starts nfsdcld.service as a dependency).
+    pgrep -x nfsdcld >/dev/null 2>&1 || nfsdcld 2>/dev/null || true
     pgrep -x rpc.statd >/dev/null 2>&1 || rpc.statd 2>/dev/null || true
+    # Enable v3 + v4.x (incl 4.2) explicitly. Only writable while nfsd has 0
+    # threads, so this must precede rpc.nfsd.
+    for v in +3 +4 +4.1 +4.2; do
+        echo "$v" > /proc/fs/nfsd/versions 2>/dev/null || true
+    done
     rpc.nfsd 8 2>/dev/null || true
     exportfs -r 2>/dev/null || true
     pgrep -x rpc.mountd >/dev/null 2>&1 || rpc.mountd 2>/dev/null || true
+    # Surface what actually came up so an NFSv4 failure is diagnosable.
+    echo "[systemctl-shim] nfsd versions: $(cat /proc/fs/nfsd/versions 2>/dev/null)" >&2
 }
 nfsd_down() {
     rpc.nfsd 0 2>/dev/null || true
