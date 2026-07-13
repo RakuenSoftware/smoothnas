@@ -19,6 +19,18 @@ export PATH="/usr/local/go/bin:${PATH}"
 export HOME="${HOME:-/root}"
 
 # --------------------------------------------------------------------------
+# virtme overlays /tmp with overlayfs, which cannot encode NFS filehandles.
+# The protocol tests place their pools under /tmp (cthon04 → /tmp/cthon-smoothfs,
+# the soak → /tmp/smoothnas-smoothfs-soak) and export them. NFSv3 mounts the
+# export path directly and works, but NFSv4 must traverse the *pseudo-fs*
+# through /tmp and fails to build a filehandle for the overlay dir — the mount
+# is rejected with server-side ENOENT ("No such file or directory"). Replace
+# /tmp with a plain, exportable tmpfs so the v4 pseudo-fs path resolves.
+# Must happen before any mktemp below (SHIM_DIR lives under /tmp).
+mount -t tmpfs tmpfs /tmp 2>/dev/null || true
+chmod 1777 /tmp
+
+# --------------------------------------------------------------------------
 # systemctl shim. The gate scripts (cthon04.sh, mixed soak) drive nfsd via
 # `systemctl start nfs-server`, but the guest runs no init. Intercept those
 # calls and bring kernel nfsd / rpcbind up (or down) by hand.

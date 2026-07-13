@@ -205,8 +205,10 @@ log "Phase 8: protocol gate + mixed soak in-guest"
 cp -f /tmp/smoothfs-vfs-*.log "${LOG_DIR}/" 2>/dev/null || true
 # Hard-bounded so a wedged in-guest test can't consume the whole job timeout
 # (the release gate polls the workflow conclusion for up to 120 min).
+# 8G RAM: the in-guest /tmp is a tmpfs (see the invm script) that holds the
+# tests' loopback tier images (cthon04 2x1G, soak 2x2G, sparse).
 run_guest 5400 "${GATE_GUEST_ARGS[@]}" \
-    --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 4 --memory 4G --user root \
+    --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 4 --memory 8G --user root \
     -- env \
       "SMOOTHFS_TEST_ROOT=${TEST_ROOT}" \
       "SMOOTHFS_SOAK_SECONDS=${SOAK_SECONDS}" \
