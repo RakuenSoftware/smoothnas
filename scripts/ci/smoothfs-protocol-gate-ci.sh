@@ -220,7 +220,7 @@ log "Phase 5: protocol + soak userspace deps"
 apt-get install -y --no-install-recommends \
     samba samba-testsuite smbclient cifs-utils \
     nfs-kernel-server nfs-common rpcbind \
-    time groff-base golang-go \
+    time groff-base golang-go attr \
     devscripts equivs debhelper dh-dkms
 # trixie-backports libngtcp2 the trixie Samba build-dep set wants.
 apt-get install -y --no-install-recommends -t trixie-backports \

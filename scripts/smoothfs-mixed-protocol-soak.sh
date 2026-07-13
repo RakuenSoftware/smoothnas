@@ -65,8 +65,8 @@ mount -t smoothfs -o "pool=soak,uuid=${UUID},tiers=${ROOT}/fast:${ROOT}/slow" no
 chmod 1777 "${ROOT}/server"
 
 echo "=== exporting over NFS and SMB ==="
-exportfs -o "rw,async,no_root_squash,no_subtree_check,fsid=${UUID}" "127.0.0.1:${ROOT}/server"
 systemctl start rpcbind nfs-server 2>/dev/null || systemctl start rpcbind nfs-kernel-server
+exportfs -o "rw,async,no_root_squash,no_subtree_check,fsid=${UUID}" "127.0.0.1:${ROOT}/server"
 mount -t nfs -o vers=4.2,timeo=50,retrans=3 "127.0.0.1:${ROOT}/server" "${ROOT}/nfs"
 
 cat > "${ROOT}/samba/smb.conf" <<EOF
@@ -136,13 +136,32 @@ writer "${ROOT}/nfs" nfs &
 p2=$!
 writer "${ROOT}/cifs" smb &
 p3=$!
-wait "${p1}" "${p2}" "${p3}"
+soak_rc=0
+for p in "${p1}" "${p2}" "${p3}"; do
+    wait "${p}" || { echo "ERROR: a soak writer exited non-zero" >&2; soak_rc=1; }
+done
+[[ ${soak_rc} -eq 0 ]] || exit 1
 
 sync
-find "${ROOT}/server" -type f -size 0 -print -quit | grep -q . && {
-    echo "ERROR: found zero-length file after soak" >&2
+mapfile -t zeroes < <(find "${ROOT}/server" -type f -size 0)
+if (( ${#zeroes[@]} > 0 )); then
+    echo "ERROR: found ${#zeroes[@]} zero-length file(s) after soak:" >&2
+    for f in "${zeroes[@]}"; do
+        rel="${f#"${ROOT}"/server/}"
+        stat -c '  union %s bytes  %n' "$f" >&2
+        for tier in fast slow; do
+            tf="${ROOT}/${tier}/${rel}"
+            if [[ -e "${tf}" ]]; then
+                stat -c "  ${tier}  %s bytes  %n" "${tf}" >&2
+                getfattr -d -m 'trusted\.smoothfs\.' --absolute-names "${tf}" 2>/dev/null | sed 's/^/    /' >&2
+            else
+                echo "  ${tier}  <absent>" >&2
+            fi
+        done
+    done
+    dmesg | tail -100 | grep -i smoothfs | sed 's/^/  dmesg: /' >&2
     exit 1
-}
+fi
 
 if dmesg | tail -300 | grep -E 'smoothfs:.*(BUG|WARN|corrupt|lost|panic|Oops)' >/tmp/smoothfs-soak-dmesg.txt; then
     echo "ERROR: suspicious smoothfs dmesg lines:" >&2
