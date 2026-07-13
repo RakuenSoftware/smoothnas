@@ -63,9 +63,17 @@ func (c *Client) PullImage(ctx context.Context, ref string, onProgress func(Pull
 		}
 		// Docker emits a final "Status: Digest: sha256:..." event when
 		// the image manifest is digested (registry pulls). That's the
-		// resolved digest we want to record.
+		// resolved digest we want to record. `from` is the whole ref,
+		// which for a digest-pinned pull still carries its @sha256:...
+		// (splitRef keeps digest refs intact) — strip that before
+		// re-appending, or the result is "repo@sha256:x@sha256:x", an
+		// invalid reference the daemon then 404s on at container create.
 		if d := extractDigest(ev.Status); d != "" {
-			resolved = from + "@" + d
+			base := from
+			if at := strings.IndexByte(base, '@'); at >= 0 {
+				base = base[:at]
+			}
+			resolved = base + "@" + d
 		}
 		if onProgress != nil {
 			onProgress(ev)
