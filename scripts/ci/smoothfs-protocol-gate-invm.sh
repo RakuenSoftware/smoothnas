@@ -30,6 +30,20 @@ export HOME="${HOME:-/root}"
 mount -t tmpfs tmpfs /tmp 2>/dev/null || true
 chmod 1777 /tmp
 
+# smbd (smbtorture.sh, smb_vfs_module.sh, the soak) needs /run/samba for its
+# ncalrpc pipe dir — systemd-tmpfiles creates it on a real host; the initless
+# guest doesn't. Without it smbd aborts: "mkdir failed on directory
+# /run/samba/ncalrpc: No such file or directory".
+mkdir -p /run/samba /var/log/samba /var/lib/samba/private 2>/dev/null || true
+
+# The SMB harnesses provision a test user with `useradd`, which writes
+# /etc/shadow via a backup hardlink. On virtme's /etc overlay that fails
+# ("failure while writing changes to /etc/shadow") unless the passwd/shadow
+# files are already copied up to the writable upper layer. Force copy-up.
+for f in /etc/passwd /etc/shadow /etc/group /etc/gshadow; do
+    [ -f "$f" ] && cp -a "$f" "$f.cpup" && cat "$f.cpup" > "$f" && rm -f "$f.cpup"
+done
+
 # --------------------------------------------------------------------------
 # systemctl shim. The gate scripts (cthon04.sh, mixed soak) drive nfsd via
 # `systemctl start nfs-server`, but the guest runs no init. Intercept those
