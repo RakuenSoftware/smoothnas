@@ -106,17 +106,24 @@ SMBD_PID=$!
 sleep 2
 mount -t cifs "//127.0.0.1/${SHARE}" "${ROOT}/cifs" -o "guest,port=${PORT},vers=3.1.1,noserverino"
 
+# Each writer keeps a sliding window of files rather than accumulating: the
+# old delete-every-5th scheme grew the working set without bound, so a fast
+# enough run filled the 2x2G pool mid-soak. ENOSPC then left zero-length
+# .tmp files that the post-soak integrity check flagged — the soak failed on
+# its own space budget, not on smoothfs. 3 writers x 25 files x 16M ≈ 1.2G
+# keeps steady-state churn well inside the 4G pool at any throughput.
 writer() {
     local dir="$1"
     local prefix="$2"
     local deadline=$((SECONDS + SECONDS_TO_RUN))
     local i=0
+    local window=24
     mkdir -p "${dir}/${prefix}"
     while (( SECONDS < deadline )); do
         dd if=/dev/zero of="${dir}/${prefix}/file-${i}.tmp" bs=1M count=16 conv=fsync status=none
         mv "${dir}/${prefix}/file-${i}.tmp" "${dir}/${prefix}/file-${i}.bin"
-        if (( i % 5 == 0 )); then
-            rm -f "${dir}/${prefix}/file-$((i / 2)).bin"
+        if (( i >= window )); then
+            rm -f "${dir}/${prefix}/file-$((i - window)).bin"
         fi
         i=$((i + 1))
     done
