@@ -78,6 +78,43 @@ log "smoothfs source: ${SMOOTHFS_DIR}"
 sed -i 's#"3 basic test3:\.\*Segmentation fault"#&\n    "3 basic test7:.*Segmentation fault"\n    "4.2 basic test3:.*Segmentation fault"#' \
     "${TEST_ROOT}/cthon04.sh"
 
+# Bound each cthon04 suite run and retry once on a wedge. Under TCG emulation
+# the NFSv4.2 special suite intermittently hangs (observed: the same commit
+# passed it in one run, then the next run produced no output for ~86 min until
+# the Phase 8 wall-clock bound killed QEMU). cthon04.sh captures each suite's
+# runtests output to a log and only tails it after completion, so a wedged
+# suite is both unbounded AND invisible. Wrap the invocation: 900s bound
+# (>10x the slowest suite observed under emulation), dump the partial log on
+# timeout so the wedge point is diagnosable, retry once, and only then fail.
+snippet="$(mktemp)"
+cat > "${snippet}" <<'SNIP'
+
+# [smoothnas-ci] bounded + once-retried runtests; see smoothfs-protocol-gate-ci.sh
+run_suite_bounded() {
+    local dir="$1" workdir="$2" log="$3" try src
+    for try in 1 2; do
+        src=0
+        (cd "$dir" && NFSTESTDIR=$workdir timeout -k 30 900 ./runtests > "$log" 2>&1) || src=$?
+        if [ "$src" -ne 124 ] && [ "$src" -ne 137 ]; then
+            return "$src"
+        fi
+        echo "  TIMEOUT  runtests wedged >900s in $dir (attempt $try/2); partial log:"
+        cat "$log"
+        # A test stuck in D-state on the NFS mount can wedge this rm too.
+        timeout -k 10 60 rm -rf "$workdir" 2>/dev/null || true
+    done
+    return 124
+}
+SNIP
+sed -i "/^rc=0\$/r ${snippet}" "${TEST_ROOT}/cthon04.sh"
+rm -f "${snippet}"
+sed -i 's#if ! (cd /opt/cthon04/$suite && NFSTESTDIR=$workdir ./runtests > "$log" 2>&1); then#if ! run_suite_bounded "/opt/cthon04/$suite" "$workdir" "$log"; then#' \
+    "${TEST_ROOT}/cthon04.sh"
+grep -q 'run_suite_bounded "/opt/cthon04/\$suite"' "${TEST_ROOT}/cthon04.sh" || {
+    echo "cthon04.sh runtests invocation changed upstream; suite-bound patch did not apply" >&2
+    exit 1
+}
+
 # --------------------------------------------------------------------------
 # Phase 1 — apt sources + light build/virtualisation deps
 # --------------------------------------------------------------------------
