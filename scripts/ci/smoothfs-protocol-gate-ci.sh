@@ -15,6 +15,22 @@ set -euo pipefail
 
 log() { echo "== [gate-ci] $* =="; }
 
+# Run a command in a virtme-ng guest with a hard wall-clock bound. virtme-ng
+# can hang indefinitely if the guest fails to boot or never powers off, and a
+# bare `vng` would then consume the whole job timeout with no output. Bound it,
+# read stdin from /dev/null (no tty in CI — avoid any interactive wait), and
+# treat a timeout as a normal failure. Usage: run_guest <secs> <vng-args...>
+run_guest() {
+    local secs="$1"; shift
+    local rc=0
+    timeout -k 30 "${secs}" vng "$@" </dev/null || rc=$?
+    if [ "${rc}" -eq 124 ] || [ "${rc}" -eq 137 ]; then
+        echo "ERROR: guest run exceeded ${secs}s wall-clock (rc=${rc}); see boot console above" >&2
+        return 124
+    fi
+    return "${rc}"
+}
+
 # Host-side logs go to the checkout's gate-logs so the workflow's
 # upload-artifact step (which reads ${{ github.workspace }}/gate-logs) finds
 # them. Captured before we stage/cd elsewhere.
@@ -110,11 +126,21 @@ ls -l "${SMOOTHFS_DIR}/smoothfs.ko"
 # loads. Cheap; fails fast if virtme/KVM/module are broken, before the
 # expensive Samba build below.
 # --------------------------------------------------------------------------
-log "Phase 4: guest boot + module load smoke test"
+log "Phase 4: virt diagnostics + guest boot smoke test"
+echo "--- /dev/kvm ---";  ls -l /dev/kvm 2>&1 || echo "NO /dev/kvm (guest will fall back to slow TCG emulation)"
+echo "--- qemu ---";      qemu-system-x86_64 --version 2>&1 | head -1 || true
+echo "--- virtme-ng ---"; vng --version 2>&1 | head -1 || true
+
 smoke_out="${LOG_DIR}/smoke.log"
-vng --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 2 --memory 2G --user root \
-    -- bash -c 'modprobe smoothfs && lsmod | grep -q "^smoothfs" && echo GATE_SMOKE_OK' \
-    2>&1 | tee "${smoke_out}"
+smoke_rc=0
+run_guest 600 --verbose --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 2 --memory 2G --user root \
+    -- bash -c 'echo GUEST_ALIVE; modprobe smoothfs && lsmod | grep -q "^smoothfs" && echo GATE_SMOKE_OK' \
+    > "${smoke_out}" 2>&1 || smoke_rc=$?
+cat "${smoke_out}"
+if [ "${smoke_rc}" -ne 0 ]; then
+    echo "infra smoke test failed (rc=${smoke_rc}): guest did not boot/load smoothfs" >&2
+    exit 1
+fi
 grep -q GATE_SMOKE_OK "${smoke_out}" || {
     echo "infra smoke test failed: smoothfs did not load in the guest" >&2
     exit 1
@@ -169,7 +195,9 @@ bash "${SMOOTHFS_DIR}/samba-vfs/build.sh"
 # --------------------------------------------------------------------------
 log "Phase 8: protocol gate + mixed soak in-guest"
 cp -f /tmp/smoothfs-vfs-*.log "${LOG_DIR}/" 2>/dev/null || true
-vng --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 4 --memory 4G --user root \
+# Hard-bounded so a wedged in-guest test can't consume the whole job timeout
+# (the release gate polls the workflow conclusion for up to 120 min).
+run_guest 5400 --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 4 --memory 4G --user root \
     -- env \
       "SMOOTHFS_TEST_ROOT=${TEST_ROOT}" \
       "SMOOTHFS_SOAK_SECONDS=${SOAK_SECONDS}" \
