@@ -442,6 +442,15 @@ func runRuntimeLXCCleanupLoop(ctx context.Context, lifecycle *plugin.Lifecycle) 
 			log.Printf("plugin runtime cleanup: removed %d orphaned lxc container dirs", removed)
 		}
 
+		// Reclaim image templates left behind by uninstall or in-place image
+		// updates (compose down / pull don't remove old images), so the tier
+		// doesn't accumulate orphaned templates.
+		if removed, err := lifecycle.CleanupOrphanedImages(ctx, runtimeLXCOrphanMinAge); err != nil && ctx.Err() == nil {
+			log.Printf("plugin runtime cleanup: %v", err)
+		} else if removed > 0 {
+			log.Printf("plugin runtime cleanup: removed %d orphaned image templates", removed)
+		}
+
 		timer := time.NewTimer(runtimeLXCCleanupInterval)
 		select {
 		case <-ctx.Done():

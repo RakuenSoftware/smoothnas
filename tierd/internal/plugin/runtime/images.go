@@ -94,6 +94,30 @@ type PullEvent struct {
 	ProgressDetail map[string]any `json:"progressDetail,omitempty"`
 }
 
+// ImageSummary is one entry from GET /images/json — the fields tierd's
+// image garbage-collector needs. Containers is the daemon's own count of
+// containers referencing the image (computed over every container it knows,
+// managed or not), so Containers==0 is an authoritative "nothing uses this".
+type ImageSummary struct {
+	ID          string   `json:"Id"`
+	RepoTags    []string `json:"RepoTags"`
+	RepoDigests []string `json:"RepoDigests"`
+	Created     int64    `json:"Created"` // unix seconds
+	Size        int64    `json:"Size"`
+	Containers  int      `json:"Containers"`
+}
+
+// ListImages returns every image the runtime daemon knows about
+// (GET /images/json). Used by the orphaned-image sweep to reclaim
+// templates left behind by plugin uninstall and in-place image updates.
+func (c *Client) ListImages(ctx context.Context) ([]ImageSummary, error) {
+	var out []ImageSummary
+	if err := c.getJSON(ctx, "/images/json", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RemoveImage issues DELETE /images/{name}. Returns nil on 404 so
 // uninstall can be retried after partial failure.
 func (c *Client) RemoveImage(ctx context.Context, ref string) error {

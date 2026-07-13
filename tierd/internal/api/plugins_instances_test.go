@@ -25,6 +25,9 @@ func (stubRuntime) PullImage(context.Context, string, func(runtime.PullEvent)) (
 	return "", errors.New("stub: pull not supported")
 }
 func (stubRuntime) RemoveImage(context.Context, string) error { return nil }
+func (stubRuntime) ListImages(context.Context) ([]runtime.ImageSummary, error) {
+	return nil, nil
+}
 func (stubRuntime) CreateContainer(context.Context, string, runtime.CreateContainerRequest) (runtime.CreateContainerResponse, error) {
 	return runtime.CreateContainerResponse{}, errors.New("stub: create not supported")
 }
