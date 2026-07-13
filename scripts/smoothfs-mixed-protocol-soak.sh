@@ -64,10 +64,32 @@ modprobe smoothfs
 mount -t smoothfs -o "pool=soak,uuid=${UUID},tiers=${ROOT}/fast:${ROOT}/slow" none "${ROOT}/server"
 chmod 1777 "${ROOT}/server"
 
+# Bound a setup step that can wedge in the kernel (an nfsd thread stuck
+# inside smoothfs blocks exportfs/mount.nfs in uninterruptible sleep, seen on
+# gate runs 29265262327/29265253818: no output between "exporting" and the
+# 5400s guest wall-clock kill). Fail in minutes with kernel stacks instead.
+bounded() {
+    local secs="$1"; shift
+    local rc=0
+    timeout -k 10 "${secs}" "$@" || rc=$?
+    if (( rc == 124 || rc == 137 )); then
+        echo "ERROR: '$*' wedged >${secs}s; D-state tasks and kernel stacks:" >&2
+        ps -eo pid,stat,wchan:32,args | awk '$2 ~ /D/' >&2 || true
+        local p
+        for p in $(ps -eo pid,stat | awk '$2 ~ /D/ {print $1}'); do
+            echo "--- /proc/${p}/stack ---" >&2
+            cat "/proc/${p}/stack" 2>/dev/null >&2 || true
+        done
+        dmesg | tail -100 | sed 's/^/  dmesg: /' >&2
+        exit 1
+    fi
+    return "${rc}"
+}
+
 echo "=== exporting over NFS and SMB ==="
 systemctl start rpcbind nfs-server 2>/dev/null || systemctl start rpcbind nfs-kernel-server
-exportfs -o "rw,async,no_root_squash,no_subtree_check,fsid=${UUID}" "127.0.0.1:${ROOT}/server"
-mount -t nfs -o vers=4.2,timeo=50,retrans=3 "127.0.0.1:${ROOT}/server" "${ROOT}/nfs"
+bounded 120 exportfs -o "rw,async,no_root_squash,no_subtree_check,fsid=${UUID}" "127.0.0.1:${ROOT}/server"
+bounded 300 mount -t nfs -o vers=4.2,timeo=50,retrans=3 "127.0.0.1:${ROOT}/server" "${ROOT}/nfs"
 
 cat > "${ROOT}/samba/smb.conf" <<EOF
 [global]
@@ -104,7 +126,7 @@ EOF
 smbd --foreground --no-process-group --configfile="${ROOT}/samba/smb.conf" &
 SMBD_PID=$!
 sleep 2
-mount -t cifs "//127.0.0.1/${SHARE}" "${ROOT}/cifs" -o "guest,port=${PORT},vers=3.1.1,noserverino"
+bounded 300 mount -t cifs "//127.0.0.1/${SHARE}" "${ROOT}/cifs" -o "guest,port=${PORT},vers=3.1.1,noserverino"
 
 # Each writer keeps a sliding window of files rather than accumulating: the
 # old delete-every-5th scheme grew the working set without bound, so a fast
