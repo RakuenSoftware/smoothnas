@@ -89,19 +89,29 @@ sed -i 's#"3 basic test3:\.\*Segmentation fault"#&\n    "3 basic test7:.*Segment
 snippet="$(mktemp)"
 cat > "${snippet}" <<'SNIP'
 
-# [smoothnas-ci] bounded + once-retried runtests; see smoothfs-protocol-gate-ci.sh
+# [smoothnas-ci] bounded + retried runtests; see smoothfs-protocol-gate-ci.sh
 run_suite_bounded() {
-    local dir="$1" workdir="$2" log="$3" try src
-    for try in 1 2; do
+    local dir="$1" workdir="$2" log="$3" try src p
+    for try in 1 2 3; do
         src=0
-        (cd "$dir" && NFSTESTDIR=$workdir timeout -k 30 900 ./runtests > "$log" 2>&1) || src=$?
+        # Fresh workdir per attempt: a wedged attempt leaves a D-state process
+        # pinning its files, so the dir cannot be cleaned and a retry inside it
+        # fails on leftovers (nfsidem: "mkdir: File exists") instead of
+        # retrying the actual test.
+        (cd "$dir" && NFSTESTDIR=${workdir}.try${try} timeout -k 30 900 ./runtests > "$log" 2>&1) || src=$?
         if [ "$src" -ne 124 ] && [ "$src" -ne 137 ]; then
             return "$src"
         fi
-        echo "  TIMEOUT  runtests wedged >900s in $dir (attempt $try/2); partial log:"
+        echo "  TIMEOUT  runtests wedged >900s in $dir (attempt $try/3); partial log:"
         cat "$log"
-        # A test stuck in D-state on the NFS mount can wedge this rm too.
-        timeout -k 10 60 rm -rf "$workdir" 2>/dev/null || true
+        echo "  D-state processes at wedge time (kernel stacks follow):"
+        ps -eo pid,stat,wchan:32,args | awk '$2 ~ /D/' || true
+        for p in $(ps -eo pid,stat | awk '$2 ~ /D/ {print $1}'); do
+            echo "  --- /proc/$p/stack ---"
+            cat "/proc/$p/stack" 2>/dev/null || true
+        done
+        # Best-effort reap of surviving (non-D) test children before retrying.
+        fuser -k -9 "${workdir}.try${try}" 2>/dev/null || true
     done
     return 124
 }
