@@ -43,6 +43,8 @@ type fakeRuntime struct {
 	inspectMissing map[string]bool // container IDs that 404 on inspect
 	containers     map[string]runtime.CreateContainerRequest
 	managed        []runtime.ContainerSummary // what ListManagedContainers returns
+	images         []runtime.ImageSummary     // what ListImages returns
+	removeImages   []string                   // refs passed to RemoveImage
 	// bridgeIP is what InspectContainerBridgeIP returns. Default
 	// empty string makes captureBridgeIP retry; tests that exercise
 	// the success path set this to a real-looking IP.
@@ -125,7 +127,16 @@ func (f *fakeRuntime) PullImage(ctx context.Context, ref string, _ func(runtime.
 }
 
 func (f *fakeRuntime) RemoveImage(ctx context.Context, ref string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removeImages = append(f.removeImages, ref)
 	return nil
+}
+
+func (f *fakeRuntime) ListImages(ctx context.Context) ([]runtime.ImageSummary, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.images, nil
 }
 
 func (f *fakeRuntime) CreateContainer(ctx context.Context, name string, req runtime.CreateContainerRequest) (runtime.CreateContainerResponse, error) {

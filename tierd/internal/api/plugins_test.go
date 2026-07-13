@@ -960,6 +960,9 @@ func (f *fakeModelRuntime) PullImage(_ context.Context, ref string, _ func(runti
 }
 
 func (f *fakeModelRuntime) RemoveImage(context.Context, string) error { return nil }
+func (f *fakeModelRuntime) ListImages(context.Context) ([]runtime.ImageSummary, error) {
+	return nil, nil
+}
 
 func (f *fakeModelRuntime) CreateContainer(_ context.Context, _ string, req runtime.CreateContainerRequest) (runtime.CreateContainerResponse, error) {
 	f.mu.Lock()

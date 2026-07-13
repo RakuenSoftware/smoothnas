@@ -1532,6 +1532,40 @@ func (s *Store) listContainerRefs(name string) ([]ContainerRefRow, error) {
 	return out, rows.Err()
 }
 
+// TrackedImageRefs returns every image ref any installed plugin still tracks:
+// each service's image plus each container-ref's mutable and resolved refs.
+// The orphaned-image sweep keeps these even when a plugin has no live container
+// (e.g. it's installed-but-stopped), so only genuinely unreferenced templates
+// get reclaimed. Refs are deduplicated; empty values are dropped.
+func (s *Store) TrackedImageRefs() ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT image_ref FROM plugin_services WHERE image_ref IS NOT NULL AND image_ref != ''
+		 UNION
+		 SELECT image_ref FROM plugin_container_refs WHERE image_ref IS NOT NULL AND image_ref != ''
+		 UNION
+		 SELECT resolved_ref FROM plugin_container_refs WHERE resolved_ref IS NOT NULL AND resolved_ref != ''`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	var out []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, err
+		}
+		ref = strings.TrimSpace(ref)
+		if ref == "" || seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		out = append(out, ref)
+	}
+	return out, rows.Err()
+}
+
 // sqlNullable converts a Go string to a sql.NullString that is invalid
 // (NULL) when empty.
 func sqlNullable(s string) sql.NullString {
