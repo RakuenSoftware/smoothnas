@@ -110,6 +110,28 @@ run_suite_bounded() {
             echo "  --- /proc/$p/stack ---"
             cat "/proc/$p/stack" 2>/dev/null || true
         done
+        # The D-dump alone has proven insufficient: run 29259427780 showed
+        # nfsd threads D-blocked on a file's i_rwsem whose HOLDER was not in
+        # D (an interruptible sleep inside the fs, or an unbalanced unlock,
+        # is invisible above). Dump every task's kernel stack + wchan — the
+        # guest runs ~dozens of tasks, so this stays small — and sysrq
+        # w/t into dmesg for scheduler-level detail.
+        echo "  all tasks (pid stat wchan comm) + kernel stacks:"
+        ps -eo pid,stat,wchan:32,comm || true
+        for p in /proc/[0-9]*; do
+            tp="${p}/stack"
+            [ -r "$tp" ] || continue
+            s="$(cat "$tp" 2>/dev/null)"
+            [ -n "$s" ] || continue
+            echo "  --- ${tp} ($(cat "${p}/comm" 2>/dev/null)) ---"
+            echo "$s"
+        done
+        echo w > /proc/sysrq-trigger 2>/dev/null || true
+        echo l > /proc/sysrq-trigger 2>/dev/null || true
+        echo t > /proc/sysrq-trigger 2>/dev/null || true
+        sleep 2
+        echo "  dmesg tail after sysrq w+l+t:"
+        dmesg | tail -500 || true
         # Best-effort reap of surviving (non-D) test children before retrying.
         fuser -k -9 "${workdir}.try${try}" 2>/dev/null || true
     done
