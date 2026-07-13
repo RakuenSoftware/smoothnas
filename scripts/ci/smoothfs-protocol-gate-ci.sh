@@ -131,15 +131,17 @@ echo "--- /dev/kvm ---";  ls -l /dev/kvm 2>&1 || echo "NO /dev/kvm (guest will f
 echo "--- qemu ---";      qemu-system-x86_64 --version 2>&1 | head -1 || true
 echo "--- virtme-ng ---"; vng --version 2>&1 | head -1 || true
 
-# Nested KVM on GitHub runners stalls the guest in early boot (right after
-# "ACPI: Core revision", before SMP/APIC bringup) with the default multi-CPU +
-# KASLR config. Boot single-CPU with KASLR disabled — GATE_GUEST_KOPTS carries
-# the same hardening into Phase 8.
-GATE_GUEST_KOPTS="nokaslr"
+# GitHub runners are themselves VMs, and the mainline guest kernel stalls in
+# early ACPI/timer init under *nested* KVM (it hung identically right after
+# "ACPI: Core revision" with 1 vs 2 CPUs and with/without KASLR). Emulate the
+# CPU with TCG instead (--disable-kvm) to sidestep nested virt entirely; the
+# Samba/module builds run natively on the host, so only the in-guest tests pay
+# the emulation cost. GATE_GUEST_ARGS carries the same config into Phase 8.
+GATE_GUEST_ARGS=(--disable-kvm --append nokaslr)
 smoke_out="${LOG_DIR}/smoke.log"
 smoke_rc=0
-run_guest 300 --verbose --append "${GATE_GUEST_KOPTS}" \
-    --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 1 --memory 2G --user root \
+run_guest 600 --verbose "${GATE_GUEST_ARGS[@]}" \
+    --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 2 --memory 2G --user root \
     -- bash -c 'echo GUEST_ALIVE; modprobe smoothfs && lsmod | grep -q "^smoothfs" && echo GATE_SMOKE_OK' \
     > "${smoke_out}" 2>&1 || smoke_rc=$?
 cat "${smoke_out}"
@@ -203,8 +205,8 @@ log "Phase 8: protocol gate + mixed soak in-guest"
 cp -f /tmp/smoothfs-vfs-*.log "${LOG_DIR}/" 2>/dev/null || true
 # Hard-bounded so a wedged in-guest test can't consume the whole job timeout
 # (the release gate polls the workflow conclusion for up to 120 min).
-run_guest 5400 --append "${GATE_GUEST_KOPTS}" \
-    --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 1 --memory 4G --user root \
+run_guest 5400 "${GATE_GUEST_ARGS[@]}" \
+    --run "/boot/vmlinuz-${GUEST_KVER}" --cpus 4 --memory 4G --user root \
     -- env \
       "SMOOTHFS_TEST_ROOT=${TEST_ROOT}" \
       "SMOOTHFS_SOAK_SECONDS=${SOAK_SECONDS}" \
