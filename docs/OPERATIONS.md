@@ -180,6 +180,26 @@ React installer frontend. At install time the smoothiso initrd:
 The key design rule is that the OS lives on a separate disk selection from
 managed storage disks.
 
+### Unattended install
+
+The ISO boots interactive by default, but the whole install can run without
+an operator. Two equivalent entry points:
+
+- The GRUB menu ships an **"Automated — wipes the first disk"** entry. The
+  target disk and admin password are baked in at ISO build time via the
+  `AUTO_INSTALL_DISK` (default `/dev/sda`) and `AUTO_INSTALL_PASSWORD`
+  (default `changeme`) build-iso.sh env vars.
+- Any boot entry becomes unattended by adding kernel cmdline args:
+  `smoothiso.disks=/dev/sda` (comma/plus separated for RAID-1 OS mirrors,
+  e.g. `smoothiso.disks=/dev/sda+/dev/sdb`) and `smoothiso.password=...`
+  (≥ 6 chars).
+
+When both answers are present on the cmdline the installer skips every
+prompt — including the final "remove media and continue" confirm — and
+reboots on its own after a 10-second countdown. Detach the ISO/media before
+that reboot (or rely on boot order) so the machine comes up in the installed
+system. This is the path CI and test-VM provisioning use.
+
 ## Runtime Services
 
 | Service | Role |
@@ -256,6 +276,32 @@ SMOOTHNAS_HOST=192.168.0.204 SMOOTHNAS_PASS='...' scripts/release-gate.sh
 The default gate is non-destructive. It checks service health, generated SMB/NFS
 defaults, failed units, and quick protocol smoke tests when the test mounts are
 present. The full checklist is in [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
+
+### SmoothFS protocol gate (CI)
+
+[`smoothfs-protocol-gate.yml`](../.github/workflows/smoothfs-protocol-gate.yml)
+is the CI half of the protocol story, and stable releases require it to pass.
+It runs on a stock GitHub runner by building the smoothfs module and Samba VFS
+against a clean ≥ 6.18 mainline kernel, booting that kernel under
+virtme-ng/QEMU (TCG emulation — nested KVM stalls on GitHub runners), and
+executing the *unmodified* ISO-shipped gate scripts inside the guest:
+`scripts/smoothfs-protocol-gate.sh` (cthon04 NFS conformance, smbtorture,
+tier-spill checks) followed by `scripts/smoothfs-mixed-protocol-soak.sh`
+(concurrent local + NFSv4.2 + SMB writers on a two-tier loopback pool, then a
+zero-length-file integrity sweep).
+
+The smoothfs source under test is the `SMOOTHFS_REPO_REF` pin in
+[`iso/build-iso.sh`](../iso/build-iso.sh) — the same ref the release embeds —
+so bumping the pin is what rolls new smoothfs code through the gate.
+
+Everything long-running in the guest is wall-clock bounded so a kernel-side
+wedge fails the job in minutes with diagnostics instead of consuming the whole
+job timeout invisibly: each cthon04 suite is bounded (900 s, fresh workdir,
+retried), the soak's exportfs and NFS/CIFS mounts are bounded, and on any
+timeout the harness dumps D-state kernel stacks, all-task stacks, and dmesg
+(sysrq w/l/t) before failing. If a gate job produces no output for tens of
+minutes and then dies at the guest wall-clock bound, treat it as an in-kernel
+smoothfs hang and start from the stack dumps in the job log.
 
 ## Release and Update Model
 

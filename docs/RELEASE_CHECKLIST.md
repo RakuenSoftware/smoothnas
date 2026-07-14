@@ -61,6 +61,7 @@ SMOOTHNAS_RELEASE_GATE_DESTRUCTIVE=1 SMOOTHNAS_RELEASE_GATE_DISKS='/dev/...' scr
 ## Update And Install
 
 - Fresh install boots to a reachable UI and healthy `tierd`.
+- The ISO's "Automated" GRUB entry (or `smoothiso.disks=`/`smoothiso.password=` on the cmdline) completes and reboots into the installed system with no operator input.
 - Applying a package/update preserves DB migrations, protocol config, shares, users, and backup configs.
 - Failed update or package application leaves the existing appliance serviceable.
 - Release artifacts include the expected kernel/module/package versions for SmoothNAS and SmoothFS.

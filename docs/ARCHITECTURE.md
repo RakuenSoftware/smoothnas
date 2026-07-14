@@ -183,6 +183,21 @@ topology; the SQLite store is a reconstructable cache of it.
 
 The schema is managed through [`tierd/internal/db/migrations.go`](../tierd/internal/db/migrations.go).
 
+### SQLite concurrency contract
+
+`tierd` opens its SQLite store (`tierd/internal/db/db.go`) with WAL journaling,
+a 5 s `busy_timeout`, foreign keys on, and — deliberately —
+`_txlock=immediate`, so **every transaction takes the write lock at `BEGIN`**
+and concurrent writers queue on the busy timeout. Background workers (plugin
+materialise, jobs, monitors) commit concurrently with API requests; with
+SQLite's default deferred `BEGIN`, a transaction that reads before writing
+upgrades read→write mid-transaction, and SQLite fails that upgrade with an
+*immediate* `SQLITE_BUSY` ("database is locked") whenever another connection
+committed first — the busy timeout cannot apply there without breaking
+snapshot isolation. Keep new store methods on the plain `Begin()` path (they
+inherit the immediate lock); do not reintroduce deferred transactions for
+read-then-write flows.
+
 ## 5. Frontend Architecture
 
 The frontend is now a route-based React application built with Vite.

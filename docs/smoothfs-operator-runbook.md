@@ -28,11 +28,26 @@ systemctl status tierd
 curl -s http://127.0.0.1:8420/api/health
 ```
 
-At this point the appliance has zero smoothfs pools. Log into the web UI (default 8420) or use `tierd-cli` to create one.
+At this point the appliance has zero smoothfs pools. Log into the web UI
+(served by nginx at `https://<appliance>/` — port 8420 is only tierd's local
+API bind on 127.0.0.1, it is not exposed externally) or use `tierd-cli` to
+create one.
 
 ## 2. Creating a smoothfs pool
 
 Smoothfs pools are operator-declared — tierd does **not** auto-stand-up pools from disk. Each pool needs a name, a UUID (auto-generated if not supplied), and an ordered list of tier mountpoints (fastest first).
+
+Two creation flows exist, with **different mountpoint conventions**:
+
+- **Named-tier provisioning** (Tiers page): tierd provisions the per-tier LVM
+  backings itself and mounts the pool at **`/mnt/<name>`** (unit
+  `mnt-<name>.mount`).
+- **Standalone create** (smoothfs Pools page / `tierd-cli smoothfs
+  create-pool`): you supply existing tier directories and the pool mounts
+  under the default mount base **`/mnt/smoothfs/<name>`** (unit
+  `mnt-smoothfs-<name>.mount`), unless `--mount-base` overrides it.
+
+The examples below use the standalone convention.
 
 ### Via the web UI
 
@@ -268,6 +283,20 @@ bash /usr/share/smoothfs-dkms/enroll-signing-cert.sh
 ### Movement wedged — quiesce doesn't return
 
 Check `smoothfs_movement_log` for the last rows. If there's a row stuck at `cutover_in_progress` without a `switched`/`failed` successor, the kernel is likely in the SRCU drain waiting for a writer. `ss -tnlp | grep :<target-port>` to find the holding process; kill it if appropriate. As a last resort, `modprobe -r smoothfs` after every pool is unmounted forces recovery on the next mount.
+
+### Directory operations hang in D-state under NFS create/unlink churn
+
+One process stuck in uninterruptible sleep on a directory while the rest of the
+mount stays usable, typically under an NFS client hammering
+create→unlink→re-lookup on the same directory. This is the smoothfs v0.2.15
+OID-writeback wedge: a lookup drained the whole pending-OID backlog while
+holding the parent directory's `i_rwsem`, convoying every other operation on
+that directory behind lower-filesystem xattr I/O. Fixed in **smoothfs v0.2.16**
+(the lookup now peeks the single pending entry instead of draining). Confirm
+with `modinfo smoothfs | grep ^version`; if you're on ≤ 0.2.15, upgrade the
+appliance (or the `smoothfs-dkms` deb) — the wedge self-resolves once the
+backlog flushes, so a hung process usually recovers in minutes, but it will
+re-arm under the same workload until the module is upgraded.
 
 ### `Inspect` returns `ENOENT` / UI shows "pool not found"
 

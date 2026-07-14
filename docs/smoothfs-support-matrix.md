@@ -92,3 +92,24 @@ NFS server tuning is automatic on boot and before NFS service enablement. Smooth
 | `tierd` | 0.1.0-1 | `tierd/debian/` — Phase 7.4; ships `/usr/sbin/tierd` + `/usr/bin/tierd-cli` + systemd unit |
 
 The three debs are independently versioned but expected to move together in a SmoothNAS release.
+
+Note the ISO installer does **not** install the `tierd` deb — it copies the
+built binary to `/usr/local/bin/tierd` and writes its own unit at
+`/etc/systemd/system/tierd.service` (`iso/hooks/configure.sh`). The deb's
+`/usr/sbin/tierd` + `/lib/systemd/system/tierd.service` layout applies to
+manual apt installs only.
+
+## SmoothFS source pin
+
+The smoothfs source a SmoothNAS release embeds (for DKMS and the Samba VFS
+build) is the `SMOOTHFS_REPO_REF` default in
+[`iso/build-iso.sh`](../iso/build-iso.sh) — a `RakuenSoftware/smoothfs`
+release-please tag or commit SHA. The release workflow propagates that value
+verbatim into the update manifest, and the CI protocol gate tests exactly that
+ref, so the pin is the single source of truth for "which smoothfs ships".
+
+| Field | Value |
+|---|---|
+| Current pin | **v0.2.16** |
+| Floor | v0.2.16 — v0.2.15 has a known wedge: `smoothfs_iget` drained the whole OID writeback backlog under the parent directory's `i_rwsem`, convoying every operation on that directory into D-state under NFS create/unlink/re-lookup churn (fixed by smoothfs #166's queue peek) |
+| Bump procedure | edit the `SMOOTHFS_REPO_REF` default, PR into `testing`, and let `smoothfs-protocol-gate` validate the new ref before promotion |
