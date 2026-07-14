@@ -383,8 +383,8 @@ export default function Arrays() {
       .catch(() => setImportablePools([]));
   }
 
-  function importPool(name: string) {
-    api.importPool(name).then(() => {
+  function importPool(name: string, destroyed = false) {
+    api.importPool(name, destroyed).then(() => {
       toast.success(t('arrays.toast.poolImported', { name }));
       refresh();
     }).catch(e => toast.error(extractError(e, t('arrays.error.import'))));
@@ -970,7 +970,7 @@ export default function Arrays() {
                         <td><code>{pool.id || '—'}</code></td>
                         <td>{pool.status || t('arrays.import.readyToImport')}</td>
                         <td className="action-cell">
-                          <button className="btn primary" onClick={() => importPool(pool.name)}>{t('arrays.import.button')}</button>
+                          <button className="btn primary" onClick={() => importPool(pool.name, pool.destroyed)}>{t('arrays.import.button')}</button>
                         </td>
                       </tr>
                     ))}
