@@ -2,9 +2,9 @@
 # Runs once on the first boot, after smoothiso has reconfigured deferred
 # packages and brought up SSH. Inherits set -euo pipefail from the parent.
 #
-# Builds the DKMS-backed storage stack (OpenZFS, smoothfs, smoothfs Samba VFS),
-# generates the TLS certificate used by nginx, and finalises tierd PAM + admin
-# bootstrap. The smoothiso parent writes the firstboot-done marker on success.
+# Builds the DKMS-backed storage stack (OpenZFS, smoothfs, smoothfs Samba VFS)
+# and finalises tierd PAM + admin bootstrap. The smoothiso parent writes the
+# firstboot-done marker on success.
 
 if [ ! -f /opt/smoothnas/package-manifest ]; then
     echo "ERROR: missing /opt/smoothnas/package-manifest" >&2
@@ -193,22 +193,9 @@ install_smoothfs_dkms
 install_firstboot_service_packages
 install_smoothfs_samba_vfs
 
-# Generate the self-signed TLS certificate referenced by nginx.
-TLS_DIR="/etc/tierd/tls"
-mkdir -p "$TLS_DIR"
-if [ ! -f "$TLS_DIR/cert.pem" ]; then
-    HOST=$(hostname)
-    openssl req -x509 -nodes \
-        -days 3650 \
-        -newkey rsa:2048 \
-        -keyout "$TLS_DIR/key.pem" \
-        -out "$TLS_DIR/cert.pem" \
-        -subj "/CN=${HOST}/O=SmoothNAS" \
-        -addext "subjectAltName=DNS:${HOST},DNS:localhost,IP:127.0.0.1" \
-        2>/dev/null
-    chmod 600 "$TLS_DIR/key.pem"
-    chmod 644 "$TLS_DIR/cert.pem"
-fi
+# The TLS certificate nginx needs is generated before nginx starts by
+# smoothnas-tls-init.service (installed by configure.sh), so the web UI is
+# reachable while this script builds the storage stack.
 
 # Dedicated PAM service for tierd web UI logins.
 if [ ! -f /etc/pam.d/tierd ]; then
@@ -241,5 +228,5 @@ Delete this file after recording the root password.
 CREDS
 chmod 600 /var/lib/tierd/initial-credentials
 
-systemctl enable nginx.service 2>/dev/null || true
-systemctl --no-block restart nginx 2>/dev/null || true
+# nginx is enabled at install time (configure.sh) and has been serving the
+# web UI since boot; nothing to (re)start here.
