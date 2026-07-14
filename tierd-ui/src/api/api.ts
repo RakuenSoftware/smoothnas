@@ -125,7 +125,7 @@ export const api = {
   getPools: () => apiFetch<any[]>('GET', '/pools'),
   createPool: (data: any) => apiFetch('POST', '/pools', data),
   getImportablePools: () => apiFetch<any[]>('GET', '/pools/importable'),
-  importPool: (name: string) => apiFetch('POST', '/pools/import', { name }),
+  importPool: (name: string, destroyed = false) => apiFetch('POST', '/pools/import', { name, destroyed }),
   wipeZfsMemberDisks: (disks: string[]) => apiFetch('POST', '/pools/wipe-members', { disks }),
   getPool: (name: string) => apiFetch('GET', `/pools/${name}`),
   deletePool: (name: string) => apiFetch('DELETE', `/pools/${name}`),

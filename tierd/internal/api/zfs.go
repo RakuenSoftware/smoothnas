@@ -219,13 +219,14 @@ func (h *ZFSHandler) listImportablePools(w http.ResponseWriter, r *http.Request)
 
 func (h *ZFSHandler) importPool(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name string `json:"name"`
+		Name      string `json:"name"`
+		Destroyed bool   `json:"destroyed"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 		jsonErrorCoded(w, "name required", http.StatusBadRequest, "zfs.name_required")
 		return
 	}
-	if err := zfs.ImportPool(req.Name); err != nil {
+	if err := zfs.ImportPool(req.Name, req.Destroyed); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}

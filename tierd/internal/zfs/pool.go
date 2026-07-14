@@ -40,6 +40,10 @@ type ImportablePool struct {
 	ID     string `json:"id"`
 	State  string `json:"state"`
 	Status string `json:"status"`
+	// Destroyed marks a pool whose members carry a destroyed label
+	// (zpool destroy). `zpool import` hides these; they are discovered
+	// with -D and must be imported with -D as well.
+	Destroyed bool `json:"destroyed"`
 }
 
 // Vdev types we accept for pool creation.
@@ -175,9 +179,14 @@ func CreatePool(name, vdevType string, dataDisks, slogDisks, l2arcDisks []string
 const zpoolImportSearchDir = "/dev/disk/by-id"
 
 // importArgs builds the `zpool import` argument list for a named pool, pinned
-// to stable by-id device discovery.
-func importArgs(name string) []string {
-	return []string{"import", "-d", zpoolImportSearchDir, "-f", name}
+// to stable by-id device discovery. destroyed adds -D, required to recover a
+// pool whose labels are in the destroyed state.
+func importArgs(name string, destroyed bool) []string {
+	args := []string{"import", "-d", zpoolImportSearchDir}
+	if destroyed {
+		args = append(args, "-D")
+	}
+	return append(args, "-f", name)
 }
 
 // diskByIDDir holds the stable per-disk symlinks; overridable for tests.
@@ -245,9 +254,30 @@ func resolveByIDs(paths []string) []string {
 	return out
 }
 
-// ListImportablePools returns ZFS pools discoverable on local disks but not imported.
+// ListImportablePools returns ZFS pools discoverable on local disks but not
+// imported — both regular (exported/orphaned) pools and destroyed pools,
+// which plain `zpool import` hides and only a -D scan surfaces.
 func ListImportablePools() ([]ImportablePool, error) {
-	out, err := exec.Command("zpool", "import", "-d", zpoolImportSearchDir).CombinedOutput()
+	pools, err := scanImportablePools(false)
+	if err != nil {
+		return nil, err
+	}
+	destroyed, err := scanImportablePools(true)
+	if err != nil {
+		return nil, err
+	}
+	for i := range destroyed {
+		destroyed[i].Destroyed = true
+	}
+	return append(pools, destroyed...), nil
+}
+
+func scanImportablePools(destroyed bool) ([]ImportablePool, error) {
+	args := []string{"import", "-d", zpoolImportSearchDir}
+	if destroyed {
+		args = append(args, "-D")
+	}
+	out, err := exec.Command("zpool", args...).CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" || strings.Contains(msg, "no pools available") {
@@ -259,11 +289,13 @@ func ListImportablePools() ([]ImportablePool, error) {
 }
 
 // ImportPool imports an existing ZFS pool discovered on local disks.
-func ImportPool(name string) error {
+// destroyed recovers a pool whose labels are in the destroyed state
+// (zpool destroy) via -D.
+func ImportPool(name string, destroyed bool) error {
 	if err := ValidatePoolName(name); err != nil {
 		return err
 	}
-	cmd := exec.Command("zpool", importArgs(name)...)
+	cmd := exec.Command("zpool", importArgs(name, destroyed)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("zpool import %s: %s: %w", name, strings.TrimSpace(string(out)), err)
 	}

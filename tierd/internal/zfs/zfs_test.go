@@ -626,10 +626,20 @@ func assertArgs(t *testing.T, got, expected []string) {
 // TestImportArgsPinsByID guards the root-cause fix: imports must search
 // /dev/disk/by-id so reboots can't fault healthy members via /dev/sdX reorder.
 func TestImportArgsPinsByID(t *testing.T) {
-	got := strings.Join(importArgs("tank"), " ")
+	got := strings.Join(importArgs("tank", false), " ")
 	want := "import -d /dev/disk/by-id -f tank"
 	if got != want {
 		t.Fatalf("importArgs = %q, want %q (must pin by-id discovery)", got, want)
+	}
+}
+
+// TestImportArgsDestroyed guards recovery of destroyed pools: -D must come
+// before -f <name> and by-id discovery must stay pinned.
+func TestImportArgsDestroyed(t *testing.T) {
+	got := strings.Join(importArgs("tank", true), " ")
+	want := "import -d /dev/disk/by-id -D -f tank"
+	if got != want {
+		t.Fatalf("importArgs destroyed = %q, want %q", got, want)
 	}
 }
 
