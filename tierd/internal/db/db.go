@@ -30,7 +30,13 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on")
+	// _txlock=immediate: take the write lock at BEGIN so concurrent writers
+	// queue on _busy_timeout. With the default deferred BEGIN, a transaction
+	// that reads before writing upgrades read->write mid-transaction, and
+	// SQLite fails that upgrade with an immediate SQLITE_BUSY ("database is
+	// locked") whenever another connection wrote first — busy_timeout cannot
+	// apply there without breaking snapshot isolation.
+	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

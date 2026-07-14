@@ -21,6 +21,7 @@ container:
 volumes:
   - name: huggingface-cache
     mode: tier-bound
+    slot: NVME
     minSize: 50G
     bind: /root/.cache/huggingface
 ports:

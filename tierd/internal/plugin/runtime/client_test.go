@@ -348,6 +348,35 @@ func TestPullImage_StreamingAndDigestExtraction(t *testing.T) {
 	}
 }
 
+func TestPullImage_DigestPinnedRefNotDoubled(t *testing.T) {
+	// A digest-pinned pull (repo@sha256:...) must resolve to a single-digest
+	// ref, not "repo@sha256:x@sha256:x" — the daemon 404s on the doubled form
+	// at container create ("invalid reference format").
+	digest := "sha256:" + strings.Repeat("b", 64)
+	sock := newFakeRuntime(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/images/create" {
+			http.NotFound(w, r)
+			return
+		}
+		// The daemon keeps a digest pin whole in fromImage (no tag) and
+		// still emits the final Digest event on a registry pull.
+		if got := r.URL.Query().Get("fromImage"); got != "ghcr.io/foo/bar@"+digest {
+			t.Errorf("fromImage = %q, want the whole digest ref", got)
+		}
+		fmt.Fprintln(w, `{"status":"Pulling from foo/bar"}`)
+		fmt.Fprintf(w, "{\"status\":\"Digest: %s\"}\n", digest)
+	}))
+	c := NewClient(sock)
+
+	resolved, err := c.PullImage(context.Background(), "ghcr.io/foo/bar@"+digest, nil)
+	if err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	if want := "ghcr.io/foo/bar@" + digest; resolved != want {
+		t.Errorf("resolved = %q want %q (digest must not double)", resolved, want)
+	}
+}
+
 func TestPullImage_ErrorEventReturnsErr(t *testing.T) {
 	sock := newFakeRuntime(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "manifest unknown"})

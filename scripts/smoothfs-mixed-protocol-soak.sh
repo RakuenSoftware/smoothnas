@@ -64,10 +64,32 @@ modprobe smoothfs
 mount -t smoothfs -o "pool=soak,uuid=${UUID},tiers=${ROOT}/fast:${ROOT}/slow" none "${ROOT}/server"
 chmod 1777 "${ROOT}/server"
 
+# Bound a setup step that can wedge in the kernel (an nfsd thread stuck
+# inside smoothfs blocks exportfs/mount.nfs in uninterruptible sleep, seen on
+# gate runs 29265262327/29265253818: no output between "exporting" and the
+# 5400s guest wall-clock kill). Fail in minutes with kernel stacks instead.
+bounded() {
+    local secs="$1"; shift
+    local rc=0
+    timeout -k 10 "${secs}" "$@" || rc=$?
+    if (( rc == 124 || rc == 137 )); then
+        echo "ERROR: '$*' wedged >${secs}s; D-state tasks and kernel stacks:" >&2
+        ps -eo pid,stat,wchan:32,args | awk '$2 ~ /D/' >&2 || true
+        local p
+        for p in $(ps -eo pid,stat | awk '$2 ~ /D/ {print $1}'); do
+            echo "--- /proc/${p}/stack ---" >&2
+            cat "/proc/${p}/stack" 2>/dev/null >&2 || true
+        done
+        dmesg | tail -100 | sed 's/^/  dmesg: /' >&2
+        exit 1
+    fi
+    return "${rc}"
+}
+
 echo "=== exporting over NFS and SMB ==="
-exportfs -o "rw,async,no_root_squash,no_subtree_check,fsid=${UUID}" "127.0.0.1:${ROOT}/server"
 systemctl start rpcbind nfs-server 2>/dev/null || systemctl start rpcbind nfs-kernel-server
-mount -t nfs -o vers=4.2,timeo=50,retrans=3 "127.0.0.1:${ROOT}/server" "${ROOT}/nfs"
+bounded 120 exportfs -o "rw,async,no_root_squash,no_subtree_check,fsid=${UUID}" "127.0.0.1:${ROOT}/server"
+bounded 300 mount -t nfs -o vers=4.2,timeo=50,retrans=3 "127.0.0.1:${ROOT}/server" "${ROOT}/nfs"
 
 cat > "${ROOT}/samba/smb.conf" <<EOF
 [global]
@@ -104,19 +126,26 @@ EOF
 smbd --foreground --no-process-group --configfile="${ROOT}/samba/smb.conf" &
 SMBD_PID=$!
 sleep 2
-mount -t cifs "//127.0.0.1/${SHARE}" "${ROOT}/cifs" -o "guest,port=${PORT},vers=3.1.1,noserverino"
+bounded 300 mount -t cifs "//127.0.0.1/${SHARE}" "${ROOT}/cifs" -o "guest,port=${PORT},vers=3.1.1,noserverino"
 
+# Each writer keeps a sliding window of files rather than accumulating: the
+# old delete-every-5th scheme grew the working set without bound, so a fast
+# enough run filled the 2x2G pool mid-soak. ENOSPC then left zero-length
+# .tmp files that the post-soak integrity check flagged — the soak failed on
+# its own space budget, not on smoothfs. 3 writers x 25 files x 16M ≈ 1.2G
+# keeps steady-state churn well inside the 4G pool at any throughput.
 writer() {
     local dir="$1"
     local prefix="$2"
     local deadline=$((SECONDS + SECONDS_TO_RUN))
     local i=0
+    local window=24
     mkdir -p "${dir}/${prefix}"
     while (( SECONDS < deadline )); do
         dd if=/dev/zero of="${dir}/${prefix}/file-${i}.tmp" bs=1M count=16 conv=fsync status=none
         mv "${dir}/${prefix}/file-${i}.tmp" "${dir}/${prefix}/file-${i}.bin"
-        if (( i % 5 == 0 )); then
-            rm -f "${dir}/${prefix}/file-$((i / 2)).bin"
+        if (( i >= window )); then
+            rm -f "${dir}/${prefix}/file-$((i - window)).bin"
         fi
         i=$((i + 1))
     done
@@ -129,13 +158,32 @@ writer "${ROOT}/nfs" nfs &
 p2=$!
 writer "${ROOT}/cifs" smb &
 p3=$!
-wait "${p1}" "${p2}" "${p3}"
+soak_rc=0
+for p in "${p1}" "${p2}" "${p3}"; do
+    wait "${p}" || { echo "ERROR: a soak writer exited non-zero" >&2; soak_rc=1; }
+done
+[[ ${soak_rc} -eq 0 ]] || exit 1
 
 sync
-find "${ROOT}/server" -type f -size 0 -print -quit | grep -q . && {
-    echo "ERROR: found zero-length file after soak" >&2
+mapfile -t zeroes < <(find "${ROOT}/server" -type f -size 0)
+if (( ${#zeroes[@]} > 0 )); then
+    echo "ERROR: found ${#zeroes[@]} zero-length file(s) after soak:" >&2
+    for f in "${zeroes[@]}"; do
+        rel="${f#"${ROOT}"/server/}"
+        stat -c '  union %s bytes  %n' "$f" >&2
+        for tier in fast slow; do
+            tf="${ROOT}/${tier}/${rel}"
+            if [[ -e "${tf}" ]]; then
+                stat -c "  ${tier}  %s bytes  %n" "${tf}" >&2
+                getfattr -d -m 'trusted\.smoothfs\.' --absolute-names "${tf}" 2>/dev/null | sed 's/^/    /' >&2
+            else
+                echo "  ${tier}  <absent>" >&2
+            fi
+        done
+    done
+    dmesg | tail -100 | grep -i smoothfs | sed 's/^/  dmesg: /' >&2
     exit 1
-}
+fi
 
 if dmesg | tail -300 | grep -E 'smoothfs:.*(BUG|WARN|corrupt|lost|panic|Oops)' >/tmp/smoothfs-soak-dmesg.txt; then
     echo "ERROR: suspicious smoothfs dmesg lines:" >&2

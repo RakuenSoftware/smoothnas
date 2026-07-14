@@ -55,6 +55,7 @@ services:
         # Tier-bound: the database lives on the assigned storage tier, not the
         # root device. HDD is the home slot; smoothfs caches hot pages upward.
         mode: tier-bound
+        slot: HDD
         bind: /var/lib/postgresql/data
     health:
       test: ["CMD-SHELL", "pg_isready -U aimee -d aimee_shared"]
@@ -74,6 +75,7 @@ services:
       - name: models
         # Tier-bound: the embedder model cache lives on the assigned tier.
         mode: tier-bound
+        slot: HDD
         bind: /opt/models
     ports:
       - name: http
@@ -111,6 +113,7 @@ services:
       - name: home
         # Tier-bound: kb state/config lives on the assigned tier.
         mode: tier-bound
+        slot: HDD
         bind: /var/lib/aimee
     ports:
       - name: api

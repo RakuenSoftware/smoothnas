@@ -28,6 +28,7 @@ type RuntimeClient interface {
 
 	PullImage(ctx context.Context, ref string, onProgress func(runtime.PullEvent)) (string, error)
 	RemoveImage(ctx context.Context, ref string) error
+	ListImages(ctx context.Context) ([]runtime.ImageSummary, error)
 
 	CreateContainer(ctx context.Context, name string, req runtime.CreateContainerRequest) (runtime.CreateContainerResponse, error)
 	StartContainer(ctx context.Context, id string) error
@@ -1533,7 +1534,16 @@ func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 		return err
 	}
 	if l.isCompose(rec) {
-		return l.backend.Teardown(ctx, l.composeSpec(rec), false)
+		if err := l.backend.Teardown(ctx, l.composeSpec(rec), false); err != nil {
+			return err
+		}
+		// `compose down` removes containers, networks and (with -v) anonymous
+		// volumes, but NEVER the images it pulled — so a compose plugin's image
+		// templates leak on the tier after uninstall. Reclaim them here, mirroring
+		// the manifest path below. Guarded so an image another running plugin still
+		// references is left intact.
+		l.pruneUnusedImages(ctx, pluginImageRefs(rec))
+		return nil
 	}
 
 	if l.proxy != nil {
