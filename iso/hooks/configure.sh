@@ -246,7 +246,53 @@ chroot "$TARGET" systemctl enable tierd.service 2>/dev/null || true
 
 ui_status "Configuring system" "Configuring nginx reverse proxy for the SmoothNAS web UI." 4 6
 
-# nginx reverse proxy in front of tierd. TLS cert is generated at firstboot.
+# Self-signed TLS certificate for the web UI, generated on the installed
+# system before nginx starts (smoothnas-tls-init.service below). Doing it
+# here rather than at the end of firstboot keeps the web UI reachable from
+# the first seconds of the first boot — the storage-stack build in firstboot
+# takes minutes, and with no cert nginx cannot start at all, so the install
+# looked dead (connection refused) the whole time.
+cat > "$TARGET/usr/local/bin/smoothnas-tls-init" << 'TLSINIT'
+#!/bin/sh
+# Generates the self-signed TLS certificate nginx serves the SmoothNAS web
+# UI with. Idempotent: an existing certificate is left alone.
+set -eu
+TLS_DIR=/etc/tierd/tls
+[ -f "$TLS_DIR/cert.pem" ] && exit 0
+mkdir -p "$TLS_DIR"
+HOST=$(hostname)
+openssl req -x509 -nodes \
+    -days 3650 \
+    -newkey rsa:2048 \
+    -keyout "$TLS_DIR/key.pem" \
+    -out "$TLS_DIR/cert.pem" \
+    -subj "/CN=${HOST}/O=SmoothNAS" \
+    -addext "subjectAltName=DNS:${HOST},DNS:localhost,IP:127.0.0.1" \
+    2>/dev/null
+chmod 600 "$TLS_DIR/key.pem"
+chmod 644 "$TLS_DIR/cert.pem"
+TLSINIT
+chmod 755 "$TARGET/usr/local/bin/smoothnas-tls-init"
+
+# A dedicated oneshot rather than an nginx ExecStartPre drop-in: drop-in
+# ExecStartPre lines run after the packaged ones, and Debian's nginx unit
+# config-tests (nginx -t) first — which fails while the cert is missing.
+cat > "$TARGET/etc/systemd/system/smoothnas-tls-init.service" << 'UNIT'
+[Unit]
+Description=Generate SmoothNAS web UI TLS certificate
+Before=nginx.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/smoothnas-tls-init
+
+[Install]
+WantedBy=nginx.service
+UNIT
+chroot "$TARGET" systemctl enable smoothnas-tls-init.service 2>/dev/null || true
+chroot "$TARGET" systemctl enable nginx.service 2>/dev/null || true
+
+# nginx reverse proxy in front of tierd.
 mkdir -p "$TARGET/etc/nginx/conf.d/plugins.d"
 cat > "$TARGET/etc/nginx/sites-available/tierd" << 'NGINX'
 server {
@@ -275,6 +321,16 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
+        # tierd is down during first-boot setup (storage-stack build takes
+        # minutes) and briefly across updates. Answer in the API's own
+        # error shape instead of nginx's HTML 502.
+        error_page 502 504 = @tierd_down;
+    }
+
+    location @tierd_down {
+        default_type application/json;
+        add_header Retry-After 5 always;
+        return 503 '{"error":"SmoothNAS is starting up. The management service is not ready yet; this can take several minutes on the first boot.","code":"system.starting"}';
     }
 
     include /etc/nginx/conf.d/plugins.d/*.conf;
