@@ -266,6 +266,34 @@ func tierFullCapBytes(totalBytes int64, fullThresholdPct int) int64 {
 	return totalBytes * int64(fullThresholdPct) / 100
 }
 
+// plannedMove is one file the packer wants relocated: its index into cands and
+// the rank it should end up on.
+type plannedMove struct {
+	idx  int
+	want int
+}
+
+// planMoveOrder splits the packer's assignments into the moves that free space
+// on a faster tier (demotions) and those that consume it (promotions), so the
+// caller can drain before it fills. Files already on their assigned rank, and
+// any the packer left unassigned, produce no move.
+//
+// Rank numbers grow as tiers get slower, so want > curRank is a demotion.
+func planMoveOrder(cands []candidate, assignments []int, assigned []bool) (demotions, promotions []plannedMove) {
+	for idx, c := range cands {
+		if !assigned[idx] || assignments[idx] == c.curRank {
+			continue
+		}
+		m := plannedMove{idx: idx, want: assignments[idx]}
+		if m.want > c.curRank {
+			demotions = append(demotions, m)
+		} else {
+			promotions = append(promotions, m)
+		}
+	}
+	return demotions, promotions
+}
+
 func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNamespaceRow) {
 	maintenanceMode, ok := a.poolReadyForSmoothNASMaintenance(ns.PoolName)
 	if !ok {
@@ -405,25 +433,44 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 
 	moved := 0
 	skipped := 0
+
+	// Run every move that FREES fast-tier space before any move that consumes
+	// it: demotions (toward a slower tier) first, then promotions.
+	//
+	// The admission pass above computes a steady-state plan — "this tier should
+	// end up holding targetCap bytes" — after subtracting the candidates it is
+	// re-placing. Those evicted bytes are still physically resident until their
+	// move completes, so the plan is only reachable if the drains happen first.
+	// Executing in walk order interleaves the two, and a promotion then lands on
+	// a tier still holding everything the plan intends to evict: it fails
+	// ENOSPC, and keeps failing every cycle because the next pass re-plans from
+	// the same over-full starting point. Ordering is the whole fix — the
+	// packer's arithmetic was already correct, just unreachable in that order.
+	//
+	// Draining first is always safe: a demotion targets a tier the packer had
+	// capacity to admit it to, so it cannot be starved by this reordering.
+	demotions, promotions := planMoveOrder(cands, assignments, assigned)
 	planned := 0
-	for idx, c := range cands {
+
+	// planned counts moves ATTEMPTED, not moves plannable — matching the
+	// pre-reordering behaviour exactly. Counting the full plan up front would
+	// quietly change what balanceStatus reports on cancellation (PendingMoves is
+	// derived as planned-moved), and this change is about execution order only.
+	for _, m := range append(demotions, promotions...) {
 		if ctx.Err() != nil {
 			balanceStatus.Reason = "target-balance placement canceled"
 			break
 		}
-		if !assigned[idx] || assignments[idx] == c.curRank {
-			continue
-		}
-		want := assignments[idx]
+		c := cands[m.idx]
 		planned++
-		dest := caps[want]
+		dest := caps[m.want]
 		if dest == nil {
 			skipped++
 			continue
 		}
-		if err := a.moveForPlacement(ns, c.rel, c.curTarg, dest.target, c.curRank, want); err != nil {
+		if err := a.moveForPlacement(ns, c.rel, c.curTarg, dest.target, c.curRank, m.want); err != nil {
 			log.Printf("placement: move %s %s→rank%d: %v",
-				c.rel, c.curTarg.TierName, want, err)
+				c.rel, c.curTarg.TierName, m.want, err)
 			continue
 		}
 		moved++
@@ -843,7 +890,7 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 				return fmt.Errorf("unlink stalled src: %w", err)
 			}
 			if srcSt2 != nil {
-				forgetLowerInode(a, ns.PoolName, srcRank, srcSt2.Ino)
+				forgetLowerInode(a, ns.PoolName, src.MountPath, srcSt2.Ino)
 			}
 			if store2 != nil {
 				dstStat, statErr := os.Stat(dstPath)
@@ -925,7 +972,7 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 	// smoothfs to drop the replay pin it holds on that inode; otherwise the
 	// backing blocks leak until unmount. Replaces the old drop_caches hammer.
 	if srcSt != nil {
-		forgetLowerInode(a, ns.PoolName, srcRank, srcSt.Ino)
+		forgetLowerInode(a, ns.PoolName, src.MountPath, srcSt.Ino)
 	}
 
 	// Move the meta record from src tier to dest tier. The dest file has
@@ -981,7 +1028,7 @@ func installPlacementCopy(tmpPath, dstPath string) error {
 //
 // Best-effort: a missing pool/uuid or a write error just defers reclaim to the
 // next opportunity (or unmount); it is never a move failure. Var for test hook.
-var forgetLowerInode = func(a *Adapter, poolName string, tierRank int, lowerIno uint64) {
+var forgetLowerInode = func(a *Adapter, poolName string, tierMountPath string, lowerIno uint64) {
 	if a == nil || a.store == nil {
 		return
 	}
@@ -989,12 +1036,53 @@ var forgetLowerInode = func(a *Adapter, poolName string, tierRank int, lowerIno 
 	if err != nil || pool == nil || pool.UUID == "" {
 		return
 	}
-	path := filepath.Join("/sys/fs/smoothfs", pool.UUID, "forget_lower")
-	line := fmt.Sprintf("%d %d", tierRank, lowerIno)
-	if err := os.WriteFile(path, []byte(line), 0); err != nil {
-		log.Printf("placement: forget_lower pool=%s tier=%d inode=%d: %v",
-			poolName, tierRank, lowerIno, err)
+	tier, ok := smoothfsTierIndex(pool.Tiers, tierMountPath)
+	if !ok {
+		log.Printf("placement: forget_lower pool=%s tier=%s inode=%d: tier not in pool tiers=%v",
+			poolName, tierMountPath, lowerIno, pool.Tiers)
+		return
 	}
+	path := filepath.Join("/sys/fs/smoothfs", pool.UUID, "forget_lower")
+	line := fmt.Sprintf("%d %d", tier, lowerIno)
+	if err := os.WriteFile(path, []byte(line), 0); err != nil {
+		log.Printf("placement: forget_lower pool=%s tier=%d(%s) inode=%d: %v",
+			poolName, tier, tierMountPath, lowerIno, err)
+	}
+}
+
+// smoothfsTierIndex resolves a tier's backing mount path to the tier index the
+// smoothfs kernel module uses.
+//
+// These are NOT the same number as tierd's rank, and conflating them silently
+// corrupts reclaim. smoothfs indexes tiers by position in the pool's `tiers=`
+// mount option — the colon-joined list stored in smoothfs_pools.tiers, ordered
+// fastest-first — so a two-tier pool has indices 0 and 1. tierd's ranks for the
+// same pool are 1 and 2. Passing a rank straight through means:
+//
+//	rank 2 (slowest) -> tier 2 -> rejected, `tier >= ntiers` -> EINVAL
+//	rank 1 (fastest) -> tier 1 -> ACCEPTED, but forgets the SECOND tier
+//
+// The first is loud; the second is silent and worse — the fast tier's source
+// inode keeps its pin, so its blocks are never reclaimed and the tier cannot
+// drain no matter how many demotions succeed. On the .254 appliance that pinned
+// NVMe at 100% (df >> du) and turned every subsequent promotion into ENOSPC:
+// ~331k rejected forgets an hour, and every NVMe forget silently aimed at HDD.
+//
+// Resolving through the stored tier list keeps this correct for any rank
+// numbering, contiguous or not.
+func smoothfsTierIndex(tiers []string, mountPath string) (int, bool) {
+	// The two sides come from different columns — smoothfs_pools.tiers (split on
+	// ":") and mdadm_managed_targets.mount_path — so normalise rather than trust
+	// them to stay byte-identical. A trailing slash creeping into either would
+	// otherwise silently stop all reclaim, which is the same class of quiet
+	// failure this function exists to fix.
+	want := filepath.Clean(mountPath)
+	for i, t := range tiers {
+		if filepath.Clean(t) == want {
+			return i, true
+		}
+	}
+	return 0, false
 }
 
 // copyFileContents opens src for read and dst for exclusive create-write,

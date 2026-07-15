@@ -619,13 +619,13 @@ func TestMoveForPlacementForgetsLowerInodeAfterMove(t *testing.T) {
 
 	type forgetCall struct {
 		pool string
-		tier int
+		tier string
 		ino  uint64
 	}
 	var calls []forgetCall
 	origForget := forgetLowerInode
-	forgetLowerInode = func(_ *Adapter, poolName string, tierRank int, lowerIno uint64) {
-		calls = append(calls, forgetCall{poolName, tierRank, lowerIno})
+	forgetLowerInode = func(_ *Adapter, poolName string, tierMountPath string, lowerIno uint64) {
+		calls = append(calls, forgetCall{poolName, tierMountPath, lowerIno})
 	}
 	t.Cleanup(func() { forgetLowerInode = origForget })
 
@@ -662,9 +662,13 @@ func TestMoveForPlacementForgetsLowerInodeAfterMove(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("forgetLowerInode called %d times, want 1: %+v", len(calls), calls)
 	}
-	if calls[0].pool != "pool1" || calls[0].tier != 1 || calls[0].ino != srcIno {
-		t.Fatalf("forgetLowerInode = {pool:%q tier:%d ino:%d}, want {pool1 1 %d}",
-			calls[0].pool, calls[0].tier, calls[0].ino, srcIno)
+	// The SOURCE tier's backing path must be forwarded — not its rank. The
+	// rank is tierd's numbering; smoothfs indexes tiers by position in the
+	// pool's tiers= list, and forwarding a rank silently forgets the wrong
+	// tier (see smoothfsTierIndex).
+	if calls[0].pool != "pool1" || calls[0].tier != srcDir || calls[0].ino != srcIno {
+		t.Fatalf("forgetLowerInode = {pool:%q tier:%q ino:%d}, want {pool1 %q %d}",
+			calls[0].pool, calls[0].tier, calls[0].ino, srcDir, srcIno)
 	}
 }
 
@@ -880,5 +884,124 @@ func TestTierFullCapBytes(t *testing.T) {
 				t.Fatalf("tierFullCapBytes(%d, %d) = %d, want %d", c.total, c.fullPct, got, c.want)
 			}
 		})
+	}
+}
+
+// TestPlanMoveOrderDrainsBeforeFilling is the regression guard for the .254
+// ENOSPC storm: the packer's plan was correct but unreachable in execution
+// order. A fast tier sitting over target must first shed the files the plan
+// evicted; if a promotion is attempted while those bytes are still resident,
+// the copy fails "no space left on device" — and fails again every cycle, since
+// the next pass re-plans from the same over-full state (~129k failed HDD→NVME
+// copies an hour, tier pinned at 97-100%).
+//
+// Ordering demotions first is what makes the plan reachable, so this asserts on
+// the ORDER of the emitted moves, not merely on their contents.
+func TestPlanMoveOrderDrainsBeforeFilling(t *testing.T) {
+	cands := []candidate{
+		{curRank: 2, size: 10},  // 0: HDD -> NVME  (promotion, consumes space)
+		{curRank: 1, size: 500}, // 1: NVME -> HDD  (demotion, frees space)
+		{curRank: 1, size: 20},  // 2: already on its assigned rank -> no move
+		{curRank: 2, size: 30},  // 3: HDD -> NVME  (promotion)
+		{curRank: 1, size: 400}, // 4: NVME -> HDD  (demotion)
+	}
+	assignments := []int{1, 2, 1, 1, 2}
+	assigned := []bool{true, true, true, true, true}
+
+	demotions, promotions := planMoveOrder(cands, assignments, assigned)
+
+	if len(demotions) != 2 {
+		t.Fatalf("demotions = %d, want 2", len(demotions))
+	}
+	if len(promotions) != 2 {
+		t.Fatalf("promotions = %d, want 2", len(promotions))
+	}
+	// The no-op (candidate 2, already on rank 1) must not be planned at all.
+	for _, m := range append(demotions, promotions...) {
+		if m.idx == 2 {
+			t.Fatalf("candidate already on its assigned rank was planned as a move")
+		}
+	}
+	// Every demotion frees fast-tier space; every promotion consumes it.
+	for _, m := range demotions {
+		if m.want <= cands[m.idx].curRank {
+			t.Fatalf("demotion %+v does not move to a slower tier", m)
+		}
+	}
+	for _, m := range promotions {
+		if m.want >= cands[m.idx].curRank {
+			t.Fatalf("promotion %+v does not move to a faster tier", m)
+		}
+	}
+	// The execution order the caller uses: drains strictly before fills.
+	order := append(demotions, promotions...)
+	sawPromotion := false
+	for _, m := range order {
+		isDemotion := m.want > cands[m.idx].curRank
+		if !isDemotion {
+			sawPromotion = true
+			continue
+		}
+		if sawPromotion {
+			t.Fatalf("demotion %+v scheduled after a promotion; fast tier fills before it drains", m)
+		}
+	}
+}
+
+// TestPlanMoveOrderSkipsUnassigned verifies the packer's unassigned candidates
+// never become moves.
+func TestPlanMoveOrderSkipsUnassigned(t *testing.T) {
+	cands := []candidate{
+		{curRank: 2, size: 10},
+		{curRank: 1, size: 10},
+	}
+	assignments := []int{1, 2}
+	assigned := []bool{false, false}
+
+	demotions, promotions := planMoveOrder(cands, assignments, assigned)
+	if len(demotions) != 0 || len(promotions) != 0 {
+		t.Fatalf("unassigned candidates produced moves: %d demotions, %d promotions",
+			len(demotions), len(promotions))
+	}
+}
+
+// TestSmoothfsTierIndexMapsPathNotRank pins the boundary that caused the .254
+// ENOSPC storm: smoothfs indexes tiers by position in the pool's tiers= list
+// (0-based, fastest first), while tierd ranks the same tiers 1..N. Forwarding a
+// rank meant rank2 -> tier 2 -> EINVAL (loud, ~331k/hour) and rank1 -> tier 1 ->
+// ACCEPTED but aimed at the SECOND tier (silent) — so the fast tier's freed
+// blocks were never reclaimed and it could not drain.
+func TestSmoothfsTierIndexMapsPathNotRank(t *testing.T) {
+	// Pool tier list exactly as stored/mounted: fastest first.
+	tiers := []string{"/mnt/.tierd-backing/media/NVME", "/mnt/.tierd-backing/media/HDD"}
+
+	got, ok := smoothfsTierIndex(tiers, "/mnt/.tierd-backing/media/NVME")
+	if !ok || got != 0 {
+		t.Fatalf("NVME (tierd rank 1) index = %d, ok=%v; want 0 — forwarding the rank would say 1 (HDD)", got, ok)
+	}
+	got, ok = smoothfsTierIndex(tiers, "/mnt/.tierd-backing/media/HDD")
+	if !ok || got != 1 {
+		t.Fatalf("HDD (tierd rank 2) index = %d, ok=%v; want 1 — forwarding the rank would say 2 (EINVAL)", got, ok)
+	}
+
+	// Path form must not matter: the two sides come from different DB columns,
+	// and a stray trailing slash silently disabling reclaim would be the same
+	// class of quiet failure this function exists to fix.
+	got, ok = smoothfsTierIndex(tiers, "/mnt/.tierd-backing/media/HDD/")
+	if !ok || got != 1 {
+		t.Fatalf("trailing-slash path index = %d, ok=%v; want 1", got, ok)
+	}
+	got, ok = smoothfsTierIndex([]string{"/mnt/a/", "/mnt/b"}, "/mnt/a")
+	if !ok || got != 0 {
+		t.Fatalf("trailing slash in the stored list: index = %d, ok=%v; want 0", got, ok)
+	}
+
+	// An unknown path must be reported, never silently coerced to tier 0 —
+	// forgetting the wrong tier is how this bug stayed invisible.
+	if _, ok := smoothfsTierIndex(tiers, "/mnt/.tierd-backing/media/SSD"); ok {
+		t.Fatalf("unknown tier path reported as present")
+	}
+	if _, ok := smoothfsTierIndex(nil, "/mnt/.tierd-backing/media/NVME"); ok {
+		t.Fatalf("empty tier list reported a match")
 	}
 }
