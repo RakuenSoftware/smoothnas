@@ -885,7 +885,7 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 				return fmt.Errorf("unlink stalled src: %w", err)
 			}
 			if srcSt2 != nil {
-				forgetLowerInode(a, ns.PoolName, srcRank, srcSt2.Ino)
+				forgetLowerInode(a, ns.PoolName, src.MountPath, srcSt2.Ino)
 			}
 			if store2 != nil {
 				dstStat, statErr := os.Stat(dstPath)
@@ -967,7 +967,7 @@ func (a *Adapter) moveForPlacement(ns db.MdadmManagedNamespaceRow, rel string, s
 	// smoothfs to drop the replay pin it holds on that inode; otherwise the
 	// backing blocks leak until unmount. Replaces the old drop_caches hammer.
 	if srcSt != nil {
-		forgetLowerInode(a, ns.PoolName, srcRank, srcSt.Ino)
+		forgetLowerInode(a, ns.PoolName, src.MountPath, srcSt.Ino)
 	}
 
 	// Move the meta record from src tier to dest tier. The dest file has
@@ -1023,7 +1023,7 @@ func installPlacementCopy(tmpPath, dstPath string) error {
 //
 // Best-effort: a missing pool/uuid or a write error just defers reclaim to the
 // next opportunity (or unmount); it is never a move failure. Var for test hook.
-var forgetLowerInode = func(a *Adapter, poolName string, tierRank int, lowerIno uint64) {
+var forgetLowerInode = func(a *Adapter, poolName string, tierMountPath string, lowerIno uint64) {
 	if a == nil || a.store == nil {
 		return
 	}
@@ -1031,12 +1031,47 @@ var forgetLowerInode = func(a *Adapter, poolName string, tierRank int, lowerIno 
 	if err != nil || pool == nil || pool.UUID == "" {
 		return
 	}
-	path := filepath.Join("/sys/fs/smoothfs", pool.UUID, "forget_lower")
-	line := fmt.Sprintf("%d %d", tierRank, lowerIno)
-	if err := os.WriteFile(path, []byte(line), 0); err != nil {
-		log.Printf("placement: forget_lower pool=%s tier=%d inode=%d: %v",
-			poolName, tierRank, lowerIno, err)
+	tier, ok := smoothfsTierIndex(pool.Tiers, tierMountPath)
+	if !ok {
+		log.Printf("placement: forget_lower pool=%s tier=%s inode=%d: tier not in pool tiers=%v",
+			poolName, tierMountPath, lowerIno, pool.Tiers)
+		return
 	}
+	path := filepath.Join("/sys/fs/smoothfs", pool.UUID, "forget_lower")
+	line := fmt.Sprintf("%d %d", tier, lowerIno)
+	if err := os.WriteFile(path, []byte(line), 0); err != nil {
+		log.Printf("placement: forget_lower pool=%s tier=%d(%s) inode=%d: %v",
+			poolName, tier, tierMountPath, lowerIno, err)
+	}
+}
+
+// smoothfsTierIndex resolves a tier's backing mount path to the tier index the
+// smoothfs kernel module uses.
+//
+// These are NOT the same number as tierd's rank, and conflating them silently
+// corrupts reclaim. smoothfs indexes tiers by position in the pool's `tiers=`
+// mount option — the colon-joined list stored in smoothfs_pools.tiers, ordered
+// fastest-first — so a two-tier pool has indices 0 and 1. tierd's ranks for the
+// same pool are 1 and 2. Passing a rank straight through means:
+//
+//	rank 2 (slowest) -> tier 2 -> rejected, `tier >= ntiers` -> EINVAL
+//	rank 1 (fastest) -> tier 1 -> ACCEPTED, but forgets the SECOND tier
+//
+// The first is loud; the second is silent and worse — the fast tier's source
+// inode keeps its pin, so its blocks are never reclaimed and the tier cannot
+// drain no matter how many demotions succeed. On the .254 appliance that pinned
+// NVMe at 100% (df >> du) and turned every subsequent promotion into ENOSPC:
+// ~331k rejected forgets an hour, and every NVMe forget silently aimed at HDD.
+//
+// Resolving through the stored tier list keeps this correct for any rank
+// numbering, contiguous or not.
+func smoothfsTierIndex(tiers []string, mountPath string) (int, bool) {
+	for i, t := range tiers {
+		if t == mountPath {
+			return i, true
+		}
+	}
+	return 0, false
 }
 
 // copyFileContents opens src for read and dst for exclusive create-write,

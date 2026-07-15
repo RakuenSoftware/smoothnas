@@ -619,13 +619,13 @@ func TestMoveForPlacementForgetsLowerInodeAfterMove(t *testing.T) {
 
 	type forgetCall struct {
 		pool string
-		tier int
+		tier string
 		ino  uint64
 	}
 	var calls []forgetCall
 	origForget := forgetLowerInode
-	forgetLowerInode = func(_ *Adapter, poolName string, tierRank int, lowerIno uint64) {
-		calls = append(calls, forgetCall{poolName, tierRank, lowerIno})
+	forgetLowerInode = func(_ *Adapter, poolName string, tierMountPath string, lowerIno uint64) {
+		calls = append(calls, forgetCall{poolName, tierMountPath, lowerIno})
 	}
 	t.Cleanup(func() { forgetLowerInode = origForget })
 
@@ -662,9 +662,13 @@ func TestMoveForPlacementForgetsLowerInodeAfterMove(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("forgetLowerInode called %d times, want 1: %+v", len(calls), calls)
 	}
-	if calls[0].pool != "pool1" || calls[0].tier != 1 || calls[0].ino != srcIno {
-		t.Fatalf("forgetLowerInode = {pool:%q tier:%d ino:%d}, want {pool1 1 %d}",
-			calls[0].pool, calls[0].tier, calls[0].ino, srcIno)
+	// The SOURCE tier's backing path must be forwarded — not its rank. The
+	// rank is tierd's numbering; smoothfs indexes tiers by position in the
+	// pool's tiers= list, and forwarding a rank silently forgets the wrong
+	// tier (see smoothfsTierIndex).
+	if calls[0].pool != "pool1" || calls[0].tier != srcDir || calls[0].ino != srcIno {
+		t.Fatalf("forgetLowerInode = {pool:%q tier:%q ino:%d}, want {pool1 %q %d}",
+			calls[0].pool, calls[0].tier, calls[0].ino, srcDir, srcIno)
 	}
 }
 
@@ -958,5 +962,34 @@ func TestPlanMoveOrderSkipsUnassigned(t *testing.T) {
 	if len(demotions) != 0 || len(promotions) != 0 {
 		t.Fatalf("unassigned candidates produced moves: %d demotions, %d promotions",
 			len(demotions), len(promotions))
+	}
+}
+
+// TestSmoothfsTierIndexMapsPathNotRank pins the boundary that caused the .254
+// ENOSPC storm: smoothfs indexes tiers by position in the pool's tiers= list
+// (0-based, fastest first), while tierd ranks the same tiers 1..N. Forwarding a
+// rank meant rank2 -> tier 2 -> EINVAL (loud, ~331k/hour) and rank1 -> tier 1 ->
+// ACCEPTED but aimed at the SECOND tier (silent) — so the fast tier's freed
+// blocks were never reclaimed and it could not drain.
+func TestSmoothfsTierIndexMapsPathNotRank(t *testing.T) {
+	// Pool tier list exactly as stored/mounted: fastest first.
+	tiers := []string{"/mnt/.tierd-backing/media/NVME", "/mnt/.tierd-backing/media/HDD"}
+
+	got, ok := smoothfsTierIndex(tiers, "/mnt/.tierd-backing/media/NVME")
+	if !ok || got != 0 {
+		t.Fatalf("NVME (tierd rank 1) index = %d, ok=%v; want 0 — forwarding the rank would say 1 (HDD)", got, ok)
+	}
+	got, ok = smoothfsTierIndex(tiers, "/mnt/.tierd-backing/media/HDD")
+	if !ok || got != 1 {
+		t.Fatalf("HDD (tierd rank 2) index = %d, ok=%v; want 1 — forwarding the rank would say 2 (EINVAL)", got, ok)
+	}
+
+	// An unknown path must be reported, never silently coerced to tier 0 —
+	// forgetting the wrong tier is how this bug stayed invisible.
+	if _, ok := smoothfsTierIndex(tiers, "/mnt/.tierd-backing/media/SSD"); ok {
+		t.Fatalf("unknown tier path reported as present")
+	}
+	if _, ok := smoothfsTierIndex(nil, "/mnt/.tierd-backing/media/NVME"); ok {
+		t.Fatalf("empty tier list reported a match")
 	}
 }
