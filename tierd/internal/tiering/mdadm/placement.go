@@ -450,14 +450,19 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 	// Draining first is always safe: a demotion targets a tier the packer had
 	// capacity to admit it to, so it cannot be starved by this reordering.
 	demotions, promotions := planMoveOrder(cands, assignments, assigned)
-	planned := len(demotions) + len(promotions)
+	planned := 0
 
+	// planned counts moves ATTEMPTED, not moves plannable — matching the
+	// pre-reordering behaviour exactly. Counting the full plan up front would
+	// quietly change what balanceStatus reports on cancellation (PendingMoves is
+	// derived as planned-moved), and this change is about execution order only.
 	for _, m := range append(demotions, promotions...) {
 		if ctx.Err() != nil {
 			balanceStatus.Reason = "target-balance placement canceled"
 			break
 		}
 		c := cands[m.idx]
+		planned++
 		dest := caps[m.want]
 		if dest == nil {
 			skipped++
