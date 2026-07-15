@@ -984,6 +984,18 @@ func TestSmoothfsTierIndexMapsPathNotRank(t *testing.T) {
 		t.Fatalf("HDD (tierd rank 2) index = %d, ok=%v; want 1 — forwarding the rank would say 2 (EINVAL)", got, ok)
 	}
 
+	// Path form must not matter: the two sides come from different DB columns,
+	// and a stray trailing slash silently disabling reclaim would be the same
+	// class of quiet failure this function exists to fix.
+	got, ok = smoothfsTierIndex(tiers, "/mnt/.tierd-backing/media/HDD/")
+	if !ok || got != 1 {
+		t.Fatalf("trailing-slash path index = %d, ok=%v; want 1", got, ok)
+	}
+	got, ok = smoothfsTierIndex([]string{"/mnt/a/", "/mnt/b"}, "/mnt/a")
+	if !ok || got != 0 {
+		t.Fatalf("trailing slash in the stored list: index = %d, ok=%v; want 0", got, ok)
+	}
+
 	// An unknown path must be reported, never silently coerced to tier 0 —
 	// forgetting the wrong tier is how this bug stayed invisible.
 	if _, ok := smoothfsTierIndex(tiers, "/mnt/.tierd-backing/media/SSD"); ok {

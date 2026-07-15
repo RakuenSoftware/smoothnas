@@ -1066,8 +1066,14 @@ var forgetLowerInode = func(a *Adapter, poolName string, tierMountPath string, l
 // Resolving through the stored tier list keeps this correct for any rank
 // numbering, contiguous or not.
 func smoothfsTierIndex(tiers []string, mountPath string) (int, bool) {
+	// The two sides come from different columns — smoothfs_pools.tiers (split on
+	// ":") and mdadm_managed_targets.mount_path — so normalise rather than trust
+	// them to stay byte-identical. A trailing slash creeping into either would
+	// otherwise silently stop all reclaim, which is the same class of quiet
+	// failure this function exists to fix.
+	want := filepath.Clean(mountPath)
 	for i, t := range tiers {
-		if t == mountPath {
+		if filepath.Clean(t) == want {
 			return i, true
 		}
 	}
