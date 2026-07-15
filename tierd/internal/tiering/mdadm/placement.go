@@ -266,6 +266,34 @@ func tierFullCapBytes(totalBytes int64, fullThresholdPct int) int64 {
 	return totalBytes * int64(fullThresholdPct) / 100
 }
 
+// plannedMove is one file the packer wants relocated: its index into cands and
+// the rank it should end up on.
+type plannedMove struct {
+	idx  int
+	want int
+}
+
+// planMoveOrder splits the packer's assignments into the moves that free space
+// on a faster tier (demotions) and those that consume it (promotions), so the
+// caller can drain before it fills. Files already on their assigned rank, and
+// any the packer left unassigned, produce no move.
+//
+// Rank numbers grow as tiers get slower, so want > curRank is a demotion.
+func planMoveOrder(cands []candidate, assignments []int, assigned []bool) (demotions, promotions []plannedMove) {
+	for idx, c := range cands {
+		if !assigned[idx] || assignments[idx] == c.curRank {
+			continue
+		}
+		m := plannedMove{idx: idx, want: assignments[idx]}
+		if m.want > c.curRank {
+			demotions = append(demotions, m)
+		} else {
+			promotions = append(promotions, m)
+		}
+	}
+	return demotions, promotions
+}
+
 func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNamespaceRow) {
 	maintenanceMode, ok := a.poolReadyForSmoothNASMaintenance(ns.PoolName)
 	if !ok {
@@ -405,25 +433,39 @@ func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNames
 
 	moved := 0
 	skipped := 0
-	planned := 0
-	for idx, c := range cands {
+
+	// Run every move that FREES fast-tier space before any move that consumes
+	// it: demotions (toward a slower tier) first, then promotions.
+	//
+	// The admission pass above computes a steady-state plan — "this tier should
+	// end up holding targetCap bytes" — after subtracting the candidates it is
+	// re-placing. Those evicted bytes are still physically resident until their
+	// move completes, so the plan is only reachable if the drains happen first.
+	// Executing in walk order interleaves the two, and a promotion then lands on
+	// a tier still holding everything the plan intends to evict: it fails
+	// ENOSPC, and keeps failing every cycle because the next pass re-plans from
+	// the same over-full starting point. Ordering is the whole fix — the
+	// packer's arithmetic was already correct, just unreachable in that order.
+	//
+	// Draining first is always safe: a demotion targets a tier the packer had
+	// capacity to admit it to, so it cannot be starved by this reordering.
+	demotions, promotions := planMoveOrder(cands, assignments, assigned)
+	planned := len(demotions) + len(promotions)
+
+	for _, m := range append(demotions, promotions...) {
 		if ctx.Err() != nil {
 			balanceStatus.Reason = "target-balance placement canceled"
 			break
 		}
-		if !assigned[idx] || assignments[idx] == c.curRank {
-			continue
-		}
-		want := assignments[idx]
-		planned++
-		dest := caps[want]
+		c := cands[m.idx]
+		dest := caps[m.want]
 		if dest == nil {
 			skipped++
 			continue
 		}
-		if err := a.moveForPlacement(ns, c.rel, c.curTarg, dest.target, c.curRank, want); err != nil {
+		if err := a.moveForPlacement(ns, c.rel, c.curTarg, dest.target, c.curRank, m.want); err != nil {
 			log.Printf("placement: move %s %s→rank%d: %v",
-				c.rel, c.curTarg.TierName, want, err)
+				c.rel, c.curTarg.TierName, m.want, err)
 			continue
 		}
 		moved++

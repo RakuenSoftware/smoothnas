@@ -882,3 +882,81 @@ func TestTierFullCapBytes(t *testing.T) {
 		})
 	}
 }
+
+// TestPlanMoveOrderDrainsBeforeFilling is the regression guard for the .254
+// ENOSPC storm: the packer's plan was correct but unreachable in execution
+// order. A fast tier sitting over target must first shed the files the plan
+// evicted; if a promotion is attempted while those bytes are still resident,
+// the copy fails "no space left on device" — and fails again every cycle, since
+// the next pass re-plans from the same over-full state (~129k failed HDD→NVME
+// copies an hour, tier pinned at 97-100%).
+//
+// Ordering demotions first is what makes the plan reachable, so this asserts on
+// the ORDER of the emitted moves, not merely on their contents.
+func TestPlanMoveOrderDrainsBeforeFilling(t *testing.T) {
+	cands := []candidate{
+		{curRank: 2, size: 10},  // 0: HDD -> NVME  (promotion, consumes space)
+		{curRank: 1, size: 500}, // 1: NVME -> HDD  (demotion, frees space)
+		{curRank: 1, size: 20},  // 2: already on its assigned rank -> no move
+		{curRank: 2, size: 30},  // 3: HDD -> NVME  (promotion)
+		{curRank: 1, size: 400}, // 4: NVME -> HDD  (demotion)
+	}
+	assignments := []int{1, 2, 1, 1, 2}
+	assigned := []bool{true, true, true, true, true}
+
+	demotions, promotions := planMoveOrder(cands, assignments, assigned)
+
+	if len(demotions) != 2 {
+		t.Fatalf("demotions = %d, want 2", len(demotions))
+	}
+	if len(promotions) != 2 {
+		t.Fatalf("promotions = %d, want 2", len(promotions))
+	}
+	// The no-op (candidate 2, already on rank 1) must not be planned at all.
+	for _, m := range append(demotions, promotions...) {
+		if m.idx == 2 {
+			t.Fatalf("candidate already on its assigned rank was planned as a move")
+		}
+	}
+	// Every demotion frees fast-tier space; every promotion consumes it.
+	for _, m := range demotions {
+		if m.want <= cands[m.idx].curRank {
+			t.Fatalf("demotion %+v does not move to a slower tier", m)
+		}
+	}
+	for _, m := range promotions {
+		if m.want >= cands[m.idx].curRank {
+			t.Fatalf("promotion %+v does not move to a faster tier", m)
+		}
+	}
+	// The execution order the caller uses: drains strictly before fills.
+	order := append(demotions, promotions...)
+	sawPromotion := false
+	for _, m := range order {
+		isDemotion := m.want > cands[m.idx].curRank
+		if !isDemotion {
+			sawPromotion = true
+			continue
+		}
+		if sawPromotion {
+			t.Fatalf("demotion %+v scheduled after a promotion; fast tier fills before it drains", m)
+		}
+	}
+}
+
+// TestPlanMoveOrderSkipsUnassigned verifies the packer's unassigned candidates
+// never become moves.
+func TestPlanMoveOrderSkipsUnassigned(t *testing.T) {
+	cands := []candidate{
+		{curRank: 2, size: 10},
+		{curRank: 1, size: 10},
+	}
+	assignments := []int{1, 2}
+	assigned := []bool{false, false}
+
+	demotions, promotions := planMoveOrder(cands, assignments, assigned)
+	if len(demotions) != 0 || len(promotions) != 0 {
+		t.Fatalf("unassigned candidates produced moves: %d demotions, %d promotions",
+			len(demotions), len(promotions))
+	}
+}
