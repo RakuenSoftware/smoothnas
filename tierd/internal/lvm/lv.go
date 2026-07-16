@@ -118,14 +118,25 @@ func FormatLV(vg, name, fs string) error {
 	var cmd *exec.Cmd
 	switch fs {
 	case "xfs":
-		// -m reflink=0,rmapbt=0 drops two per-AG B-trees we do not use on
-		// tier backing filesystems. At multi-TB scales those B-trees reserve
-		// ~2% of the device up-front (statvfs reports it as "used"), which
-		// looks alarming on a freshly-created empty tier — e.g. ~640 GB on a
-		// 33 TB tier. Reflink is for CoW / snapshot clones; rmapbt is for
-		// xfs_scrub repair. Neither is needed here.
+		// -m reflink=1,rmapbt=0: enable reflink (copy-on-write); keep rmapbt off.
+		//
+		// The plugin-runtime tier stores each container's rootfs as a clone of an
+		// image template. LXC2Docker clones it with cp(1), which on coreutils >=9.0
+		// defaults to --reflink=auto. WITHOUT reflink that clone is a full physical
+		// copy: it needs free space >= the whole image, duplicates the multi-GB
+		// rootfs per container, and fails with ENOSPC on a full tier. WITH reflink
+		// it is a near-instant, near-zero-space CoW clone.
+		//
+		// rmapbt stays off — it is the expensive B-tree. Measured on a 1 GB XFS,
+		// empty-fs "used" is 34 MB at reflink=0,rmapbt=0; 39 MB at reflink=1,rmapbt=0
+		// (+~0.5%); 51 MB at reflink=1,rmapbt=1 (+~1.7%). The ~2% up-front overhead
+		// the old comment attributed to reflink is actually rmapbt; reflink itself is
+		// cheap, so it is enabled on every tier rather than plumbed per-purpose.
+		//
+		// This only affects NEWLY formatted tiers: a tier already formatted
+		// reflink=0 keeps doing full-copy clones until it is reformatted.
 		cmd = exec.Command(findTool("mkfs.xfs"), "-f",
-			"-m", "reflink=0,rmapbt=0", dev)
+			"-m", "reflink=1,rmapbt=0", dev)
 	case "ext4":
 		cmd = exec.Command(findTool("mkfs.ext4"), "-F", dev)
 	case "btrfs":
