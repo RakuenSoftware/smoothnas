@@ -406,6 +406,10 @@ type pluginDetail struct {
 	Config        []plugin.ConfigRow       `json:"config"`
 	ContainerRefs []plugin.ContainerRefRow `json:"containerRefs"`
 	Manifest      string                   `json:"manifest"`
+	// Warning is a non-fatal operator advisory (e.g. a manifest image update that
+	// is shadowed by an operator image pin and will therefore NOT deploy). Empty
+	// when there is nothing to flag.
+	Warning string `json:"warning,omitempty"`
 }
 
 // pluginServiceItem is the UI-facing view of one service in a
@@ -454,7 +458,43 @@ func toPluginDetail(rec *plugin.PluginRecord) pluginDetail {
 		Config:        config,
 		ContainerRefs: containerRefs,
 		Manifest:      rec.Plugin.ManifestYAML,
+		Warning:       pinShadowWarning(rec),
 	}
+}
+
+// pinShadowWarning flags the silent deploy trap where an operator image pin
+// overrides the manifest's primary image (resolveContainerRefs uses the pin, so
+// editing the manifest image does NOT change the running image). Surfaced on
+// every plugin fetch/update so the operator sees it instead of a mysterious
+// "I updated the tag but nothing changed". Returns "" when no pin shadows the
+// manifest. Best-effort: a manifest that will not parse yields no warning.
+func pinShadowWarning(rec *plugin.PluginRecord) string {
+	m, err := plugin.ParseManifest([]byte(rec.Plugin.ManifestYAML))
+	if err != nil {
+		return ""
+	}
+	for _, svc := range m.Services {
+		manifestImg := ""
+		for _, ref := range svc.EffectiveContainerRefs() {
+			if ref.Name == "primary" {
+				manifestImg = ref.Image
+				break
+			}
+		}
+		if manifestImg == "" {
+			continue
+		}
+		for _, sr := range rec.Services {
+			if sr.Service == svc.Name && sr.PinnedImage != "" && sr.PinnedImage != manifestImg {
+				return fmt.Sprintf("manifest image %q for service %q is shadowed by the operator "+
+					"image pin %q; the running image will NOT change on materialise. "+
+					"PUT /api/plugins/%s/image {\"image\":%q} to deploy it, or clear the pin "+
+					"(empty image) to follow the manifest.",
+					manifestImg, svc.Name, sr.PinnedImage, rec.Plugin.Name, manifestImg)
+			}
+		}
+	}
+	return ""
 }
 
 // toPluginServiceItems rolls the per-service rows up into the UI view,
