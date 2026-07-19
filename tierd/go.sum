@@ -1,7 +1,7 @@
 github.com/RakuenSoftware/nonraid v0.0.0-20260513211115-f1f6d113a548 h1:iW3Qvm2iOT2UeZdXPPg0hOyvfvr9JnHkcej+uCmxVpo=
 github.com/RakuenSoftware/nonraid v0.0.0-20260513211115-f1f6d113a548/go.mod h1:IBCLxG8iWaPxzG7lvSCXvbcmsG1cmrS44U91XuNWXbs=
-github.com/RakuenSoftware/smoothfs v0.2.20 h1:Y299rTSXZphN9oEkGslYhdl6O9HtJ1gVBfz8mtufUE8=
-github.com/RakuenSoftware/smoothfs v0.2.20/go.mod h1:ZL2l/hHg2lr7QnnGh6eL+ecawHSsosx5GYIrJGlDLWw=
+github.com/RakuenSoftware/smoothfs v0.2.21 h1:CK1ihNTbdmZaRqwtE2ibdw2QEA2ltqcn994fm2LKtWM=
+github.com/RakuenSoftware/smoothfs v0.2.21/go.mod h1:ZL2l/hHg2lr7QnnGh6eL+ecawHSsosx5GYIrJGlDLWw=
 github.com/RakuenSoftware/smoothgui/auth v0.2.4 h1:zHjXsfvEDZLIEn3juy3PmuxFBXJGVgvrfi1/yXfwNzs=
 github.com/RakuenSoftware/smoothgui/auth v0.2.4/go.mod h1:xJgLebFDe/MZsFuQxyTsyee6Kqt5USx2K/2djjJRe9Y=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
