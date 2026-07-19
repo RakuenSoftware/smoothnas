@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/RakuenSoftware/nonraid v0.0.0-20260513211115-f1f6d113a548
-	github.com/RakuenSoftware/smoothfs v0.2.19-0.20260719185056-7949e3c4c544
+	github.com/RakuenSoftware/smoothfs v0.2.19
 	github.com/RakuenSoftware/smoothgui/auth v0.2.4
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/creack/pty/v2 v2.0.1
