@@ -174,12 +174,19 @@ func (h *SmoothfsHandler) updateWriteStaging(w http.ResponseWriter, r *http.Requ
 	root := smoothfsWriteStagingRoot(pool.UUID)
 	supported := sysfsBool(filepath.Join(root, "write_staging_supported"))
 	if supported {
-		metadataMask := req.MetadataActiveTierMask
-		if metadataMask == nil {
-			recommendation := h.recommendMetadataActiveTierMask(*pool)
-			if recommendation.OK {
-				metadataMask = &recommendation.Mask
-			}
+		metadataRecommendation := h.recommendMetadataActiveTierMask(*pool)
+		if !metadataRecommendation.OK {
+			jsonErrorCoded(w, metadataRecommendation.Reason, http.StatusConflict, "smoothfs.metadata_mask_unavailable")
+			return
+		}
+		if req.MetadataActiveTierMask != nil && *req.MetadataActiveTierMask != metadataRecommendation.Mask {
+			jsonErrorCoded(w, "metadata_active_tier_mask must include every recorded tier", http.StatusBadRequest, "smoothfs.metadata_mask_hides_tier")
+			return
+		}
+		drainRecommendation := h.recommendDrainActiveTierMask(*pool)
+		drainMask := metadataRecommendation.Mask
+		if drainRecommendation.OK {
+			drainMask = drainRecommendation.Mask
 		}
 		if req.FullThresholdPct != nil {
 			data := []byte(strconv.FormatUint(*req.FullThresholdPct, 10) + "\n")
@@ -188,15 +195,13 @@ func (h *SmoothfsHandler) updateWriteStaging(w http.ResponseWriter, r *http.Requ
 				return
 			}
 		}
-		if metadataMask != nil {
-			if err := writeSmoothfsMetadataActiveMask(root, *metadataMask); err != nil {
-				serverError(w, err)
-				return
-			}
-			if err := writeSmoothfsDrainActiveMaskIfPresent(root, *metadataMask); err != nil {
-				serverError(w, err)
-				return
-			}
+		if err := writeSmoothfsMetadataActiveMask(root, metadataRecommendation.Mask); err != nil {
+			serverError(w, err)
+			return
+		}
+		if err := writeSmoothfsDrainActiveMaskIfPresent(root, drainMask); err != nil {
+			serverError(w, err)
+			return
 		}
 		value := []byte("0\n")
 		if req.Enabled {
@@ -234,21 +239,26 @@ func (h *SmoothfsHandler) refreshMetadataActiveMask(w http.ResponseWriter, _ *ht
 		jsonErrorCoded(w, "smoothfs write-staging support is not available on this kernel", http.StatusBadRequest, "smoothfs.staging_unsupported")
 		return
 	}
-	recommendation := h.recommendMetadataActiveTierMask(*pool)
-	if !recommendation.OK {
+	metadataRecommendation := h.recommendMetadataActiveTierMask(*pool)
+	if !metadataRecommendation.OK {
 		w.WriteHeader(http.StatusConflict)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error":                                 "metadata active mask could not be computed",
-			"reason":                                recommendation.Reason,
-			"recommended_metadata_active_tier_mask": recommendation.Mask,
+			"reason":                                metadataRecommendation.Reason,
+			"recommended_metadata_active_tier_mask": metadataRecommendation.Mask,
 		})
 		return
 	}
-	if err := writeSmoothfsMetadataActiveMask(root, recommendation.Mask); err != nil {
+	if err := writeSmoothfsMetadataActiveMask(root, metadataRecommendation.Mask); err != nil {
 		serverError(w, err)
 		return
 	}
-	if err := writeSmoothfsDrainActiveMaskIfPresent(root, recommendation.Mask); err != nil {
+	drainRecommendation := h.recommendDrainActiveTierMask(*pool)
+	drainMask := metadataRecommendation.Mask
+	if drainRecommendation.OK {
+		drainMask = drainRecommendation.Mask
+	}
+	if err := writeSmoothfsDrainActiveMaskIfPresent(root, drainMask); err != nil {
 		serverError(w, err)
 		return
 	}
@@ -272,7 +282,8 @@ func (h *SmoothfsHandler) writeStagingStatus(name string) (*smoothfsWriteStaging
 	root := smoothfsWriteStagingRoot(pool.UUID)
 	supported := sysfsBool(filepath.Join(root, "write_staging_supported"))
 	kernelEnabled := sysfsBool(filepath.Join(root, "write_staging_enabled"))
-	recommendation := h.recommendMetadataActiveTierMask(*pool)
+	metadataRecommendation := h.recommendMetadataActiveTierMask(*pool)
+	drainRecommendation := h.recommendDrainActiveTierMask(*pool)
 	resp := &smoothfsWriteStagingResponse{
 		PoolName:                          name,
 		DesiredEnabled:                    desired,
@@ -304,10 +315,10 @@ func (h *SmoothfsHandler) writeStagingStatus(name string) (*smoothfsWriteStaging
 		MetadataActiveTierMask:            sysfsUint(filepath.Join(root, "metadata_active_tier_mask")),
 		WriteStagingDrainActiveTierMask:   sysfsUint(filepath.Join(root, "write_staging_drain_active_tier_mask")),
 		MetadataTierSkips:                 sysfsUint(filepath.Join(root, "metadata_tier_skips")),
-		RecommendedMetadataActiveTierMask: recommendation.Mask,
-		RecommendedDrainActiveTierMask:    recommendation.Mask,
-		MetadataActiveMaskReason:          recommendation.Reason,
-		DrainActiveMaskReason:             recommendation.Reason,
+		RecommendedMetadataActiveTierMask: metadataRecommendation.Mask,
+		RecommendedDrainActiveTierMask:    drainRecommendation.Mask,
+		MetadataActiveMaskReason:          metadataRecommendation.Reason,
+		DrainActiveMaskReason:             drainRecommendation.Reason,
 	}
 	if desired && !supported {
 		resp.Reason = "smoothfs write-staging support is not available on this kernel"

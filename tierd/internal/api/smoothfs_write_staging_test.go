@@ -104,6 +104,8 @@ func TestSmoothfsWriteStagingPersistsDesiredWhenUnsupported(t *testing.T) {
 func TestSmoothfsWriteStagingReadsKernelStatus(t *testing.T) {
 	h := newSmoothfsWriteStagingTestHandler(t)
 	kernelEnabled := false
+	metadataMask := uint64(1)
+	drainMask := uint64(1)
 	readSmoothfsWriteStagingFile = func(path string) ([]byte, error) {
 		switch filepath.Base(path) {
 		case "write_staging_supported":
@@ -156,9 +158,9 @@ func TestSmoothfsWriteStagingReadsKernelStatus(t *testing.T) {
 		case "last_recovery_reason":
 			return []byte("remount-replay\n"), nil
 		case "metadata_active_tier_mask":
-			return []byte("0x1\n"), nil
+			return []byte("0x" + strconv.FormatUint(metadataMask, 16) + "\n"), nil
 		case "write_staging_drain_active_tier_mask":
-			return []byte("0x1\n"), nil
+			return []byte("0x" + strconv.FormatUint(drainMask, 16) + "\n"), nil
 		case "metadata_tier_skips":
 			return []byte("7\n"), nil
 		default:
@@ -166,10 +168,16 @@ func TestSmoothfsWriteStagingReadsKernelStatus(t *testing.T) {
 		}
 	}
 	writeSmoothfsWriteStagingFile = func(path string, data []byte, _ os.FileMode) error {
-		if filepath.Base(path) != "write_staging_enabled" {
+		switch filepath.Base(path) {
+		case "metadata_active_tier_mask":
+			metadataMask = parseTestMask(t, data)
+		case "write_staging_drain_active_tier_mask":
+			drainMask = parseTestMask(t, data)
+		case "write_staging_enabled":
+			kernelEnabled = string(data) == "1\n"
+		default:
 			t.Fatalf("unexpected write path %s", path)
 		}
-		kernelEnabled = string(data) == "1\n"
 		return nil
 	}
 
@@ -220,10 +228,10 @@ func TestSmoothfsWriteStagingReadsKernelStatus(t *testing.T) {
 	if got.FullThresholdPct != 95 {
 		t.Fatalf("full threshold = %d, want 95", got.FullThresholdPct)
 	}
-	if got.MetadataActiveTierMask != 1 || got.MetadataTierSkips != 7 {
+	if got.MetadataActiveTierMask != 3 || got.MetadataTierSkips != 7 {
 		t.Fatalf("unexpected metadata gate fields: %+v", got)
 	}
-	if got.WriteStagingDrainActiveTierMask != 1 || got.RecommendedDrainActiveTierMask != 1 {
+	if got.WriteStagingDrainActiveTierMask != 3 || got.RecommendedDrainActiveTierMask != 1 {
 		t.Fatalf("unexpected drain gate fields: %+v", got)
 	}
 	if got.SmoothNASWakesAllowed {
@@ -254,14 +262,14 @@ func TestSmoothfsWriteStagingWritesMetadataActiveMaskBeforeEnable(t *testing.T) 
 	rec := smoothfsJSON(h, http.MethodPut, "/api/smoothfs/pools/media/write-staging", map[string]any{
 		"enabled":                   true,
 		"full_threshold_pct":        97,
-		"metadata_active_tier_mask": 1,
+		"metadata_active_tier_mask": 3,
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT write-staging status %d body=%s", rec.Code, rec.Body.String())
 	}
 	want := []string{
 		"write_staging_full_pct=97\n",
-		"metadata_active_tier_mask=0x1\n",
+		"metadata_active_tier_mask=0x3\n",
 		"write_staging_enabled=1\n",
 	}
 	if len(writes) != len(want) {
@@ -271,6 +279,28 @@ func TestSmoothfsWriteStagingWritesMetadataActiveMaskBeforeEnable(t *testing.T) 
 		if writes[i] != want[i] {
 			t.Fatalf("writes[%d] = %q, want %q; all writes=%#v", i, writes[i], want[i], writes)
 		}
+	}
+}
+
+func TestSmoothfsWriteStagingRejectsMetadataMaskThatHidesTier(t *testing.T) {
+	h := newSmoothfsWriteStagingTestHandler(t)
+	readSmoothfsWriteStagingFile = func(path string) ([]byte, error) {
+		if filepath.Base(path) == "write_staging_supported" {
+			return []byte("1\n"), nil
+		}
+		return nil, errNotExist{}
+	}
+	writeSmoothfsWriteStagingFile = func(path string, _ []byte, _ os.FileMode) error {
+		t.Fatalf("unexpected sysfs write to %s", path)
+		return nil
+	}
+
+	rec := smoothfsJSON(h, http.MethodPut, "/api/smoothfs/pools/media/write-staging", map[string]any{
+		"enabled":                   true,
+		"metadata_active_tier_mask": 1,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT hidden metadata mask status %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -326,7 +356,8 @@ func TestSmoothfsWriteStagingAutoWritesMetadataMaskFromObservedDiskState(t *test
 	})
 
 	kernelEnabled := false
-	kernelMask := uint64(3)
+	metadataMask := uint64(1)
+	drainMask := uint64(3)
 	var writes []string
 	readSmoothfsWriteStagingFile = func(path string) ([]byte, error) {
 		switch filepath.Base(path) {
@@ -338,9 +369,9 @@ func TestSmoothfsWriteStagingAutoWritesMetadataMaskFromObservedDiskState(t *test
 			}
 			return []byte("0\n"), nil
 		case "metadata_active_tier_mask":
-			return []byte("0x" + strconv.FormatUint(kernelMask, 16) + "\n"), nil
+			return []byte("0x" + strconv.FormatUint(metadataMask, 16) + "\n"), nil
 		case "write_staging_drain_active_tier_mask":
-			return []byte("0x" + strconv.FormatUint(kernelMask, 16) + "\n"), nil
+			return []byte("0x" + strconv.FormatUint(drainMask, 16) + "\n"), nil
 		case "write_staging_full_pct":
 			return []byte("98\n"), nil
 		default:
@@ -350,13 +381,10 @@ func TestSmoothfsWriteStagingAutoWritesMetadataMaskFromObservedDiskState(t *test
 	writeSmoothfsWriteStagingFile = func(path string, data []byte, _ os.FileMode) error {
 		writes = append(writes, filepath.Base(path)+"="+string(data))
 		switch filepath.Base(path) {
-		case "metadata_active_tier_mask", "write_staging_drain_active_tier_mask":
-			trimmed := strings.TrimSpace(string(data))
-			parsed, err := strconv.ParseUint(trimmed, 0, 64)
-			if err != nil {
-				t.Fatalf("parse metadata mask %q: %v", trimmed, err)
-			}
-			kernelMask = parsed
+		case "metadata_active_tier_mask":
+			metadataMask = parseTestMask(t, data)
+		case "write_staging_drain_active_tier_mask":
+			drainMask = parseTestMask(t, data)
 		case "write_staging_enabled":
 			kernelEnabled = string(data) == "1\n"
 		}
@@ -371,17 +399,20 @@ func TestSmoothfsWriteStagingAutoWritesMetadataMaskFromObservedDiskState(t *test
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.MetadataActiveTierMask != 1 || got.RecommendedMetadataActiveTierMask != 1 {
-		t.Fatalf("metadata masks = current %x recommended %x, want 1", got.MetadataActiveTierMask, got.RecommendedMetadataActiveTierMask)
+	if got.MetadataActiveTierMask != 3 || got.RecommendedMetadataActiveTierMask != 3 {
+		t.Fatalf("metadata masks = current %x recommended %x, want 3", got.MetadataActiveTierMask, got.RecommendedMetadataActiveTierMask)
 	}
 	if got.WriteStagingDrainActiveTierMask != 1 || got.RecommendedDrainActiveTierMask != 1 {
 		t.Fatalf("drain masks = current %x recommended %x, want 1", got.WriteStagingDrainActiveTierMask, got.RecommendedDrainActiveTierMask)
 	}
-	if !strings.Contains(got.MetadataActiveMaskReason, "HDD inactive") {
+	if !strings.Contains(got.MetadataActiveMaskReason, "cannot disappear") {
 		t.Fatalf("metadata reason = %q", got.MetadataActiveMaskReason)
 	}
+	if !strings.Contains(got.DrainActiveMaskReason, "HDD inactive") {
+		t.Fatalf("drain reason = %q", got.DrainActiveMaskReason)
+	}
 	wantPrefix := []string{
-		"metadata_active_tier_mask=0x1\n",
+		"metadata_active_tier_mask=0x3\n",
 		"write_staging_drain_active_tier_mask=0x1\n",
 		"write_staging_enabled=1\n",
 	}
@@ -399,7 +430,8 @@ func TestSmoothfsMetadataMaskRefreshWritesRecommendation(t *testing.T) {
 	h := newSmoothfsWriteStagingTestHandler(t)
 	configureManagedSmoothfsMetadataMaskTest(t, h, "standby")
 
-	kernelMask := uint64(3)
+	metadataMask := uint64(1)
+	drainMask := uint64(3)
 	var writes []string
 	readSmoothfsWriteStagingFile = func(path string) ([]byte, error) {
 		switch filepath.Base(path) {
@@ -408,9 +440,9 @@ func TestSmoothfsMetadataMaskRefreshWritesRecommendation(t *testing.T) {
 		case "write_staging_enabled":
 			return []byte("1\n"), nil
 		case "metadata_active_tier_mask":
-			return []byte("0x" + strconv.FormatUint(kernelMask, 16) + "\n"), nil
+			return []byte("0x" + strconv.FormatUint(metadataMask, 16) + "\n"), nil
 		case "write_staging_drain_active_tier_mask":
-			return []byte("0x" + strconv.FormatUint(kernelMask, 16) + "\n"), nil
+			return []byte("0x" + strconv.FormatUint(drainMask, 16) + "\n"), nil
 		case "write_staging_full_pct":
 			return []byte("98\n"), nil
 		default:
@@ -424,12 +456,12 @@ func TestSmoothfsMetadataMaskRefreshWritesRecommendation(t *testing.T) {
 		default:
 			t.Fatalf("unexpected sysfs write to %s", path)
 		}
-		trimmed := strings.TrimSpace(string(data))
-		parsed, err := strconv.ParseUint(trimmed, 0, 64)
-		if err != nil {
-			t.Fatalf("parse metadata mask %q: %v", trimmed, err)
+		switch filepath.Base(path) {
+		case "metadata_active_tier_mask":
+			metadataMask = parseTestMask(t, data)
+		case "write_staging_drain_active_tier_mask":
+			drainMask = parseTestMask(t, data)
 		}
-		kernelMask = parsed
 		return nil
 	}
 
@@ -441,17 +473,20 @@ func TestSmoothfsMetadataMaskRefreshWritesRecommendation(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.MetadataActiveTierMask != 1 || got.RecommendedMetadataActiveTierMask != 1 {
-		t.Fatalf("metadata masks = current %x recommended %x, want 1", got.MetadataActiveTierMask, got.RecommendedMetadataActiveTierMask)
+	if got.MetadataActiveTierMask != 3 || got.RecommendedMetadataActiveTierMask != 3 {
+		t.Fatalf("metadata masks = current %x recommended %x, want 3", got.MetadataActiveTierMask, got.RecommendedMetadataActiveTierMask)
 	}
 	if got.WriteStagingDrainActiveTierMask != 1 || got.RecommendedDrainActiveTierMask != 1 {
 		t.Fatalf("drain masks = current %x recommended %x, want 1", got.WriteStagingDrainActiveTierMask, got.RecommendedDrainActiveTierMask)
 	}
-	if !strings.Contains(got.MetadataActiveMaskReason, "HDD inactive") {
+	if !strings.Contains(got.MetadataActiveMaskReason, "cannot disappear") {
 		t.Fatalf("metadata reason = %q", got.MetadataActiveMaskReason)
 	}
+	if !strings.Contains(got.DrainActiveMaskReason, "HDD inactive") {
+		t.Fatalf("drain reason = %q", got.DrainActiveMaskReason)
+	}
 	want := []string{
-		"metadata_active_tier_mask=0x1\n",
+		"metadata_active_tier_mask=0x3\n",
 		"write_staging_drain_active_tier_mask=0x1\n",
 	}
 	if len(writes) != len(want) {
@@ -464,7 +499,7 @@ func TestSmoothfsMetadataMaskRefreshWritesRecommendation(t *testing.T) {
 	}
 }
 
-func TestSmoothfsMetadataMaskRefreshRejectsUnmanagedPool(t *testing.T) {
+func TestSmoothfsMetadataMaskRefreshKeepsUnmanagedPoolNamespaceVisible(t *testing.T) {
 	h := newSmoothfsWriteStagingTestHandler(t)
 	readSmoothfsWriteStagingFile = func(path string) ([]byte, error) {
 		if filepath.Base(path) == "write_staging_supported" {
@@ -472,15 +507,29 @@ func TestSmoothfsMetadataMaskRefreshRejectsUnmanagedPool(t *testing.T) {
 		}
 		return nil, errNotExist{}
 	}
-	writeSmoothfsWriteStagingFile = func(path string, _ []byte, _ os.FileMode) error {
-		t.Fatalf("unexpected sysfs write to %s", path)
+	var writes []string
+	writeSmoothfsWriteStagingFile = func(path string, data []byte, _ os.FileMode) error {
+		writes = append(writes, filepath.Base(path)+"="+string(data))
 		return nil
 	}
 
 	rec := smoothfsJSON(h, http.MethodPost, "/api/smoothfs/pools/media/metadata-active-mask/refresh", nil)
-	if rec.Code != http.StatusConflict {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("POST metadata-active-mask refresh status %d body=%s", rec.Code, rec.Body.String())
 	}
+	if len(writes) != 1 || writes[0] != "metadata_active_tier_mask=0x3\n" {
+		t.Fatalf("writes = %#v, want full namespace mask", writes)
+	}
+}
+
+func parseTestMask(t *testing.T, data []byte) uint64 {
+	t.Helper()
+	trimmed := strings.TrimSpace(string(data))
+	parsed, err := strconv.ParseUint(trimmed, 0, 64)
+	if err != nil {
+		t.Fatalf("parse mask %q: %v", trimmed, err)
+	}
+	return parsed
 }
 
 func configureManagedSmoothfsMetadataMaskTest(t *testing.T, h *SmoothfsHandler, hddState string) {
