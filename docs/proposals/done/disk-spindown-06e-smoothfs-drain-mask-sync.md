@@ -10,15 +10,16 @@
 smoothfs now exposes `write_staging_drain_active_tier_mask` as the data-drain
 gate for staged writes. It is intentionally separate from
 `metadata_active_tier_mask`: metadata browsing and staged-data drains can have
-different safety decisions, even though SmoothNAS currently computes both from
-the same externally observed disk power state.
+different safety decisions. SmoothNAS keeps every recorded tier metadata-active
+so files never disappear, while computing the drain mask from externally
+observed disk power state to avoid waking standby HDDs for background work.
 
 ## Scope
 
 1. Read and report the smoothfs drain-active tier mask in the write-staging
    status API.
-2. Recommend the drain-active mask from the same managed-pool disk-state
-   observation used for metadata activity.
+2. Recommend the drain-active mask from managed-pool disk-state observation,
+   independently of the all-tier metadata mask.
 3. Refresh the drain-active mask alongside the metadata-active mask when the
    operator syncs current smoothfs activity gates.
 4. Apply the drain-active mask while enabling write staging when the kernel

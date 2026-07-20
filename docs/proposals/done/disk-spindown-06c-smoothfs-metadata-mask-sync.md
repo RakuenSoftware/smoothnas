@@ -8,31 +8,24 @@
 ## Context
 
 Phases 6A and 6B added the smoothfs kernel-side metadata activity gate. SmoothNAS
-now needs to drive that gate from observed device state so standby HDD tiers
-stay masked out, while tiers whose HDDs are already externally active can be
-used until the disks return to standby.
+must keep that gate open for every recorded tier. Masking a standby tier removes
+its directory entries from the mounted namespace, which makes valid files appear
+as `ENOENT` to applications such as Plex. Disk power state is suitable for the
+separate staged-data drain gate, but never for namespace visibility.
 
 ## Scope
 
-1. Compute a recommended smoothfs `metadata_active_tier_mask` for managed
-   SmoothNAS tier pools.
-2. Keep bit 0, the fastest tier, active.
-3. Treat non-rotational tiers as active.
-4. Include rotational tiers only when `hdparm -C` reports their backing HDDs
-   active or idle.
-5. Leave unmanaged smoothfs pools unchanged instead of guessing.
-6. Apply the recommended mask before enabling write staging when the operator
-   has not supplied an explicit mask.
-7. Surface the recommendation and reason in the API/UI.
+1. Compute `metadata_active_tier_mask` from the pool's recorded tier count.
+2. Keep every recorded tier active for metadata lookup.
+3. Reject explicit masks that would hide a recorded tier.
+4. Apply the namespace-safe mask before enabling write staging.
+5. Surface the recommendation and reason in the API/UI.
 
 ## Acceptance Criteria
 
-- [x] SmoothNAS never includes a standby or unknown HDD tier in the automatic
-      metadata-active mask.
-- [x] SmoothNAS includes SSD/NVMe tiers.
-- [x] SmoothNAS includes HDD tiers that are already active/idle.
-- [x] Manual `metadata_active_tier_mask` requests still override the automatic
-      recommendation.
+- [x] SmoothNAS includes every recorded tier in the automatic metadata-active
+      mask, regardless of disk power state.
+- [x] Manual `metadata_active_tier_mask` requests cannot hide recorded tiers.
 - [x] The smoothfs write-staging status response reports current and
       recommended metadata masks.
 
