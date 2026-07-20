@@ -603,10 +603,29 @@ func (a *Adapter) poolBackingDevices(poolName string) ([]string, error) {
 	return devices, nil
 }
 
+// backingDiskList and backingQueryPowerState are indirected for tests.
+var (
+	backingDiskList        = diskpkg.List
+	backingQueryPowerState = diskpkg.QueryPowerState
+)
+
 func backingDevicesStandbyBlocked(devices []string) (bool, string) {
-	disks, err := diskpkg.List()
+	// Maintenance-move eligibility must fail OPEN. This guard exists only to
+	// avoid proactively spinning up a parked HDD for a background tiering move;
+	// it must never defer on "can't tell". We defer ONLY when a rotational
+	// backing disk is positively confirmed standby/sleeping; every other case
+	// proceeds. Those other cases are: the disk listing itself fails; a backing
+	// device is absent from the listing and so hits the !known fall-through
+	// below (an md array, for example, is not a raw disk and is not enumerated
+	// as one — there is no md-specific handling, it simply falls through); or a
+	// listed rotational disk returns an unreadable power state (hdparm reports
+	// "unknown"). Deferring on any unconfirmable state permanently deadlocks
+	// tiering on controllers/drives that never report a power state and strands
+	// in-flight moves, making their files unresolvable. Waking a disk we did not
+	// need to is safe and self-correcting: a cold read just spins it back up.
+	disks, err := backingDiskList()
 	if err != nil {
-		return true, "could not list disks to confirm backing HDDs are already active"
+		return false, ""
 	}
 	rotational := make(map[string]bool, len(disks))
 	for _, d := range disks {
@@ -615,15 +634,12 @@ func backingDevicesStandbyBlocked(devices []string) (bool, string) {
 	for _, device := range devices {
 		base := diskpkg.BaseDiskPath(device)
 		isRotational, known := rotational[base]
-		if !known {
-			return true, "could not confirm backing disks are already active"
-		}
-		if !isRotational {
+		if !known || !isRotational {
 			continue
 		}
-		state, err := diskpkg.QueryPowerState(base)
+		state, err := backingQueryPowerState(base)
 		if err != nil {
-			return true, "could not confirm backing HDDs are already active"
+			continue
 		}
 		if state == "standby" || state == "sleeping" {
 			return true, "backing HDD is in standby; waiting for external activity"
