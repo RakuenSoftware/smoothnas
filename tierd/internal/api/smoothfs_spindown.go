@@ -20,6 +20,25 @@ func (h *SmoothfsHandler) recommendMetadataActiveTierMask(pool db.SmoothfsPool) 
 	if len(pool.Tiers) == 0 {
 		return smoothfsMetadataMaskRecommendation{Mask: 1, Reason: "pool has no recorded tiers", OK: false}
 	}
+	if len(pool.Tiers) > 64 {
+		return smoothfsMetadataMaskRecommendation{Mask: 1, Reason: "pool has more tiers than the metadata-active mask can represent", OK: false}
+	}
+
+	mask := ^uint64(0)
+	if len(pool.Tiers) < 64 {
+		mask = (uint64(1) << len(pool.Tiers)) - 1
+	}
+	return smoothfsMetadataMaskRecommendation{
+		Mask:   mask,
+		Reason: "all recorded tiers remain metadata-active so namespace entries cannot disappear",
+		OK:     true,
+	}
+}
+
+func (h *SmoothfsHandler) recommendDrainActiveTierMask(pool db.SmoothfsPool) smoothfsMetadataMaskRecommendation {
+	if len(pool.Tiers) == 0 {
+		return smoothfsMetadataMaskRecommendation{Mask: 1, Reason: "pool has no recorded tiers", OK: false}
+	}
 
 	slots, err := h.store.ListTierSlots(pool.Name)
 	if err != nil {
