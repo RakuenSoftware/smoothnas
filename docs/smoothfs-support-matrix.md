@@ -110,6 +110,6 @@ ref, so the pin is the single source of truth for "which smoothfs ships".
 
 | Field | Value |
 |---|---|
-| Current pin | **v0.2.23** |
+| Current pin | **v0.2.24** |
 | Floor | v0.2.16 — v0.2.15 has a known wedge: `smoothfs_iget` drained the whole OID writeback backlog under the parent directory's `i_rwsem`, convoying every operation on that directory into D-state under NFS create/unlink/re-lookup churn (fixed by smoothfs #166's queue peek) |
 | Bump procedure | edit the `SMOOTHFS_REPO_REF` default, PR into `testing`, and let `smoothfs-protocol-gate` validate the new ref before promotion |
