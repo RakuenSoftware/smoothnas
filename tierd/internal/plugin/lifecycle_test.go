@@ -515,7 +515,7 @@ func TestLifecycle_Materialise_LXCDistro_RunsSetupAndCommits(t *testing.T) {
 		t.Fatalf("materialise: %v", err)
 	}
 	// Setup flow: pull base, create+start setup container, wait, commit, remove setup, then create the real container.
-	if len(rt.pullCalls) != 1 || rt.pullCalls[0] != "ubuntu:jammy" {
+	if len(rt.pullCalls) != 1 || rt.pullCalls[0] != "images.linuxcontainers.org/ubuntu:jammy" {
 		t.Errorf("pull calls = %v", rt.pullCalls)
 	}
 	if len(rt.commitCalls) != 1 {
