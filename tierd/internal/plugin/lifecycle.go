@@ -1035,7 +1035,11 @@ func (l *Lifecycle) materialiseImage(ctx context.Context, p *PluginRow, svc *Ser
 		return refs.PrimaryImageRef, nil
 
 	case ArtifactLXCDistro:
-		baseRef := svc.Artifact.Distro + ":" + svc.Artifact.Release
+		// LXC2Docker reserves bare distro references for faithful OCI pulls.
+		// This artifact explicitly requests an LXC download-template distro,
+		// so use the opt-in linuxcontainers host rather than relying on the old
+		// bare-name shortcut.
+		baseRef := "images.linuxcontainers.org/" + svc.Artifact.Distro + ":" + svc.Artifact.Release
 		_ = l.setInstanceState(p.Name, svc.Name, 1, StatePulling, "")
 		resolvedBaseRef, err := l.pullImageWithRetry(ctx, baseRef, nil)
 		if err != nil {
