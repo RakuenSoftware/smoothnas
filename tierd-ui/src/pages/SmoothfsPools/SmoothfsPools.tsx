@@ -17,7 +17,7 @@ export default function SmoothfsPools() {
   const [pools, setPools] = useState<any[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ name: '', tiersText: '', uuid: '' });
+  const [form, setForm] = useState({ name: '', tiersText: '', uuid: '', mode: 'tier' as 'tier' | 'cache' });
   // Phase 7.9 — movement-log + quiesce/reconcile surface.
   const [movementLog, setMovementLog] = useState<any[]>([]);
   const [logLoading, setLogLoading] = useState(false);
@@ -123,9 +123,10 @@ export default function SmoothfsPools() {
       return;
     }
     setCreating(true);
-    const payload: { name: string; tiers: string[]; uuid?: string } = {
+    const payload: { name: string; tiers: string[]; uuid?: string; mode: 'tier' | 'cache' } = {
       name: form.name.trim(),
       tiers,
+      mode: form.mode,
     };
     if (form.uuid.trim()) {
       payload.uuid = form.uuid.trim();
@@ -133,7 +134,7 @@ export default function SmoothfsPools() {
     api.createSmoothfsPool(payload)
       .then(() => {
         setShowCreate(false);
-        setForm({ name: '', tiersText: '', uuid: '' });
+        setForm({ name: '', tiersText: '', uuid: '', mode: 'tier' as 'tier' | 'cache' });
         setError('');
         loadData();
       })
@@ -162,6 +163,12 @@ export default function SmoothfsPools() {
         <div className="create-form">
           <h3>{t('smoothfs.create.title')}</h3>
           <div className="form-row">
+            <label>{t('storage.mode.label')}
+              <select value={form.mode} onChange={e => setForm(p => ({ ...p, mode: e.target.value as 'tier' | 'cache' }))} disabled={creating}>
+                <option value="tier">{t('storage.mode.tier')}</option>
+                <option value="cache">{t('storage.mode.cache')}</option>
+              </select>
+            </label>
             <label>{t('datasets.col.name')} <input value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} placeholder="tank" /></label>
             <label>{t('smoothfs.field.uuid')}
               <input value={form.uuid} onChange={e => setForm(p => ({ ...p, uuid: e.target.value }))}
@@ -178,7 +185,7 @@ export default function SmoothfsPools() {
             </label>
           </div>
           <div className="form-hint" style={{ fontSize: 12, color: '#888', marginBottom: 8 }}>
-            {t('smoothfs.create.hint')}
+            {t(form.mode === 'cache' ? 'storage.mode.cacheHint' : 'storage.mode.tierHint')}
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn secondary" onClick={() => setShowCreate(false)} disabled={creating}>{t('common.cancel')}</button>
@@ -202,7 +209,7 @@ export default function SmoothfsPools() {
                 const staging = stagingByPool[p.name];
                 return (
                   <tr key={p.uuid}>
-                    <td><code>{p.name}</code></td>
+                    <td><code>{p.name}</code><div>{t(p.mode === 'cache' ? 'storage.mode.cache' : 'storage.mode.tier')}</div></td>
                     <td><code style={{ fontSize: 11 }}>{p.uuid}</code></td>
                     <td>
                       {(p.tiers || []).map((t: string, i: number) => (

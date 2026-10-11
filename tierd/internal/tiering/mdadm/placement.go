@@ -295,6 +295,14 @@ func planMoveOrder(cands []candidate, assignments []int, assigned []bool) (demot
 }
 
 func (a *Adapter) planPoolPlacement(ctx context.Context, ns db.MdadmManagedNamespaceRow) {
+	pool, err := a.store.GetSmoothfsPool(ns.PoolName)
+	if err != nil && !errors.Is(err, db.ErrNotFound) {
+		log.Printf("placement: storage mode: %v", err)
+		return
+	}
+	if pool != nil && pool.Mode == "cache" {
+		return
+	}
 	maintenanceMode, ok := a.poolReadyForSmoothNASMaintenance(ns.PoolName)
 	if !ok {
 		return

@@ -18,6 +18,13 @@
 import type { LanguageTranslations } from '@rakuensoftware/smoothgui';
 
 const nl: LanguageTranslations = {
+  'error.tiers.invalid_storage_mode': 'Kies tier of cache; cachemodus vereist minstens twee lagen.',
+  'storage.mode.label': "Opslagmodus",
+  'storage.mode.tier': "Gelaagde opslag",
+  'storage.mode.cache': "Cache met permanente basisopslag",
+  'storage.mode.tierHint': "Bestanden staan op één laag en verplaatsen volgens het plaatsingsbeleid.",
+  'storage.mode.cacheHint': "De laatste, langzaamste laag bewaart elk bestand. Snellere opslag buffert schrijfacties en bewaart tijdelijke leeskopieën. Schrijfacties worden naar de basislaag verwerkt; bij een volle cache gaat schrijven naar de basisopslag.",
+
   // SmoothGUI built-in chrome keys (login, alerts, confirm, toasts,
   // user dropdown). These come from englishTranslations in
   // @rakuensoftware/smoothgui. We override them here so a non-English

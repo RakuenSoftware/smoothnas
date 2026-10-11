@@ -36,6 +36,9 @@ func (h *SmoothfsHandler) recommendMetadataActiveTierMask(pool db.SmoothfsPool) 
 }
 
 func (h *SmoothfsHandler) recommendDrainActiveTierMask(pool db.SmoothfsPool) smoothfsMetadataMaskRecommendation {
+	if pool.Mode == "cache" {
+		return h.recommendMetadataActiveTierMask(pool)
+	}
 	if len(pool.Tiers) == 0 {
 		return smoothfsMetadataMaskRecommendation{Mask: 1, Reason: "pool has no recorded tiers", OK: false}
 	}

@@ -345,3 +345,34 @@ tar czf /tmp/smoothfs-diag.tar.gz \
     <(modinfo smoothfs) \
     <(dkms status)
 ```
+
+## Cache versus tier mode
+
+Both the pool creation form and `/api/tiers` accept `storage_mode: "tier"` or
+`"cache"`; `/api/smoothfs/pools` accepts `mode` with the same values. Omitted mode
+preserves tiering for existing clients and existing database rows.
+
+Tier mode keeps one authoritative file placement and continues normal packing
+and movement. Cache mode keeps the namespace and permanent data on the final,
+slowest backing tier, stages buffered writes on the fastest tier, and caches
+reads using disposable anonymous replicas. A full cache falls back to the base;
+`fsync` waits for pending writes to reach the base. Permanent capacity is the base
+capacity, not cache plus base. Intermediate cache paths are not used for
+admission in the initial implementation.
+
+Cache pools wait for the configured base and at least one cache backing to be
+assigned before mounting. Mode and backing identity are preserved through unit
+rewrites/restart. An existing cache pool's backing order cannot be changed through
+automatic reconciliation: changing its base requires an offline data migration.
+There is no live tier-to-cache conversion endpoint. Migrate all unique upper-tier
+names into the base before declaring a cache pool over existing backings.
+
+Clean read replicas may be dropped at any time by writing `1` to
+`/sys/fs/smoothfs/<uuid>/drop_read_cache`. Dirty write stages under `.smoothfs`
+contain pending data and must be retained until drain succeeds. Cache drain can
+wake base storage; a spindown maintenance window cannot strand pending writes.
+
+The kernel must support the `mode=cache` mount option and `storage_mode` sysfs
+attribute. Older kernels reject cache mounts instead of silently using tier
+semantics. Run SmoothFS's `cache_mode.sh` runtime harness on an isolated supported
+kernel before deploying this feature to stored data.

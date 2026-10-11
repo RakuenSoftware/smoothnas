@@ -130,6 +130,19 @@ export SMOOTHFS_GATE_SKIP="${SMOOTHFS_GATE_SKIP-smb_vfs_module.sh}"
 
 rc=0
 
+# Cache semantics are a release gate alongside the existing tier/protocol tests.
+echo "== guest: cache base-authority harness =="
+if bash "${SMOOTHFS_TEST_ROOT}/cache_mode.sh" > "${GATE_LOG_DIR}/cache-mode.log" 2>&1; then
+    cat "${GATE_LOG_DIR}/cache-mode.log"
+    echo "== cache mode: PASS =="
+else
+    rc=$?
+    cat "${GATE_LOG_DIR}/cache-mode.log"
+    dmesg > "${GATE_LOG_DIR}/cache-mode-dmesg.log" 2>/dev/null || true
+    echo "== cache mode: FAIL (status ${rc}) =="
+    exit "${rc}"
+fi
+
 echo
 echo "############################################################"
 echo "#  SmoothFS protocol conformance gate"

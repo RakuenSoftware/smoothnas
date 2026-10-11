@@ -36,6 +36,11 @@ func renderManagedPoolUnit(p smoothfsclient.ManagedPool) (string, error) {
 }
 
 func createManagedPool(req smoothfsclient.CreateManagedPoolRequest) (*smoothfsclient.ManagedPool, error) {
+	mode, err := smoothfsclient.NormalizeStorageMode(req.Mode, len(req.Tiers))
+	if err != nil {
+		return nil, err
+	}
+	req.Mode = mode
 	if err := smoothfsclient.ValidatePoolName(req.Name); err != nil {
 		return nil, err
 	}
@@ -43,6 +48,11 @@ func createManagedPool(req smoothfsclient.CreateManagedPoolRequest) (*smoothfscl
 		return nil, err
 	}
 
+	if mode == smoothfsclient.ModeCache {
+		if err := smoothfsclient.ValidateCacheBackings(req.Tiers); err != nil {
+			return nil, err
+		}
+	}
 	poolUUID := req.UUID
 	if poolUUID == uuid.Nil {
 		poolUUID = uuid.New()
@@ -53,6 +63,7 @@ func createManagedPool(req smoothfsclient.CreateManagedPoolRequest) (*smoothfscl
 	}
 	mountpoint := smoothfsclient.MountpointForPool(base, req.Name)
 	pool := smoothfsclient.ManagedPool{
+		Mode:       req.Mode,
 		Name:       req.Name,
 		UUID:       poolUUID,
 		Tiers:      req.Tiers,
@@ -112,6 +123,7 @@ func rewriteManagedPoolUnit(pool db.SmoothfsPool) error {
 		return err
 	}
 	mp := smoothfsclient.ManagedPool{
+		Mode:       smoothfsclient.StorageMode(pool.Mode),
 		Name:       pool.Name,
 		UUID:       parsed,
 		Tiers:      pool.Tiers,
@@ -200,6 +212,21 @@ func isPathMounted(path string) bool {
 }
 
 func ensureManagedSmoothfsPool(store *db.Store, poolName string) error {
+	if pool, err := store.GetTierInstance(poolName); err == nil && pool.StorageMode == "cache" {
+		slots, err := store.ListTierSlots(poolName)
+		if err != nil {
+			return err
+		}
+		assigned := 0
+		for _, slot := range slots {
+			if slot.State != db.TierSlotStateEmpty {
+				assigned++
+			}
+		}
+		if assigned < 2 || slots[len(slots)-1].State == db.TierSlotStateEmpty {
+			return nil
+		}
+	}
 	tiers, err := activeManagedSmoothfsTiers(store, poolName)
 	if err != nil {
 		return err
@@ -209,6 +236,9 @@ func ensureManagedSmoothfsPool(store *db.Store, poolName string) error {
 	}
 
 	if existing, err := store.GetSmoothfsPool(poolName); err == nil {
+		if existing.Mode == "cache" && !sameStringSlice(existing.Tiers, tiers) {
+			return fmt.Errorf("cache pool %s backing changes require an explicit offline migration", poolName)
+		}
 		if existing.UnitPath != "" {
 			if !sameStringSlice(existing.Tiers, tiers) || filepath.Clean(existing.Mountpoint) != filepath.Join("/mnt", poolName) {
 				if err := replaceManagedSmoothfsPool(store, *existing, tiers); err != nil {
@@ -279,6 +309,7 @@ func replaceManagedSmoothfsPool(store *db.Store, existing db.SmoothfsPool, tiers
 		return err
 	}
 	mp := smoothfsclient.ManagedPool{
+		Mode:       smoothfsclient.StorageMode(existing.Mode),
 		Name:       existing.Name,
 		UUID:       parsed,
 		Tiers:      existing.Tiers,
@@ -295,7 +326,14 @@ func replaceManagedSmoothfsPool(store *db.Store, existing db.SmoothfsPool, tiers
 }
 
 func createManagedSmoothfsPoolRow(store *db.Store, poolName string, poolUUID uuid.UUID, tiers []string) error {
+	mode := "tier"
+	if pool, err := store.GetTierInstance(poolName); err == nil {
+		mode = pool.StorageMode
+	} else if !errors.Is(err, db.ErrNotFound) {
+		return err
+	}
 	mp, err := createManagedPoolForSystem(smoothfsclient.CreateManagedPoolRequest{
+		Mode:      smoothfsclient.StorageMode(mode),
 		Name:      poolName,
 		UUID:      poolUUID,
 		Tiers:     tiers,
@@ -306,6 +344,7 @@ func createManagedSmoothfsPoolRow(store *db.Store, poolName string, poolUUID uui
 	}
 
 	row := db.SmoothfsPool{
+		Mode:       string(mp.Mode),
 		UUID:       mp.UUID.String(),
 		Name:       mp.Name,
 		Tiers:      mp.Tiers,
@@ -350,6 +389,7 @@ func destroyManagedSmoothfsPool(store *db.Store, poolName string) error {
 		return err
 	}
 	mp := smoothfsclient.ManagedPool{
+		Mode:       smoothfsclient.StorageMode(pool.Mode),
 		Name:       pool.Name,
 		UUID:       parsed,
 		Tiers:      pool.Tiers,
