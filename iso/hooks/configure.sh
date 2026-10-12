@@ -2,6 +2,13 @@
 # Adds NAS-specific tuning, installs tierd, nginx, sysctl, udev, firewall on
 # top of the generic system configuration.
 
+# The generic firstboot script reads these settings to use the same marker
+# path as the product's systemd unit rather than its /var/lib/linux fallback.
+mkdir -p "$TARGET/usr/local/lib/smoothiso"
+printf 'PRODUCT_ID=%q\nDATA_DIR=%q\n' "$PRODUCT_ID" "$DATA_DIR" \
+    > "$TARGET/usr/local/lib/smoothiso/config.sh"
+chmod 644 "$TARGET/usr/local/lib/smoothiso/config.sh"
+
 # Persist the language selected during installation. firstboot.sh reads
 # this to write /etc/smoothnas/locale, which the web UI reads before login.
 _install_lang="${INSTALLER_LANG:-en}"
