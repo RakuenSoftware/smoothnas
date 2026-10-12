@@ -1,0 +1,14 @@
+diff --git a/installer.sh b/installer.sh
+index 0445a50..0410bec 100755
+--- a/installer.sh
++++ b/installer.sh
+@@ -1468,6 +1468,9 @@ sync_clock() {
+ # ============================================================
+ 
+ select_language() {
++    # Automated installs use the configured language without a console prompt.
++    [ "$SMOOTHISO_UNATTENDED" = "1" ] && return 0
++
+     local count
+     count=$(printf '%s' "${INSTALLER_LANGUAGES:-}" | wc -w)
+     [ "$count" -le 1 ] && return 0
