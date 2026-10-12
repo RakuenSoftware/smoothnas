@@ -16,6 +16,13 @@
 import type { LanguageTranslations } from '@rakuensoftware/smoothgui';
 
 const en: LanguageTranslations = {
+  'error.tiers.invalid_storage_mode': 'Choose tier or cache; cache mode requires at least two tiers.',
+  'storage.mode.label': "Storage mode",
+  'storage.mode.tier': "Tiered storage",
+  'storage.mode.cache': "Cache with permanent base storage",
+  'storage.mode.tierHint': "Files live on one tier and move between tiers according to placement policy.",
+  'storage.mode.cacheHint': "The final, slowest tier stores every file. Faster storage buffers writes and keeps disposable read copies. Pending writes drain to the base tier; a full cache falls back to base storage.",
+
   // Phase 1 ships the bare-minimum keys (common verbs + nav labels)
   // so the type plumbing exercises every layer. Per-page keys land
   // page-by-page during Phase 2.

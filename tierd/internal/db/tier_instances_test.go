@@ -217,3 +217,24 @@ func TestValidateTierInstanceName(t *testing.T) {
 		}
 	}
 }
+
+func TestTierPoolStorageModeDefaultsAndPersists(t *testing.T) {
+	store := openTierStore(t)
+	if err := store.CreateTierPoolWithOptions("cached", "xfs", nil, false, "cache"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := store.GetTierInstance("cached")
+	if err != nil || p.StorageMode != "cache" {
+		t.Fatalf("cache mode: %+v, %v", p, err)
+	}
+	if err := store.CreateTierInstance("tiered"); err != nil {
+		t.Fatal(err)
+	}
+	p, err = store.GetTierInstance("tiered")
+	if err != nil || p.StorageMode != "tier" {
+		t.Fatalf("legacy default: %+v, %v", p, err)
+	}
+	if err := store.CreateTierPoolWithOptions("badcache", "xfs", []db.TierDefinition{{Name: "Only", Rank: 1}}, false, "cache"); err == nil {
+		t.Fatal("single-tier cache accepted")
+	}
+}

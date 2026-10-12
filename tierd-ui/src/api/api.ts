@@ -90,11 +90,12 @@ export const api = {
 
   // --- Tiers ---
   getTiers: () => apiFetch<any[]>('GET', '/tiers'),
-  createTier: (name: string, tiers?: { name: string; rank: number }[], metaOnFastest?: boolean) =>
+  createTier: (name: string, tiers?: { name: string; rank: number }[], metaOnFastest?: boolean, storageMode: 'tier' | 'cache' = 'tier') =>
     apiFetch('POST', '/tiers', {
       name,
       ...(tiers ? { tiers } : {}),
       ...(metaOnFastest ? { meta_on_fastest: true } : {}),
+      storage_mode: storageMode,
     }),
   // force=false is the first confirm (refused with 409 requires_force if the
   // pool is still in use); force=true is the second confirm that force-removes
@@ -236,7 +237,7 @@ export const api = {
 
   // --- Smoothfs pools (Phase 7.8 UI; 7.7 REST surface) ---
   getSmoothfsPools: () => apiFetch<any[]>('GET', '/smoothfs/pools'),
-  createSmoothfsPool: (data: { name: string; tiers: string[]; uuid?: string; mount_base?: string }) =>
+  createSmoothfsPool: (data: { name: string; tiers: string[]; uuid?: string; mount_base?: string; mode?: 'tier' | 'cache' }) =>
     apiFetch('POST', '/smoothfs/pools', data),
   deleteSmoothfsPool: (name: string) =>
     apiFetch('DELETE', `/smoothfs/pools/${encodeURIComponent(name)}`),

@@ -351,3 +351,30 @@ func openSmoothfsUnitTestStore(t *testing.T) *db.Store {
 	}
 	return store
 }
+
+func TestCacheModeSurvivesMountUnitRewrite(t *testing.T) {
+	store := openSmoothfsUnitTestStore(t)
+	fast, base := t.TempDir(), t.TempDir()
+	unit := filepath.Join(t.TempDir(), "mnt-media.mount")
+	pool := db.SmoothfsPool{UUID: uuid.NewString(), Name: "media", Mode: "cache", Tiers: []string{fast, base}, Mountpoint: t.TempDir(), UnitPath: unit}
+	if _, err := store.CreateSmoothfsPool(pool); err != nil {
+		t.Fatal(err)
+	}
+	original := runSystemctl
+	runSystemctl = func(...string) error { return nil }
+	t.Cleanup(func() { runSystemctl = original })
+	if err := rewriteManagedPoolUnit(pool); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), ",mode=cache\n") {
+		t.Fatal("unit rewrite lost cache mode")
+	}
+	recommendation := NewSmoothfsHandler(store).recommendDrainActiveTierMask(pool)
+	if !recommendation.OK || recommendation.Mask != 3 {
+		t.Fatalf("cache may strand writes: %+v", recommendation)
+	}
+}

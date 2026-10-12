@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -12,6 +13,7 @@ import (
 // tiering/smoothfs.Pool (planner's in-memory registration) and
 // serves as the authoritative list across tierd restarts.
 type SmoothfsPool struct {
+	Mode       string   `json:"mode"`
 	UUID       string   `json:"uuid"`
 	Name       string   `json:"name"`
 	Tiers      []string `json:"tiers"`
@@ -21,11 +23,16 @@ type SmoothfsPool struct {
 }
 
 func (s *Store) CreateSmoothfsPool(p SmoothfsPool) (*SmoothfsPool, error) {
+	mode, err := NormalizeStorageMode(p.Mode)
+	if err != nil {
+		return nil, err
+	}
+	p.Mode = mode
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
-		"INSERT INTO smoothfs_pools (uuid, name, tiers, mountpoint, unit_path, created_at) VALUES (?,?,?,?,?,?)",
+	_, err = s.db.Exec(
+		"INSERT INTO smoothfs_pools (uuid, name, tiers, mountpoint, unit_path, created_at, mode) VALUES (?,?,?,?,?,?,?)",
 		p.UUID, p.Name, strings.Join(p.Tiers, ":"),
-		p.Mountpoint, p.UnitPath, now,
+		p.Mountpoint, p.UnitPath, now, p.Mode,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -38,9 +45,14 @@ func (s *Store) CreateSmoothfsPool(p SmoothfsPool) (*SmoothfsPool, error) {
 }
 
 func (s *Store) UpdateSmoothfsPool(p SmoothfsPool) error {
+	mode, err := NormalizeStorageMode(p.Mode)
+	if err != nil {
+		return err
+	}
+	p.Mode = mode
 	res, err := s.db.Exec(
-		"UPDATE smoothfs_pools SET uuid = ?, tiers = ?, mountpoint = ?, unit_path = ? WHERE name = ?",
-		p.UUID, strings.Join(p.Tiers, ":"), p.Mountpoint, p.UnitPath, p.Name,
+		"UPDATE smoothfs_pools SET uuid = ?, tiers = ?, mountpoint = ?, unit_path = ?, mode = ? WHERE name = ?",
+		p.UUID, strings.Join(p.Tiers, ":"), p.Mountpoint, p.UnitPath, p.Mode, p.Name,
 	)
 	if err != nil {
 		return err
@@ -54,7 +66,7 @@ func (s *Store) UpdateSmoothfsPool(p SmoothfsPool) error {
 
 func (s *Store) ListSmoothfsPools() ([]SmoothfsPool, error) {
 	rows, err := s.db.Query(
-		"SELECT uuid, name, tiers, mountpoint, unit_path, created_at FROM smoothfs_pools ORDER BY name",
+		"SELECT uuid, name, tiers, mountpoint, unit_path, created_at, mode FROM smoothfs_pools ORDER BY name",
 	)
 	if err != nil {
 		return nil, err
@@ -64,7 +76,7 @@ func (s *Store) ListSmoothfsPools() ([]SmoothfsPool, error) {
 	for rows.Next() {
 		var p SmoothfsPool
 		var tierStr string
-		if err := rows.Scan(&p.UUID, &p.Name, &tierStr, &p.Mountpoint, &p.UnitPath, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.UUID, &p.Name, &tierStr, &p.Mountpoint, &p.UnitPath, &p.CreatedAt, &p.Mode); err != nil {
 			return nil, err
 		}
 		p.Tiers = strings.Split(tierStr, ":")
@@ -80,9 +92,9 @@ func (s *Store) GetSmoothfsPool(name string) (*SmoothfsPool, error) {
 	var p SmoothfsPool
 	var tierStr string
 	err := s.db.QueryRow(
-		"SELECT uuid, name, tiers, mountpoint, unit_path, created_at FROM smoothfs_pools WHERE name = ?",
+		"SELECT uuid, name, tiers, mountpoint, unit_path, created_at, mode FROM smoothfs_pools WHERE name = ?",
 		name,
-	).Scan(&p.UUID, &p.Name, &tierStr, &p.Mountpoint, &p.UnitPath, &p.CreatedAt)
+	).Scan(&p.UUID, &p.Name, &tierStr, &p.Mountpoint, &p.UnitPath, &p.CreatedAt, &p.Mode)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
@@ -159,4 +171,14 @@ func (s *Store) ListSmoothfsMovementLog(limit, offset int) ([]SmoothfsMovementLo
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+func NormalizeStorageMode(mode string) (string, error) {
+	if mode == "" {
+		return "tier", nil
+	}
+	if mode != "tier" && mode != "cache" {
+		return "", fmt.Errorf("storage mode must be tier or cache")
+	}
+	return mode, nil
 }

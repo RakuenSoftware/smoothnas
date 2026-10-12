@@ -112,6 +112,7 @@ var validTierSlotTransitions = map[string]map[string]struct{}{
 }
 
 type TierInstance struct {
+	StorageMode      string `json:"storage_mode"`
 	ID               int64  `json:"id"`
 	Name             string `json:"name"`
 	Filesystem       string `json:"filesystem"`
@@ -288,7 +289,7 @@ func (s *Store) CreateTierPool(name, filesystem string, tiers []TierDefinition) 
 // CreateTierPoolWithOptions creates a tier pool. metaOnFastest controls
 // whether PoolMetaStore will concentrate all metadata on the fastest tier
 // (true) or spread it across every tier's .tierd-meta (false, default).
-func (s *Store) CreateTierPoolWithOptions(name, filesystem string, tiers []TierDefinition, metaOnFastest bool) error {
+func (s *Store) CreateTierPoolWithOptions(name, filesystem string, tiers []TierDefinition, metaOnFastest bool, storageMode ...string) error {
 	if err := ValidateTierInstanceName(name); err != nil {
 		return err
 	}
@@ -302,6 +303,17 @@ func (s *Store) CreateTierPoolWithOptions(name, filesystem string, tiers []TierD
 		return err
 	}
 
+	mode := "tier"
+	if len(storageMode) > 0 {
+		mode = storageMode[0]
+	}
+	mode, err := NormalizeStorageMode(mode)
+	if err != nil {
+		return err
+	}
+	if mode == "cache" && len(tiers) < 2 {
+		return fmt.Errorf("cache mode requires a cache and a base tier")
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -313,9 +325,9 @@ func (s *Store) CreateTierPoolWithOptions(name, filesystem string, tiers []TierD
 		metaFlag = 1
 	}
 	res, err := tx.Exec(
-		`INSERT INTO tier_pools (name, filesystem, state, error_reason, last_reconciled_at, meta_on_fastest)
-		 VALUES (?, ?, ?, NULL, NULL, ?)`,
-		name, filesystem, TierPoolStateProvisioning, metaFlag,
+		`INSERT INTO tier_pools (name, filesystem, state, error_reason, last_reconciled_at, meta_on_fastest, storage_mode)
+		 VALUES (?, ?, ?, NULL, NULL, ?, ?)`,
+		name, filesystem, TierPoolStateProvisioning, metaFlag, mode,
 	)
 	if err != nil {
 		return fmt.Errorf("create tier pool: %w", err)
@@ -391,6 +403,7 @@ func scanTierInstance(row *sql.Row) (*TierInstance, error) {
 		&t.UpdatedAt,
 		&reconciledAt,
 		&metaOnFastest,
+		&t.StorageMode,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
@@ -413,7 +426,7 @@ func (s *Store) GetTierInstance(name string) (*TierInstance, error) {
 		return nil, err
 	}
 	t, err := scanTierInstance(s.db.QueryRow(
-		`SELECT id, name, filesystem, state, error_reason, created_at, updated_at, last_reconciled_at, meta_on_fastest
+		`SELECT id, name, filesystem, state, error_reason, created_at, updated_at, last_reconciled_at, meta_on_fastest, storage_mode
 		 FROM tier_pools
 		 WHERE name = ?`,
 		name,
@@ -429,7 +442,7 @@ func (s *Store) GetTierInstance(name string) (*TierInstance, error) {
 
 func (s *Store) ListTierInstances() ([]TierInstance, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, filesystem, state, error_reason, created_at, updated_at, last_reconciled_at, meta_on_fastest
+		`SELECT id, name, filesystem, state, error_reason, created_at, updated_at, last_reconciled_at, meta_on_fastest, storage_mode
 		 FROM tier_pools
 		 ORDER BY created_at, name`,
 	)
@@ -454,6 +467,7 @@ func (s *Store) ListTierInstances() ([]TierInstance, error) {
 			&t.UpdatedAt,
 			&reconciledAt,
 			&metaOnFastest,
+			&t.StorageMode,
 		); err != nil {
 			return nil, fmt.Errorf("scan tier pool: %w", err)
 		}

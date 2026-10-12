@@ -82,3 +82,26 @@ func TestSmoothfsPoolCRUD(t *testing.T) {
 		t.Errorf("delete again: expected db.ErrNotFound, got %v", err)
 	}
 }
+
+func TestSmoothfsCacheModePersists(t *testing.T) {
+	store := openTestDB(t)
+	defer store.Close()
+	p, err := store.CreateSmoothfsPool(db.SmoothfsPool{UUID: "cache-pool", Name: "cache", Mode: "cache", Tiers: []string{"/fast", "/base"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetSmoothfsPool(p.Name)
+	if err != nil || got.Mode != "cache" {
+		t.Fatalf("mode roundtrip: %+v, %v", got, err)
+	}
+	if err := store.UpdateSmoothfsPool(*got); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.GetSmoothfsPool(p.Name)
+	if err != nil || got.Mode != "cache" {
+		t.Fatalf("update lost mode: %+v, %v", got, err)
+	}
+	if _, err := store.CreateSmoothfsPool(db.SmoothfsPool{UUID: "bad", Name: "bad", Mode: "invalid"}); err == nil {
+		t.Fatal("invalid mode accepted")
+	}
+}
