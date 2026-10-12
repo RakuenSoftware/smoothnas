@@ -58,8 +58,11 @@ mkdir -p "${ROOT}"/{fast,slow,server,nfs,cifs,samba/private}
 truncate -s 2G "${ROOT}/fast.img" "${ROOT}/slow.img"
 mkfs.xfs -q -f "${ROOT}/fast.img"
 mkfs.xfs -q -f "${ROOT}/slow.img"
-mount -o loop "${ROOT}/fast.img" "${ROOT}/fast"
-mount -o loop "${ROOT}/slow.img" "${ROOT}/slow"
+# Discard punches freed XFS blocks out of the sparse loop images. Without
+# it their backing tmpfs grows toward 4 GiB even with a 1.2 GiB live set,
+# exhausting the 8 GiB CI guest's default 4 GiB /tmp during extended churn.
+mount -o loop,discard "${ROOT}/fast.img" "${ROOT}/fast"
+mount -o loop,discard "${ROOT}/slow.img" "${ROOT}/slow"
 modprobe smoothfs
 mount -t smoothfs -o "pool=soak,uuid=${UUID},tiers=${ROOT}/fast:${ROOT}/slow" none "${ROOT}/server"
 chmod 1777 "${ROOT}/server"
@@ -166,7 +169,11 @@ soak_rc=0
 for p in "${p1}" "${p2}" "${p3}"; do
     wait "${p}" || { echo "ERROR: a soak writer exited non-zero" >&2; soak_rc=1; }
 done
-[[ ${soak_rc} -eq 0 ]] || exit 1
+if (( soak_rc != 0 )); then
+    df -h "${ROOT}" "${ROOT}/fast" "${ROOT}/slow" >&2 || true
+    du -h "${ROOT}/fast.img" "${ROOT}/slow.img" >&2 || true
+    exit 1
+fi
 
 sync
 # Inspect only workload files; SmoothFS's own placement log may be empty.
