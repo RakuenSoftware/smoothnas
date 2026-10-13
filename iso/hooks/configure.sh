@@ -5,8 +5,17 @@
 # The generic firstboot script reads these settings to use the same marker
 # path as the product's systemd unit rather than its /var/lib/linux fallback.
 mkdir -p "$TARGET/usr/local/lib/smoothiso"
-printf 'PRODUCT_ID=%q\nDATA_DIR=%q\n' "$PRODUCT_ID" "$DATA_DIR" \
-    > "$TARGET/usr/local/lib/smoothiso/config.sh"
+# The installer is /bin/sh (BusyBox ash), so Bash printf %q is unavailable.
+quote_config_value() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+{
+    printf 'PRODUCT_ID='
+    quote_config_value "$PRODUCT_ID"
+    printf '\nDATA_DIR='
+    quote_config_value "$DATA_DIR"
+    printf '\n'
+} > "$TARGET/usr/local/lib/smoothiso/config.sh"
 chmod 644 "$TARGET/usr/local/lib/smoothiso/config.sh"
 
 # Persist the language selected during installation. firstboot.sh reads
