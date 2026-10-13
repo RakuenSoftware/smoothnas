@@ -97,6 +97,7 @@ for spill in \
     tier_spill_rename_xdev.sh \
     tier_spill_crash_replay.sh \
     write_staging_truncate.sh \
+    write_staging_range_crash_replay.sh \
     unlink_reclaims_space.sh \
     metadata_tier_activity_gate.sh; do
     run_test "${spill}"
