@@ -195,7 +195,7 @@ func main() {
 	// Moonlight ports and the Wolf Den UI unreachable from the LAN after
 	// an update). Apply before the plugin runtime autostarts containers
 	// so the scoped table replace can't race the runtime's DNAT setup.
-	if err := firewall.Apply(firewall.GetEnabledProtocols()); err != nil {
+	if err := firewall.Apply(api.DesiredSharingProtocols(store)); err != nil {
 		log.Printf("startup firewall apply: %v", err)
 	}
 

@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -25,11 +27,24 @@ const (
 )
 
 var (
-	nameRe         = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$`)
-	arrayCommand   = exec.Command
-	arrayMkdirAll  = os.MkdirAll
-	arrayRemoveAll = os.RemoveAll
-	fstabPath      = "/etc/fstab"
+	nameRe                = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$`)
+	arrayCommand          = exec.Command
+	arrayMkdirAll         = os.MkdirAll
+	arrayRemoveAll        = os.RemoveAll
+	fstabPath             = "/etc/fstab"
+	deviceByIDDir         = "/dev/disk/by-id"
+	deviceByPathDir       = "/dev/disk/by-path"
+	bcachefsUUIDForDevice = func(path string) (string, error) {
+		out, err := arrayCommand("blkid", "-s", "UUID", "-o", "value", path).Output()
+		if err != nil {
+			return "", err
+		}
+		parsed, err := uuid.Parse(strings.TrimSpace(string(out)))
+		if err != nil {
+			return "", err
+		}
+		return parsed.String(), nil
+	}
 )
 
 // Plan is the validated shape of a filesystem array create request.
@@ -244,12 +259,49 @@ func Mount(kind, source, mountPath string) error {
 		return fmt.Errorf("mkdir %s: %w", mountPath, err)
 	}
 	if isMounted(mountPath) {
-		return EnsureFSTabEntry(source, mountPath, kind)
+		return ensurePersistentFSTabEntry(kind, source, mountPath)
 	}
 	if err := run("mount", "-t", kind, source, mountPath); err != nil {
 		return err
 	}
+	return ensurePersistentFSTabEntry(kind, source, mountPath)
+}
+
+func ensurePersistentFSTabEntry(kind, source, mountPath string) error {
+	if kind == KindBcachefs {
+		id, err := bcachefsUUIDForDevice(strings.Split(source, ":")[0])
+		if err != nil {
+			return fmt.Errorf("read bcachefs UUID for persistent mount: %w", err)
+		}
+		source = "UUID=" + id
+	}
 	return EnsureFSTabEntry(source, mountPath, kind)
+}
+
+// StableDevicePath keeps recorded array members tied to the selected devices
+// when the kernel enumerates disks in a different order after a reboot.
+func StableDevicePath(path string) string {
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return path
+	}
+	for _, dir := range []string{deviceByIDDir, deviceByPathDir} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if strings.Contains(entry.Name(), "-part") {
+				continue
+			}
+			alias := filepath.Join(dir, entry.Name())
+			resolved, err := filepath.EvalSymlinks(alias)
+			if err == nil && resolved == target {
+				return alias
+			}
+		}
+	}
+	return path
 }
 
 func EnsureFSTabEntry(source, mountPath, kind string) error {
