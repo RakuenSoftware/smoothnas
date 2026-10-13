@@ -596,7 +596,7 @@ func (h *ArraysHandler) resolveFilesystemArrayDevices(paths []string) ([]fsarray
 		if d.Assignment != "" && d.Assignment != "unassigned" {
 			return nil, fmt.Errorf("disk %s is not unassigned: %s", path, d.Assignment)
 		}
-		out = append(out, fsarray.Device{Path: d.Path, Size: d.Size})
+		out = append(out, fsarray.Device{Path: fsarray.StableDevicePath(d.Path), Size: d.Size})
 	}
 	return out, nil
 }

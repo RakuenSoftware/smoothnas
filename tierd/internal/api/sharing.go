@@ -198,6 +198,22 @@ func ReapplySharingServices(store *db.Store) {
 	}
 }
 
+// DesiredSharingProtocols keeps firewall policy aligned with operator intent
+// while asynchronous service starts wait for their exported mounts. Protocols
+// with no saved preference retain their current live-service state.
+func DesiredSharingProtocols(store *db.Store) map[string]bool {
+	enabled := enabledProtocolsForExports()
+	for _, proto := range []string{"smb", "nfs", "iscsi"} {
+		desired, err := store.GetBoolConfig(protocolEnabledConfigKey(proto), enabled[proto])
+		if err != nil {
+			log.Printf("sharing: read %s firewall state: %v", proto, err)
+			continue
+		}
+		enabled[proto] = desired
+	}
+	return enabled
+}
+
 // Route dispatches sharing requests.
 func (h *SharingHandler) Route(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
@@ -314,8 +330,9 @@ func (h *SharingHandler) toggleProtocol(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	enabled := firewall.GetEnabledProtocols()
-	if fwErr := firewall.Apply(enabled); fwErr != nil {
+	enabled := DesiredSharingProtocols(h.store)
+	enabled[proto] = req.Enabled
+	if fwErr := applyFirewallForExports(enabled); fwErr != nil {
 		fmt.Fprintf(w, `{"status":"toggled","firewall_warning":"%s"}`, fwErr)
 		return
 	}

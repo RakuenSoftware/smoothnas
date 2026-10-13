@@ -1,0 +1,58 @@
+diff --git a/installer.sh b/installer.sh
+index 0445a50..5cb7f78 100755
+--- a/installer.sh
++++ b/installer.sh
+@@ -2260,6 +2260,26 @@ HOOK
+         systemd-timesyncd systemd-resolved \
+         2>/dev/null || true
+ 
++    # Generate the CA trust bundle now so HTTPS works for tools (curl/wget)
++    # used by the bcachefs repository setup and project hooks. ca-certificates' postinst is stubbed by the
++    # debconf pre-invoke hook, so /etc/ssl/certs/ca-certificates.crt would
++    # otherwise stay empty until the post-hook cleanup runs.
++    #
++    # Do NOT call ca-certificates.postinst.real here — it sources
++    # /usr/share/debconf/confmodule and blocks waiting for debconf I/O in
++    # the d-i environment (the same reason every other debconf postinst is
++    # stubbed). Build /etc/ca-certificates.conf manually with a portable
++    # `find . | sed` pipeline (no -printf — that flag silently produced an
++    # empty file in some target environments, which left the bundle empty).
++    chroot "$TARGET" sh -c '
++        if [ -d /usr/share/ca-certificates ]; then
++            ( cd /usr/share/ca-certificates \
++                && find . -name "*.crt" -type f \
++                | sed "s|^\./||" | sort > /etc/ca-certificates.conf )
++            update-ca-certificates --fresh
++        fi
++    ' 2>/dev/null || true
++
+     configure_bcachefs_repo
+ 
+     # Filesystem array tooling for SmoothNAS-style managed arrays.
+@@ -2291,26 +2311,6 @@ HOOK
+         done
+     fi
+ 
+-    # Generate the CA trust bundle now so HTTPS works for tools (curl/wget)
+-    # used by project hooks. ca-certificates' postinst is stubbed by the
+-    # debconf pre-invoke hook, so /etc/ssl/certs/ca-certificates.crt would
+-    # otherwise stay empty until the post-hook cleanup runs.
+-    #
+-    # Do NOT call ca-certificates.postinst.real here — it sources
+-    # /usr/share/debconf/confmodule and blocks waiting for debconf I/O in
+-    # the d-i environment (the same reason every other debconf postinst is
+-    # stubbed). Build /etc/ca-certificates.conf manually with a portable
+-    # `find . | sed` pipeline (no -printf — that flag silently produced an
+-    # empty file in some target environments, which left the bundle empty).
+-    chroot "$TARGET" sh -c '
+-        if [ -d /usr/share/ca-certificates ]; then
+-            ( cd /usr/share/ca-certificates \
+-                && find . -name "*.crt" -type f \
+-                | sed "s|^\./||" | sort > /etc/ca-certificates.conf )
+-            update-ca-certificates --fresh
+-        fi
+-    ' 2>/dev/null || true
+-
+     # Product-specific packages.
+     ui_status "Installing packages" "Installing product-specific packages." 3 6
+     if [ -f /smoothiso-hooks/packages.sh ]; then

@@ -45,7 +45,7 @@ SMOOTHFS_REPO_URL="${SMOOTHFS_REPO_URL:-git@github.com:RakuenSoftware/smoothfs.g
 # Pinned to a release-please tag (preferred) or a commit SHA. git checkout
 # below resolves either; the release workflow propagates this value verbatim
 # as the manifest smoothfs_ref the updater uses for change detection.
-SMOOTHFS_REPO_REF="${SMOOTHFS_REPO_REF:-2382c218a86cbb83e73851eb59aa2071d5f764e4}"
+SMOOTHFS_REPO_REF="${SMOOTHFS_REPO_REF:-94cdfdec50ef65a50779689b65c2759b2cc04e4b}"
 SMOOTHFS_SRC_DIR="${SMOOTHFS_SRC_DIR:-}"
 # Debian architecture for the produced ISO. SmoothKernel publishes per-arch
 # artifacts in a single GitHub release; pick the matching set here.

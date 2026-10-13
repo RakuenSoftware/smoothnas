@@ -86,6 +86,7 @@ if [[ ! -d /opt/cthon04 ]]; then
 fi
 
 run_test cthon04.sh
+run_test nfs_multi_pool_identity.sh
 run_test smbtorture.sh
 run_test smb_vfs_module.sh
 
