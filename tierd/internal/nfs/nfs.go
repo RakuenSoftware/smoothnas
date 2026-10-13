@@ -17,6 +17,10 @@ import (
 
 const (
 	ServerThreads = 32
+	// MountdThreads keeps one userspace export-cache view while nfs-utils
+	// workers can disagree on implicit NFSv4 ancestor UUIDs after reloads.
+	// Data RPCs run through ServerThreads independent kernel nfsd workers.
+	MountdThreads = 1
 	MaxBlockSize  = 2 * 1024 * 1024
 
 	MountdPort = 20048
@@ -165,7 +169,7 @@ vers4.2 = y
 
 [mountd]
 port = %d
-threads = 16
+threads = %d
 
 [statd]
 port = %d
@@ -174,7 +178,7 @@ outgoing-port = %d
 [lockd]
 port = %d
 udp-port = %d
-`, ServerThreads, MountdPort, StatdPort, StatdOutgoingPort, LockdPort, LockdPort)
+`, ServerThreads, MountdPort, MountdThreads, StatdPort, StatdOutgoingPort, LockdPort, LockdPort)
 }
 
 func NfsdSystemdDropInConfig() string {
