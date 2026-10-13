@@ -56,20 +56,6 @@ install_zfs_stack() {
     systemctl enable zfs.target zfs-import.target zfs-import-cache.service zfs-mount.service 2>/dev/null || true
 }
 
-install_bcachefs_stack() {
-    # The installer treats bcachefs tools as optional. When they are present,
-    # ensure the filesystem is actually usable on kernels that ship no driver.
-    if ! command -v bcachefs >/dev/null 2>&1; then
-        echo "bcachefs tools unavailable; skipping optional bcachefs support."
-        return 0
-    fi
-    if ! modprobe bcachefs 2>/dev/null; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y bcachefs-kernel-dkms
-        modprobe bcachefs
-    fi
-    grep -qxF 'bcachefs' /etc/modules 2>/dev/null || echo 'bcachefs' >> /etc/modules
-}
-
 install_smoothfs_dkms() {
     local target_kernel
     target_kernel=$(uname -r)
@@ -203,7 +189,6 @@ echo "Installer language persisted: $INSTALL_LANG"
 apt-get update -qq
 install_smoothkernel_headers
 install_zfs_stack
-install_bcachefs_stack
 install_smoothfs_dkms
 install_firstboot_service_packages
 install_smoothfs_samba_vfs
