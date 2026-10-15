@@ -62,3 +62,18 @@ The earlier `.254` file-loss report remains unroot-caused; these checks do not
 establish that it is fixed. The `.253` host's intermittent storage flush delays
 remain an infrastructure observation. ARM hardware and a newly built final ISO
 still require release validation after these changes merge.
+
+## CI kernel download follow-up
+
+The initial protocol CI attempt stopped before module build or protocol tests:
+Ubuntu's mainline kernel mirror returned HTTP 503. The default guest now uses
+this repository's ISO-pinned SmoothKernel release, downloaded from its GitHub
+release with both package hashes checked before installation. An explicit
+`SMOOTHFS_GUEST_KERNEL` override retains the upstream Ubuntu matrix path with
+bounded transport retries. These download retries do not rerun or skip module/protocol tests.
+
+The real pinned image and headers downloaded and passed SHA-256 verification.
+SmoothFS compiled successfully against those exact headers with Debian GCC 14
+in the dedicated QA appliance; its loaded module was not replaced by this check.
+Four HTTP regression tests cover transient 503 recovery, fatal 404 handling,
+valid release checksums and rejection of a corrupt package before installation.

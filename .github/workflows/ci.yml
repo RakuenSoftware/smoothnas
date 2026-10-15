@@ -53,6 +53,9 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpam0g-dev build-essential
 
+      - name: Test kernel download retries
+        run: python3 tests/ci/test_kernel_download_retries.py
+
       - name: Run Go tests
         working-directory: tierd
         run: CGO_ENABLED=1 go test ./... -count=1
