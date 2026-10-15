@@ -233,7 +233,7 @@ func newRouterFull(store *db.Store, version string, startTime time.Time, history
 			benchmarkHandler.Route(w, r)
 		case strings.HasPrefix(path, "/api/network-tests/"):
 			networkTestsHandler.Route(w, r)
-		case strings.HasPrefix(path, "/api/jobs/"):
+		case path == "/api/jobs" || strings.HasPrefix(path, "/api/jobs/"):
 			jobsHandler.Route(w, r)
 		case strings.HasPrefix(path, "/api/system/"):
 			systemHandler.Route(w, r)

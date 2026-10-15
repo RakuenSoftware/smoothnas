@@ -1187,6 +1187,8 @@ const en: LanguageTranslations = {
   'error.sharing.share_name_taken': 'A share with that name already exists',
   'error.sharing.share_not_found': 'Share not found',
   'error.sharing.invalid_export_id': 'Invalid export id',
+  'error.sharing.duplicate_export_client': 'Duplicate NFS export client',
+  'error.sharing.export_exists': 'An NFS export already exists for this path and client',
   'error.sharing.export_not_found': 'NFS export not found',
   'error.sharing.iqn_required': 'IQN is required',
   'error.sharing.target_backing_required': 'Specify exactly one of block_device or backing_file',

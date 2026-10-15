@@ -142,7 +142,7 @@ func TestMountNFSFailsFastWhenPortUnreachable(t *testing.T) {
 	}
 
 	start := time.Now()
-	err := mount(Config{TargetType: "nfs", Host: "192.0.2.1", Share: "/share"}, t.TempDir())
+	err := mount(context.Background(), Config{TargetType: "nfs", Host: "192.0.2.1", Share: "/share"}, t.TempDir())
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -164,7 +164,7 @@ func TestMountNFSProceedsWhenPortReachable(t *testing.T) {
 	// but the important thing is we get past the port-check step.
 	nfsDialFn = func(_ context.Context, addr string) error { return nil }
 
-	err := mount(Config{TargetType: "nfs", Host: "192.0.2.1", Share: "/share"}, t.TempDir())
+	err := mount(context.Background(), Config{TargetType: "nfs", Host: "192.0.2.1", Share: "/share"}, t.TempDir())
 	if err == nil {
 		t.Fatal("expected mount to fail (no real NFS server)")
 	}

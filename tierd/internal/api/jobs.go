@@ -137,7 +137,7 @@ func (h *JobsHandler) Route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rest := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
+	rest := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/api/jobs"), "/")
 	if rest == "" {
 		// GET /api/jobs?tag=...
 		tag := r.URL.Query().Get("tag")

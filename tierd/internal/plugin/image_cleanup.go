@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -72,24 +74,74 @@ func (l *Lifecycle) imageRefsInUse(ctx context.Context) (map[string]bool, bool) 
 	return inUse, true
 }
 
-// pruneUnusedImages removes each ref that no live managed container still
-// references. Best-effort: a RemoveImage failure is swallowed (idempotent on
-// 404), and if the in-use set can't be computed we skip removal entirely rather
-// than risk deleting an image another running plugin depends on.
-func (l *Lifecycle) pruneUnusedImages(ctx context.Context, refs []string) {
+// pruneUnusedImages removes all aliases of an uninstalled plugin's images,
+// while retaining images referenced by other installed plugins or containers.
+func (l *Lifecycle) pruneUnusedImages(ctx context.Context, name string, refs []string) error {
 	if len(refs) == 0 {
-		return
+		return nil
 	}
 	inUse, ok := l.imageRefsInUse(ctx)
 	if !ok {
-		return
+		return fmt.Errorf("query containers before image cleanup")
 	}
-	for _, ref := range refs {
-		if ref == "" || inUse[normalizeImageRef(ref)] {
+	plugins, err := l.store.List()
+	if err != nil {
+		return err
+	}
+	for _, plugin := range plugins {
+		if plugin.Name == name {
 			continue
 		}
-		_ = l.rt.RemoveImage(ctx, ref)
+		rec, err := l.store.Get(plugin.Name)
+		if err != nil {
+			return err
+		}
+		for _, ref := range pluginImageRefs(rec) {
+			inUse[normalizeImageRef(ref)] = true
+		}
 	}
+	images, err := l.rt.ListImages(ctx)
+	if err != nil {
+		return err
+	}
+	wanted := map[string]bool{}
+	for _, ref := range refs {
+		wanted[normalizeImageRef(ref)] = true
+	}
+	// The runtime untags one reference per deletion, including ID requests.
+	// Reclaim every alias only after checking the complete shared-image inventory.
+	removed := map[string]bool{}
+	var errs []error
+	for _, img := range coalesceImagesByID(images) {
+		if !imageTracked(img, wanted) {
+			continue
+		}
+		aliases := append(append([]string{}, img.RepoTags...), img.RepoDigests...)
+		if img.Containers > 0 || imageTracked(img, inUse) || inUse[normalizeImageRef(img.ID)] {
+			for _, ref := range aliases {
+				inUse[normalizeImageRef(ref)] = true
+			}
+			continue
+		}
+		if err := l.removeImageTemplate(ctx, img); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for _, alias := range aliases {
+			removed[normalizeImageRef(alias)] = true
+		}
+	}
+	for _, ref := range refs {
+		n := normalizeImageRef(ref)
+		if ref == "" || inUse[n] || removed[n] {
+			continue
+		}
+		if err := l.rt.RemoveImage(ctx, ref); err != nil {
+			errs = append(errs, err)
+		}
+		removed[n] = true
+	}
+	return errors.Join(errs...)
 }
 
 // CleanupOrphanedImages reclaims runtime image templates that no longer belong
@@ -119,7 +171,7 @@ func (l *Lifecycle) CleanupOrphanedImages(ctx context.Context, minAge time.Durat
 
 	cutoff := time.Now().Add(-minAge)
 	removed := 0
-	for _, img := range images {
+	for _, img := range coalesceImagesByID(images) {
 		if err := ctx.Err(); err != nil {
 			return removed, err
 		}
@@ -135,11 +187,7 @@ func (l *Lifecycle) CleanupOrphanedImages(ctx context.Context, minAge time.Durat
 		if minAge > 0 && img.Created > 0 && time.Unix(img.Created, 0).After(cutoff) {
 			continue
 		}
-		ref := removalRef(img)
-		if ref == "" {
-			continue
-		}
-		if err := l.rt.RemoveImage(ctx, ref); err != nil {
+		if err := l.removeImageTemplate(ctx, img); err != nil {
 			// Best-effort sweep: log-and-continue is the caller's job; one
 			// stuck image shouldn't abort the rest.
 			continue
@@ -151,6 +199,9 @@ func (l *Lifecycle) CleanupOrphanedImages(ctx context.Context, minAge time.Durat
 
 // imageTracked reports whether any of an image's tags/digests is in keep.
 func imageTracked(img runtime.ImageSummary, keep map[string]bool) bool {
+	if keep[normalizeImageRef(img.ID)] {
+		return true
+	}
 	for _, t := range img.RepoTags {
 		if keep[normalizeImageRef(t)] {
 			return true
@@ -164,18 +215,58 @@ func imageTracked(img runtime.ImageSummary, keep map[string]bool) bool {
 	return false
 }
 
-// removalRef picks the ref to pass to RemoveImage: a real tag when present,
-// else a digest ref, else the image ID.
-func removalRef(img runtime.ImageSummary) string {
-	for _, t := range img.RepoTags {
-		if t = strings.TrimSpace(t); t != "" && t != "<none>:<none>" {
-			return t
+// removeImageTemplate untags every known alias before deleting the final
+// backing template. Verify inventory so an HTTP 200 untag is never mistaken
+// for complete reclamation. Runtime conflicts and I/O errors remain visible.
+func (l *Lifecycle) removeImageTemplate(ctx context.Context, img runtime.ImageSummary) error {
+	refs := append(append(append([]string{}, img.RepoTags...), img.RepoDigests...), img.ID)
+	seen := map[string]bool{}
+	for _, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if ref == "" || ref == "<none>:<none>" || seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		if err := l.rt.RemoveImage(ctx, ref); err != nil {
+			return err
 		}
 	}
-	for _, d := range img.RepoDigests {
-		if d = strings.TrimSpace(d); d != "" {
-			return d
+	remaining, err := l.rt.ListImages(ctx)
+	if err != nil {
+		return err
+	}
+	for _, other := range remaining {
+		if (img.ID != "" && other.ID == img.ID) || imageTracked(other, seen) {
+			return fmt.Errorf("image %s still cached after removing aliases", img.ID)
 		}
 	}
-	return strings.TrimSpace(img.ID)
+	return nil
+}
+
+// The runtime can return a separate inventory row per alias of one template.
+// Combine them before deciding whether that template is shared or removable.
+func coalesceImagesByID(images []runtime.ImageSummary) []runtime.ImageSummary {
+	var out []runtime.ImageSummary
+	indices := map[string]int{}
+	for _, img := range images {
+		if index, ok := indices[img.ID]; ok && img.ID != "" {
+			existing := &out[index]
+			existing.RepoTags = append(existing.RepoTags, img.RepoTags...)
+			existing.RepoDigests = append(existing.RepoDigests, img.RepoDigests...)
+			if img.Containers > existing.Containers {
+				existing.Containers = img.Containers
+			}
+			if img.Created > existing.Created {
+				existing.Created = img.Created
+			}
+			continue
+		}
+		if img.ID != "" {
+			indices[img.ID] = len(out)
+		}
+		img.RepoTags = append([]string{}, img.RepoTags...)
+		img.RepoDigests = append([]string{}, img.RepoDigests...)
+		out = append(out, img)
+	}
+	return out
 }

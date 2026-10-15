@@ -274,3 +274,60 @@ func TestEnsureNFSExportServingEnablesFirewall(t *testing.T) {
 		t.Fatalf("firewall protocols = %#v, want %#v", applied, want)
 	}
 }
+
+func TestCreateNFSExportDuplicateAndApplyRollback(t *testing.T) {
+	h := newTestSharingHandler(t)
+	origEnable, origApply, origEnabled, origWrite := enableNFSServiceForExports, applyFirewallForExports, enabledProtocolsForExports, writeNFSExports
+	t.Cleanup(func() {
+		enableNFSServiceForExports, applyFirewallForExports, enabledProtocolsForExports, writeNFSExports = origEnable, origApply, origEnabled, origWrite
+	})
+	enableNFSServiceForExports = func(bool) error { return nil }
+	applyFirewallForExports = func(map[string]bool) error { return nil }
+	enabledProtocolsForExports = func() map[string]bool { return map[string]bool{} }
+	fail := false
+	writeNFSExports = func(exports []nfs.Export) error {
+		if fail && len(exports) > 1 {
+			return errors.New("exportfs failed")
+		}
+		return nil
+	}
+	path := t.TempDir()
+	create := func(path string) int {
+		payload, _ := json.Marshal(map[string]any{"path": path, "networks": []string{"127.0.0.1"}})
+		w := httptest.NewRecorder()
+		h.Route(w, httptest.NewRequest(http.MethodPost, "/api/nfs/exports", stringBody(string(payload))))
+		return w.Code
+	}
+	if code := create(path); code != 201 {
+		t.Fatalf("create: %d", code)
+	}
+	if code := create(path); code != 409 {
+		t.Fatalf("duplicate: %d", code)
+	}
+	fail = true
+	if code := create(t.TempDir()); code != 500 {
+		t.Fatalf("failed apply: %d", code)
+	}
+	exports, err := h.store.ListNfsExports()
+	if err != nil || len(exports) != 1 || exports[0].Path != path {
+		t.Fatalf("rollback: %+v, %v", exports, err)
+	}
+	fail = false
+	concurrentPath := t.TempDir()
+	results := make(chan int, 2)
+	for range 2 {
+		go func() { results <- create(concurrentPath) }()
+	}
+	codes := map[int]int{}
+	for range 2 {
+		codes[<-results]++
+	}
+	if codes[201] != 1 || codes[409] != 1 {
+		t.Fatalf("concurrent duplicate: %v", codes)
+	}
+	exports, err = h.store.ListNfsExports()
+	if err != nil || len(exports) != 2 {
+		t.Fatalf("concurrent create persisted duplicate: %+v, %v", exports, err)
+	}
+
+}

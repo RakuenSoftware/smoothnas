@@ -797,8 +797,9 @@ func pluginMaterialiseLock(name string) *sync.Mutex {
 	return mu.(*sync.Mutex)
 }
 
-// AutostartAll materialises and starts every installed plugin that is not
-// already running. It continues across per-plugin failures.
+// AutostartAll materialises and starts installed plugins unless the operator
+// stopped them. Runtime observations never replace durable stop intent.
+// It continues across per-plugin failures.
 func (l *Lifecycle) AutostartAll(ctx context.Context) error {
 	plugins, err := l.store.List()
 	if err != nil {
@@ -806,6 +807,14 @@ func (l *Lifecycle) AutostartAll(ctx context.Context) error {
 	}
 	var errs []error
 	for _, p := range plugins {
+		stopped, err := l.store.StoppedByUser(p.Name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: read stop intent: %w", p.Name, err))
+			continue
+		}
+		if stopped {
+			continue
+		}
 		if p.State == StateRunning {
 			continue
 		}
@@ -1237,6 +1246,9 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if err := l.store.SetStoppedByUser(name, false); err != nil {
+		return err
+	}
 	if l.isCompose(rec) {
 		spec := l.composeSpec(rec)
 		secrets, err := l.store.GetComposeSecrets(name)
@@ -1489,6 +1501,9 @@ func (l *Lifecycle) Stop(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if err := l.store.SetStoppedByUser(name, true); err != nil {
+		return err
+	}
 	if l.isCompose(rec) {
 		if err := l.backend.Stop(ctx, l.composeSpec(rec)); err != nil {
 			return err
@@ -1546,8 +1561,7 @@ func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 		// templates leak on the tier after uninstall. Reclaim them here, mirroring
 		// the manifest path below. Guarded so an image another running plugin still
 		// references is left intact.
-		l.pruneUnusedImages(ctx, pluginImageRefs(rec))
-		return nil
+		return l.pruneUnusedImages(ctx, name, pluginImageRefs(rec))
 	}
 
 	if l.proxy != nil {
@@ -1577,37 +1591,13 @@ func (l *Lifecycle) Demolish(ctx context.Context, name string) error {
 		}
 	}
 
-	// Drop per-service images: OCI refs and committed lxc-distro templates.
+	refs := pluginImageRefs(rec)
 	for _, sr := range rec.Services {
-		switch sr.ArtifactType {
-		case ArtifactOCIImage:
-			seen := map[string]bool{}
-			for _, ref := range rec.ContainerRefs {
-				if ref.Service != sr.Service {
-					continue
-				}
-				removeRef := ref.ResolvedRef
-				if removeRef == "" {
-					removeRef = ref.ImageRef
-				}
-				if removeRef == "" || seen[removeRef] {
-					continue
-				}
-				seen[removeRef] = true
-				_ = l.rt.RemoveImage(ctx, removeRef)
-			}
-			if sr.ImageRef != "" && !seen[sr.ImageRef] {
-				_ = l.rt.RemoveImage(ctx, sr.ImageRef)
-			}
-		case ArtifactLXCDistro:
-			if sr.ImageRef != "" && strings.HasPrefix(sr.ImageRef, "smoothnas-plugin-") {
-				_ = l.rt.RemoveImage(ctx, sr.ImageRef)
-			} else {
-				_ = l.rt.RemoveImage(ctx, SetupTemplateImage(rec.Plugin.Name, sr.Service, rec.Plugin.Version))
-			}
+		if sr.ArtifactType == ArtifactLXCDistro && (sr.ImageRef == "" || !strings.HasPrefix(sr.ImageRef, "smoothnas-plugin-")) {
+			refs = append(refs, SetupTemplateImage(rec.Plugin.Name, sr.Service, rec.Plugin.Version))
 		}
 	}
-	return nil
+	return l.pruneUnusedImages(ctx, name, refs)
 }
 
 // Status returns the aggregate plugin state plus per-(service,instance)

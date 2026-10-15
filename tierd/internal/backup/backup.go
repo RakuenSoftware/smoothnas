@@ -730,7 +730,7 @@ func rsyncMount(ctx context.Context, cfg Config, progress func(msg string, done,
 	defer os.Remove(mountDir)
 
 	progress("Mounting remote target...", -1, -1)
-	if err := mount(cfg, mountDir); err != nil {
+	if err := mount(ctx, cfg, mountDir); err != nil {
 		return "", fmt.Errorf("mount failed: %w", err)
 	}
 	defer umount(mountDir) //nolint:errcheck
@@ -838,7 +838,7 @@ func rsyncMount(ctx context.Context, cfg Config, progress func(msg string, done,
 				attempt+1, maxStaleRetries+1, cfg.Host, cfg.Share)
 			progress(fmt.Sprintf("NFS source went stale; remounting %s:%s and retrying...", cfg.Host, cfg.Share), -1, -1)
 			_ = forceUmountFn(mountDir)
-			if remountErr := mount(cfg, mountDir); remountErr != nil {
+			if remountErr := mount(ctx, cfg, mountDir); remountErr != nil {
 				return "", fmt.Errorf("remount after stale NFS (%w): %w", rsyncErr, remountErr)
 			}
 			continue
@@ -1095,7 +1095,7 @@ func runCP(ctx context.Context, cfg Config, progress func(msg string, done, tota
 	defer os.Remove(mountDir)
 
 	progress("Mounting remote target...", -1, -1)
-	if err := mount(cfg, mountDir); err != nil {
+	if err := mount(ctx, cfg, mountDir); err != nil {
 		return "", fmt.Errorf("mount failed: %w", err)
 	}
 	defer umount(mountDir) //nolint:errcheck
@@ -1163,8 +1163,8 @@ func runCP(ctx context.Context, cfg Config, progress func(msg string, done, tota
 // checkNFSPort does a short TCP probe to port 2049 on host. mount.nfs can
 // hang for up to two minutes when the server is unreachable because it retries
 // the initial TCP connection; a probe here surfaces the real cause immediately.
-func checkNFSPort(host string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), nfsPortCheckTimeout)
+func checkNFSPort(parent context.Context, host string) error {
+	ctx, cancel := context.WithTimeout(parent, nfsPortCheckTimeout)
 	defer cancel()
 	if err := nfsDialFn(ctx, net.JoinHostPort(host, "2049")); err != nil {
 		return fmt.Errorf("NFS server %s port 2049 not reachable: %w", host, err)
@@ -1173,27 +1173,41 @@ func checkNFSPort(host string) error {
 }
 
 // mount mounts an NFS or SMB share at mountDir.
-func mount(cfg Config, mountDir string) error {
+func mount(ctx context.Context, cfg Config, mountDir string) error {
 	var cmd *exec.Cmd
 	switch cfg.TargetType {
 	case "nfs":
-		if err := checkNFSPort(cfg.Host); err != nil {
+		if err := checkNFSPort(ctx, cfg.Host); err != nil {
 			return err
 		}
-		cmd = exec.Command("mount", "-t", "nfs", "-o", nfsMountOpts,
+		cmd = exec.CommandContext(ctx, "mount", "-t", "nfs", "-o", nfsMountOpts,
 			fmt.Sprintf("%s:%s", cfg.Host, cfg.Share),
 			mountDir,
 		)
 	case "smb":
 		opts := fmt.Sprintf("user=%s,password=%s,vers=3.0", cfg.SMBUser, cfg.SMBPass)
-		cmd = exec.Command("mount", "-t", "cifs",
+		cmd = exec.CommandContext(ctx, "mount", "-t", "cifs",
 			fmt.Sprintf("//%s/%s", cfg.Host, cfg.Share),
 			mountDir, "-o", opts,
 		)
 	default:
 		return fmt.Errorf("unknown target type: %s", cfg.TargetType)
 	}
+	// mount forks filesystem helpers. Cancel the whole process group so a
+	// surviving mount.nfs/mount.cifs cannot keep the job or its pipes alive.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
