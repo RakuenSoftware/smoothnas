@@ -5,6 +5,7 @@
 package nfs
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const (
@@ -396,15 +398,16 @@ func EnableService(enableV3 bool) error {
 	if err := systemctl("enable", "nfs-kernel-server"); err != nil {
 		return err
 	}
+	// Start without restarting an already-serving server.
 	// Use --no-block: nfs-kernel-server has RequiresMountsFor on every
 	// exported path, so it cannot start until those mountpoints are live.
 	// On a cold boot the smoothfs placement replay can run for many minutes;
 	// waiting synchronously here would time out the HTTP request.  The unit
 	// is enabled above and will start automatically once the mounts appear.
-	if err := systemctl("restart", "--no-block", "nfs-kernel-server"); err != nil {
+	if err := systemctl("start", "--no-block", "nfs-kernel-server"); err != nil {
 		return err
 	}
-	// nfs-kernel-server restarted non-blocking above, so nfsd may not have
+	// nfs-kernel-server started non-blocking above, so nfsd may not have
 	// initialised its procfs yet. The config file (smoothnas.conf) already
 	// contains the right thread count and takes effect on restart, so a
 	// failure here is non-fatal — log and continue.
@@ -412,6 +415,35 @@ func EnableService(enableV3 bool) error {
 		log.Printf("nfs: runtime thread tuning skipped (nfsd not ready yet): %v", err)
 	}
 	return nil
+}
+
+// EnableServiceReady is used by interactive export creation: success means
+// clients can connect, rather than only that systemd queued a start job.
+func EnableServiceReady(enableV3 bool) error {
+	if err := EnableService(enableV3); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return waitForServer(ctx, "127.0.0.1:2049")
+}
+
+func waitForServer(ctx context.Context, address string) error {
+	dialer := net.Dialer{Timeout: time.Second}
+	for {
+		conn, err := dialer.DialContext(ctx, "tcp", address)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("NFS server not ready: %w", ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
 
 func systemctl(args ...string) error {

@@ -18,6 +18,7 @@ export default function Updates() {
   const [updateApplying, setUpdateApplying] = useState(false);
   const [updateStage, setUpdateStage] = useState('');
   const [updateError, setUpdateError] = useState('');
+  const [checkError, setCheckError] = useState('');
   const [pkgApplying, setPkgApplying] = useState(false);
   const [pkgStage, setPkgStage] = useState('');
   const [pkgError, setPkgError] = useState('');
@@ -26,10 +27,12 @@ export default function Updates() {
   const reconnectTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pkgTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const sawProgressRef = useRef(false);
+  const mountedRef = useRef(false);
 
   useEffect(() => {
+    mountedRef.current = true;
     loadData();
-    return () => { clearIntervalSafe(progressTimerRef); clearIntervalSafe(reconnectTimerRef); clearIntervalSafe(pkgTimerRef); };
+    return () => { mountedRef.current = false; clearIntervalSafe(progressTimerRef); clearIntervalSafe(reconnectTimerRef); clearIntervalSafe(pkgTimerRef); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -41,8 +44,24 @@ export default function Updates() {
     setLoadingChannel(true);
     api.getUpdateChannel().then((c: any) => { setUpdateChannel(c.channel); setLoadingChannel(false); }).catch(() => setLoadingChannel(false));
     checkForUpdates();
+    api.getUpdateProgress().then((p: any) => {
+      if (p.error || p.stage === 'failed') {
+        clearIntervalSafe(progressTimerRef);
+        setUpdateError(p.error || t('updates.error.stoppedUnexpectedly'));
+        setUpdateApplying(false);
+      } else if (p.stage && p.stage !== 'idle' && p.stage !== 'complete') {
+        setUpdateError('');
+        setUpdateApplying(true);
+        setUpdateStage(p.stage);
+        sawProgressRef.current = true;
+        pollProgress();
+      }
+    }).catch(() => {});
     api.getDebianProgress().then((p: any) => {
-      if (p.stage && p.stage !== 'idle' && p.stage !== 'complete' && p.stage !== 'failed') {
+      if (p.error || p.stage === 'failed') {
+        setPkgError(p.error || t('updates.error.stoppedUnexpectedly'));
+        setPkgApplying(false);
+      } else if (p.stage && p.stage !== 'idle' && p.stage !== 'complete') {
         setPkgApplying(true);
         setPkgStage(p.stage);
         pollPackageProgress();
@@ -59,7 +78,7 @@ export default function Updates() {
     }
     if (cachedUpdateInfo) setUpdateInfo(cachedUpdateInfo);
     setUpdateChecking(true);
-    setUpdateError('');
+    setCheckError('');
     api.checkUpdate().then((info: any) => {
       if (!info) {
         setUpdateChecking(false);
@@ -75,7 +94,7 @@ export default function Updates() {
       setUpdateInfo(info);
       setUpdateChecking(false);
     }).catch((e: any) => {
-      if (!cachedUpdateInfo) setUpdateError(extractError(e, t('updates.error.check')));
+      if (!cachedUpdateInfo) setCheckError(extractError(e, t('updates.error.check')));
       setUpdateChecking(false);
     });
   }
@@ -130,14 +149,16 @@ export default function Updates() {
   }
 
   function pollProgress() {
+    if (!mountedRef.current) return;
+    clearIntervalSafe(progressTimerRef);
     progressTimerRef.current = setInterval(() => {
       api.getUpdateProgress().then((p: any) => {
         setUpdateStage(p.stage);
-        if (p.error) {
-          setUpdateError(p.error);
+        if (p.error || p.stage === 'failed') {
+          setUpdateError(p.error || t('updates.error.stoppedUnexpectedly'));
           setUpdateApplying(false);
           clearIntervalSafe(progressTimerRef);
-        } else if (p.stage === 'restarting') {
+        } else if ((p.stage === 'restarting' || p.stage === 'rebooting')) {
           clearIntervalSafe(progressTimerRef);
           setUpdateStage(t('updates.stage.restarting'));
           waitForReconnect();
@@ -163,6 +184,8 @@ export default function Updates() {
   }
 
   function waitForReconnect() {
+    if (!mountedRef.current) return;
+    clearIntervalSafe(reconnectTimerRef);
     reconnectTimerRef.current = setInterval(() => {
       api.getHealth().then(() => {
         clearIntervalSafe(reconnectTimerRef);
@@ -183,6 +206,8 @@ export default function Updates() {
   }
 
   function pollPackageProgress() {
+    if (!mountedRef.current) return;
+    clearIntervalSafe(pkgTimerRef);
     pkgTimerRef.current = setInterval(() => {
       api.getDebianProgress().then((p: any) => {
         setPkgStage(p.stage);
@@ -228,6 +253,7 @@ export default function Updates() {
               </div>
             </div>
 
+            {checkError && <div className="error-msg">{checkError}</div>}
             {updateError && <div className="error-msg">{updateError}</div>}
             {updateInfo && (() => {
               const chInfo = updateInfo[updateChannel as 'stable' | 'testing' | 'jbailes'];

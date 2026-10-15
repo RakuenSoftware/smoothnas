@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, testing]
 
 permissions:
   contents: read
@@ -53,6 +53,9 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpam0g-dev build-essential
 
+      - name: Test kernel download retries
+        run: python3 tests/ci/test_kernel_download_retries.py
+
       - name: Run Go tests
         working-directory: tierd
         run: CGO_ENABLED=1 go test ./... -count=1
@@ -98,3 +101,36 @@ jobs:
       - name: Type check
         working-directory: tierd-ui
         run: npx tsc --noEmit
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Test update recovery in Chromium
+        run: |
+          python -m pip install playwright==1.64.0
+          python -m playwright install --with-deps chromium
+          npm --prefix tierd-ui run dev -- --host 127.0.0.1 > /tmp/vite.log 2>&1 &
+          trap 'kill $!' EXIT
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:5173/ >/dev/null && break
+            sleep 1
+          done
+          python tests/browser/update_recovery.py
+
+  test-runtime-network:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tierd/go.mod
+      - name: Install runtime dependencies
+        run: sudo apt-get update && sudo apt-get install -y lxc-dev pkg-config patch nftables iptables iproute2
+      - name: Build patched runtime
+        run: scripts/build-smoothnas-runtime.sh
+      - name: Test repeated bridge reconciliation preserves NAT and published ports
+        run: |
+          cd runtime/build/LXC2Docker
+          GOTOOLCHAIN=auto go test -c -o /tmp/runtime-network.test ./internal/lxc
+          sudo env LXC2DOCKER_NETWORK_TEST=1 unshare --net /tmp/runtime-network.test -test.run '^TestEnsureBridgeNATRemainsBounded$' -test.v

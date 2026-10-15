@@ -17,7 +17,7 @@ jobs:
     name: protocol and mixed-client soak
     # Runs on a stock GitHub-hosted runner. SmoothFS needs a >=6.18 kernel
     # (mnt_idmap VFS API) that GitHub's runner images do not ship, so we
-    # boot a clean >=6.18 mainline kernel under virtme-ng/QEMU (KVM via the
+    # boot the ISO-pinned SmoothKernel under virtme-ng/QEMU (KVM via the
     # runner's /dev/kvm), build the module + Samba VFS against it, and run
     # the protocol gate + mixed soak inside that guest.
     #
@@ -60,7 +60,7 @@ jobs:
           ref: ${{ steps.pin.outputs.ref }}
           path: deps/smoothfs
 
-      - name: Run SmoothFS protocol gate + mixed soak in a >=6.18 guest
+      - name: Run SmoothFS protocol gate + mixed soak on the ISO kernel
         run: bash scripts/ci/smoothfs-protocol-gate-ci.sh
         env:
           SMOOTHFS_CHECKOUT: deps/smoothfs
