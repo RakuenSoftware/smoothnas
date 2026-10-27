@@ -15,7 +15,6 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/plugin"
 	"github.com/JBailes/SmoothNAS/tierd/internal/smart"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tiering"
-	"github.com/JBailes/SmoothNAS/tierd/internal/updater"
 )
 
 // NewRouter builds the HTTP handler tree for the tierd API.
@@ -104,8 +103,7 @@ func newRouterFull(store *db.Store, version string, startTime time.Time, history
 	networkHandler := NewNetworkHandler(store)
 	benchmarkHandler := NewBenchmarkHandler()
 	networkTestsHandler := NewNetworkTestsHandler()
-	upd := updater.New(version)
-	systemHandler := NewSystemHandler(mon, upd)
+	systemHandler := NewSystemHandler(mon)
 	jobsHandler := NewJobsHandler()
 	tieringHandler := NewTieringHandler(store)
 	smoothfsHandler := NewSmoothfsHandler(store)

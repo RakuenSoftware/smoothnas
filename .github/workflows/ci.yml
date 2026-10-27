@@ -53,8 +53,6 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpam0g-dev build-essential
 
-      - name: Test kernel download retries
-        run: python3 tests/ci/test_kernel_download_retries.py
 
       - name: Run Go tests
         working-directory: tierd
@@ -106,7 +104,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Test update recovery in Chromium
+      - name: Test the Updates page in Chromium
         run: |
           python -m pip install playwright==1.64.0
           python -m playwright install --with-deps chromium
@@ -116,7 +114,7 @@ jobs:
             curl --fail --silent http://127.0.0.1:5173/ >/dev/null && break
             sleep 1
           done
-          python tests/browser/update_recovery.py
+          python tests/browser/updates_page.py
 
   test-runtime-network:
     runs-on: ubuntu-24.04
@@ -134,3 +132,65 @@ jobs:
           cd runtime/build/LXC2Docker
           GOTOOLCHAIN=auto go test -c -o /tmp/runtime-network.test ./internal/lxc
           sudo env LXC2DOCKER_NETWORK_TEST=1 unshare --net /tmp/runtime-network.test -test.run '^TestEnsureBridgeNATRemainsBounded$' -test.v
+
+  package:
+    # The smoothnas package is otherwise only built by the release pipeline.
+    # Build it, and install it the way the installer does: with apt, from the
+    # Smooth* archive, on Debian 13. That pulls SmoothKernel, OpenZFS and
+    # smoothfs from the archive and has DKMS build both modules against
+    # SmoothKernel.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tierd/go.mod
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tierd-ui/package-lock.json
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpam0g-dev build-essential lxc-dev pkg-config patch
+      - name: Build tierd, the UI and the plugin runtime
+        run: |
+          (cd tierd && CGO_ENABLED=1 go build -ldflags "-X main.version=0.0.0-ci" -o ../bin/tierd ./cmd/tierd/)
+          (cd tierd-ui && echo '//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}' >> .npmrc && npm ci && npm run build)
+          scripts/build-smoothnas-runtime.sh
+      - name: Build the package
+        run: |
+          ./packaging/build-deb.sh 0.0.0-ci amd64 bin/tierd bin/docker-lxc-daemon tierd-ui/dist/smoothnas-ui dist
+          dpkg-deb --info dist/smoothnas_0.0.0-ci_amd64.deb
+      - name: Install it with apt on Debian 13
+        run: |
+          docker run --rm -v "$PWD:/src:ro" debian:trixie bash -euo pipefail -c '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq ca-certificates systemd >/dev/null
+            # What packages.sh sets up before installing smoothnas.
+            install -D -m 644 /src/packaging/smoothnas/usr/share/keyrings/smooth-archive-keyring.gpg \
+              /usr/share/keyrings/smooth-archive-keyring.gpg
+            echo "deb [signed-by=/usr/share/keyrings/smooth-archive-keyring.gpg] https://updates.rakuensoftware.com/public common smoothnas" \
+              > /etc/apt/sources.list.d/smoothapt-install.list
+            printf "Package: linux-image-* linux-headers-*\nPin: release o=Debian\nPin-Priority: -1\n" \
+              > /etc/apt/preferences.d/smoothnas-no-debian-kernel
+            apt-get update
+            apt-get install -y /src/dist/smoothnas_0.0.0-ci_amd64.deb
+            rm /etc/apt/sources.list.d/smoothapt-install.list
+            dpkg-query -W smoothnas linux-image-smoothkernel openzfs-zfsutils openzfs-zfs-dkms smoothfs-dkms smoothfs-samba-vfs samba
+            if ls /boot/vmlinuz-* | grep -v smoothkernel; then echo "a non-SmoothKernel kernel was installed" >&2; exit 1; fi
+            test -x /usr/sbin/tierd
+            test -f /usr/share/tierd-ui/index.html
+            test -x /usr/lib/smoothnas/docker-lxc-daemon
+            for unit in tierd tierd-host-init smoothnas-runtime smoothnas-tls-init smoothnas-gpu-init; do
+              systemctl is-enabled "$unit.service"
+            done
+            # DKMS built both storage modules for SmoothKernel.
+            kver=$(dpkg-query -W -f="\${Depends}" linux-image-smoothkernel | sed -n "s/^linux-image-\([^ ,]*\).*/\1/p")
+            dkms status
+            dkms status -k "$kver" | grep -E "^zfs/.*: installed"
+            dkms status -k "$kver" | grep -E "^smoothfs/.*: installed"
+            # The package keeps its own apt source; apt reads it cleanly.
+            apt-get update > /tmp/update.log 2>&1 || { cat /tmp/update.log; exit 1; }
+            if grep -E "^(Err|E):" /tmp/update.log; then exit 1; fi
+          '

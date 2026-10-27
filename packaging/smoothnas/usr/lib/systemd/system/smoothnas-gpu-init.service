@@ -1,0 +1,12 @@
+[Unit]
+Description=Prepare host GPUs for SmoothNAS plugin runtimes
+DefaultDependencies=no
+Before=systemd-udev-trigger.service
+Before=smoothnas-runtime.service tierd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/smoothnas/gpu-init.sh
+
+[Install]
+WantedBy=sysinit.target

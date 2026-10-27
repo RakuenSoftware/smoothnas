@@ -1,7 +1,7 @@
 #!/bin/sh
 # SmoothNAS embed hook for smoothiso build-iso.sh.
-# Stages the SmoothNAS payload (tierd, frontend, repo, smoothfs source,
-# tests, manifest) into the installer initrd at /smoothnas/.
+# Stages the SmoothNAS payload (the smoothnas package, the archive key, network
+# tuning and tests) into the installer initrd at /smoothnas/.
 set -e
 
 # SmoothNAS uses the console installer. The build defers browser embedding to

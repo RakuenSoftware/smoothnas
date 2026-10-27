@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,15 +13,12 @@ import (
 	"github.com/JBailes/SmoothNAS/tierd/internal/smb"
 )
 
-const sambaVFSGuardPath = "/etc/apt/preferences.d/smoothnas-samba-vfs"
-
 func RuntimeChecks(store *db.Store) CheckProvider {
 	return func(ctx context.Context) []Check {
 		_ = ctx
 		mounts := smoothfsMounts()
 		checks := []Check{
 			sambaVFSCheck(store, mounts),
-			sambaUpgradeGuardCheck(),
 		}
 		checks = append(checks, nfsTuningChecks(store)...)
 		return filterEmptyChecks(checks)
@@ -48,27 +44,6 @@ func sambaVFSCheck(store *db.Store, mounts []string) Check {
 		return Check{Name: "smoothfs-samba-vfs", Status: "critical", Message: "SMB has SmoothFS paths but /usr/lib/*/samba/vfs/smoothfs.so is missing"}
 	}
 	return Check{Name: "smoothfs-samba-vfs", Status: "warning", Message: "SmoothFS is mounted but the Samba VFS module is missing"}
-}
-
-func sambaUpgradeGuardCheck() Check {
-	if !smb.SmoothFSVFSInstalled() {
-		return Check{}
-	}
-	if _, err := os.Stat(sambaVFSGuardPath); err != nil {
-		return Check{Name: "samba-vfs-abi-guard", Status: "warning", Message: "Samba VFS module is present but apt upgrade pin is missing"}
-	}
-	sambaVersion, ok := packageVersion("samba")
-	if !ok {
-		return Check{Name: "samba-vfs-abi-guard", Status: "warning", Message: "Samba VFS module is present but samba package version could not be read"}
-	}
-	raw, err := os.ReadFile(sambaVFSGuardPath)
-	if err != nil {
-		return Check{Name: "samba-vfs-abi-guard", Status: "warning", Message: "Samba VFS apt guard is unreadable"}
-	}
-	if !strings.Contains(string(raw), "Pin: version "+sambaVersion) {
-		return Check{Name: "samba-vfs-abi-guard", Status: "warning", Message: "Samba VFS apt guard does not match installed samba version " + sambaVersion}
-	}
-	return Check{Name: "samba-vfs-abi-guard", Status: "ok", Message: "Samba packages pinned at " + sambaVersion}
 }
 
 func nfsTuningChecks(store *db.Store) []Check {
@@ -137,13 +112,4 @@ func filterEmptyChecks(checks []Check) []Check {
 		}
 	}
 	return out
-}
-
-func packageVersion(name string) (string, bool) {
-	out, err := exec.Command("dpkg-query", "-W", "-f=${Version}", name).CombinedOutput()
-	if err != nil {
-		return "", false
-	}
-	version := strings.TrimSpace(string(out))
-	return version, version != ""
 }
