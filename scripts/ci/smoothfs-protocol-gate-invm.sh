@@ -30,6 +30,13 @@ export HOME="${HOME:-/root}"
 mount -t tmpfs tmpfs /tmp 2>/dev/null || true
 chmod 1777 /tmp
 
+# The tests back their tiers with loop-mounted images. SmoothKernel builds
+# loop as a module (CONFIG_BLK_DEV_LOOP=m), and on a real host systemd's
+# static device nodes load it on first use; the initless guest has no
+# /dev/loop-control until the module is in, so every loop mount fails
+# ("failed to setup loop device", mount status 32). Load it up front.
+modprobe loop || { echo "guest: failed to load loop"; exit 1; }
+
 # smbd (smbtorture.sh, smb_vfs_module.sh, the soak) needs /run/samba for its
 # ncalrpc pipe dir — systemd-tmpfiles creates it on a real host; the initless
 # guest doesn't. Without it smbd aborts: "mkdir failed on directory
@@ -141,7 +148,7 @@ echo
 echo "############################################################"
 echo "#  SmoothFS protocol conformance gate"
 echo "############################################################"
-if bash "${WORKDIR}/scripts/smoothfs-protocol-gate.sh"; then
+if bash "${WORKDIR}/scripts/smoothfs-protocol-gate.sh" | tee /tmp/protocol-gate.out; then
     echo "== protocol gate: PASS =="
 else
     rc=$?
@@ -166,8 +173,17 @@ fi
 if [ "${rc}" -ne 0 ]; then
     echo "== guest: capturing diagnostics =="
     dmesg 2>/dev/null | grep -iE 'smoothfs|nfsd|cifs' | tail -120 > "${GATE_LOG_DIR}/guest-dmesg.log" 2>/dev/null || true
-    for d in /tmp/cthon-smoothfs /tmp/smbtorture-smoothfs /tmp/smoothfs-vfs58 /tmp/smoothnas-smoothfs-soak; do
+    for d in /tmp/cthon-smoothfs /tmp/smbtorture-smoothfs /tmp/smbt-smoothfs-logs /tmp/smoothfs-vfs58 /tmp/smoothnas-smoothfs-soak; do
         [ -d "$d" ] && cp -a "$d" "${GATE_LOG_DIR}/$(basename "$d")-guest" 2>/dev/null || true
+    done
+    # smbtorture.sh reports a failing MUST_PASS test by name and log path
+    # only, and the guest's /tmp (like its overlay of the copies above) is
+    # gone once the job ends, so print why each one failed.
+    for t in $(sed -n 's/^  FAIL  \([^ ]*\)  (log: .*/\1/p' /tmp/protocol-gate.out 2>/dev/null); do
+        f="/tmp/smbt-smoothfs-logs/smbt-${t}.log"
+        [ -f "$f" ] || continue
+        echo "--- ${f} (tail) ---"
+        tail -n 40 "$f"
     done
 fi
 
