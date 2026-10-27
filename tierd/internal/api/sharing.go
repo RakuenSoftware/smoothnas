@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/cache"
@@ -90,8 +92,10 @@ func iscsiLUNMoveIntentAbortable(state string) bool {
 	return state == iscsiLUNMoveIntentStateFailed
 }
 
+var nfsExportMutationMu sync.Mutex
+
 var (
-	enableNFSServiceForExports = nfs.EnableService
+	enableNFSServiceForExports = nfs.EnableServiceReady
 	applyFirewallForExports    = firewall.Apply
 	enabledProtocolsForExports = firewall.GetEnabledProtocols
 	writeNFSExports            = nfs.WriteExports
@@ -633,6 +637,8 @@ func (h *SharingHandler) listNFSExports(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *SharingHandler) createNFSExport(w http.ResponseWriter, r *http.Request) {
+	nfsExportMutationMu.Lock()
+	defer nfsExportMutationMu.Unlock()
 	var req struct {
 		Path       string   `json:"path"`
 		Networks   []string `json:"networks"`
@@ -684,6 +690,38 @@ func (h *SharingHandler) createNFSExport(w http.ResponseWriter, r *http.Request)
 		req.RootSquash = false
 	}
 
+	// Reject repeated path/client pairs before service or database changes.
+	existing, err := h.store.ListNfsExports()
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	clients := req.Networks
+	if len(clients) == 0 {
+		clients = []string{"*"}
+	}
+	seen := map[string]bool{}
+	for _, client := range clients {
+		if seen[client] {
+			jsonErrorCoded(w, "duplicate export client", http.StatusConflict, "sharing.duplicate_export_client")
+			return
+		}
+		seen[client] = true
+	}
+	for _, previous := range existing {
+		if filepath.Clean(previous.Path) != filepath.Clean(req.Path) {
+			continue
+		}
+		for _, client := range strings.Split(previous.Networks, ",") {
+			if client == "" {
+				client = "*"
+			}
+			if seen[client] {
+				jsonErrorCoded(w, "export already exists for this path and client", http.StatusConflict, "sharing.export_exists")
+				return
+			}
+		}
+	}
 	if err := ensureNFSExportServing(); err != nil {
 		serverError(w, err)
 		return
@@ -702,7 +740,9 @@ func (h *SharingHandler) createNFSExport(w http.ResponseWriter, r *http.Request)
 	}
 
 	if err := h.regenerateExports(); err != nil {
-		serverError(w, err)
+		rollbackErr := h.store.DeleteNfsExport(exp.ID)
+		restoreErr := h.regenerateExports()
+		serverError(w, errors.Join(err, rollbackErr, restoreErr))
 		return
 	}
 
@@ -720,6 +760,8 @@ func ensureNFSExportServing() error {
 }
 
 func (h *SharingHandler) deleteNFSExport(w http.ResponseWriter, r *http.Request, idStr string) {
+	nfsExportMutationMu.Lock()
+	defer nfsExportMutationMu.Unlock()
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		jsonErrorCoded(w, "invalid export id", http.StatusBadRequest, "sharing.invalid_export_id")
@@ -737,7 +779,7 @@ func (h *SharingHandler) deleteNFSExport(w http.ResponseWriter, r *http.Request,
 	}
 
 	if err := writeNFSExports(exports); err != nil {
-		serverError(w, err)
+		serverError(w, errors.Join(err, h.regenerateExports()))
 		return
 	}
 	if err := h.store.DeleteNfsExport(id); err != nil {
@@ -752,6 +794,8 @@ func (h *SharingHandler) deleteNFSExport(w http.ResponseWriter, r *http.Request,
 }
 
 func (h *SharingHandler) updateNFSExport(w http.ResponseWriter, r *http.Request, idStr string) {
+	nfsExportMutationMu.Lock()
+	defer nfsExportMutationMu.Unlock()
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		jsonErrorCoded(w, "invalid export id", http.StatusBadRequest, "sharing.invalid_export_id")
@@ -766,6 +810,17 @@ func (h *SharingHandler) updateNFSExport(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	previous, err := h.store.ListNfsExports()
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	var oldSync bool
+	for _, exp := range previous {
+		if exp.ID == id {
+			oldSync = exp.Sync
+		}
+	}
 	exp, err := h.store.UpdateNfsExportSync(id, req.Sync)
 	if err != nil {
 		if err == db.ErrNotFound {
@@ -777,7 +832,8 @@ func (h *SharingHandler) updateNFSExport(w http.ResponseWriter, r *http.Request,
 	}
 
 	if err := h.regenerateExports(); err != nil {
-		serverError(w, err)
+		_, rollbackErr := h.store.UpdateNfsExportSync(id, oldSync)
+		serverError(w, errors.Join(err, rollbackErr, h.regenerateExports()))
 		return
 	}
 	json.NewEncoder(w).Encode(exp)

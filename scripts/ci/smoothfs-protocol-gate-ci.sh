@@ -185,7 +185,13 @@ ln -sf "$bb" /sbin/poweroff 2>/dev/null || true
 # Phase 2 — fetch a >=6.18 guest kernel (image + modules + headers)
 # --------------------------------------------------------------------------
 log "Phase 2: fetch >=6.18 guest kernel"
-bash "${TEST_ROOT}/ci_fetch_guest_kernel.sh" | tee "${LOG_DIR}/kfetch.out"
+if [ -n "${SMOOTHFS_GUEST_KERNEL:-}" ]; then
+    bash scripts/ci/fetch-guest-kernel.sh "${TEST_ROOT}/ci_fetch_guest_kernel.sh" | tee "${LOG_DIR}/kfetch.out"
+else
+    # Validate the exact kernel pinned by the ISO, without depending on the
+    # availability of Ubuntu's mainline directory service.
+    bash scripts/ci/fetch-smoothkernel-guest.sh | tee "${LOG_DIR}/kfetch.out"
+fi
 GUEST_KVER="$(sed -n 's/^GUEST_KVER=//p' "${LOG_DIR}/kfetch.out" | tail -1)"
 [ -n "${GUEST_KVER}" ] || { echo "failed to determine GUEST_KVER" >&2; exit 1; }
 log "guest kernel: ${GUEST_KVER}"

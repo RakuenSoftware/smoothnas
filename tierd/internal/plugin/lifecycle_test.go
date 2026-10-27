@@ -130,6 +130,19 @@ func (f *fakeRuntime) RemoveImage(ctx context.Context, ref string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removeImages = append(f.removeImages, ref)
+	// Model LXC2Docker's one-alias-per-request semantics, even for an ID.
+	for i, img := range f.images {
+		matches := img.ID == ref
+		for _, alias := range append(append([]string{}, img.RepoTags...), img.RepoDigests...) {
+			if alias == ref {
+				matches = true
+			}
+		}
+		if matches {
+			f.images = append(f.images[:i:i], f.images[i+1:]...)
+			break
+		}
+	}
 	return nil
 }
 
@@ -710,6 +723,20 @@ func TestLifecycle_Start_StopAndRestart(t *testing.T) {
 	if rec.Plugin.State != StateStopped {
 		t.Errorf("aggregate state = %q want stopped", rec.Plugin.State)
 	}
+	if err := lc.AutostartAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.startCalls) != 2 {
+		t.Fatal("autostart ignored explicit stop")
+	}
+	if err := lc.Start(context.Background(), "gh-runner"); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := NewStore(store.store).StoppedByUser("gh-runner")
+	if err != nil || stopped {
+		t.Fatalf("start did not clear durable stop intent: %v, %v", stopped, err)
+	}
+
 }
 
 func TestLifecycle_AutostartAll_MaterialisesAndStartsInstalledPlugins(t *testing.T) {
@@ -1322,5 +1349,30 @@ func TestLifecycleRuntimeReadiness(t *testing.T) {
 	lc.SetRuntimeReady(true)
 	if !lc.RuntimeReady() {
 		t.Fatal("SetRuntimeReady(true) should mark ready")
+	}
+}
+
+func TestLifecycle_AutostartPreservesOperatorStop(t *testing.T) {
+	lc, rt, store := installFixture(t, "gh-runner.yaml")
+	ctx := context.Background()
+	if err := lc.Stop(ctx, "gh-runner"); err != nil {
+		t.Fatal(err)
+	}
+	// Runtime reconciliation may replace observed state; intent must survive.
+	if err := store.SetPluginState("gh-runner", StateInstalled); err != nil {
+		t.Fatal(err)
+	}
+	if err := lc.AutostartAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.createCalls) != 0 || len(rt.startCalls) != 0 {
+		t.Fatal("autostart restarted operator-stopped plugin")
+	}
+	if err := store.SetStoppedByUser("gh-runner", false); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := store.StoppedByUser("gh-runner")
+	if err != nil || stopped {
+		t.Fatalf("explicit start intent: %v, %v", stopped, err)
 	}
 }

@@ -1743,3 +1743,25 @@ func (s *Store) PutCatalogCache(repo, tagName, response string, fetchedAt int64)
 	}
 	return nil
 }
+
+// SetStoppedByUser records operator intent independently of runtime observations.
+func (s *Store) SetStoppedByUser(name string, stopped bool) error {
+	result, err := s.db.Exec("UPDATE plugins SET stopped_by_user = ? WHERE name = ?", stopped, name)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrPluginNotFound
+	}
+	return nil
+}
+
+func (s *Store) StoppedByUser(name string) (bool, error) {
+	var stopped bool
+	err := s.db.QueryRow("SELECT stopped_by_user FROM plugins WHERE name = ?", name).Scan(&stopped)
+	return stopped, err
+}
