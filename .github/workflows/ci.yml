@@ -163,6 +163,10 @@ jobs:
           dpkg-deb --info dist/smoothnas_0.0.0-ci_amd64.deb
       - name: Install it with apt on Debian 13
         run: |
+          # Job logs need admin rights to read; on failure the tail goes into
+          # an annotation, which anyone can read.
+          set -o pipefail
+          trap 'echo "::error title=smoothnas package install failed::$(tail -n 40 install.log | sed "s/%/%25/g" | sed ":a;N;\$!ba;s/\n/%0A/g")"' ERR
           docker run --rm -v "$PWD:/src:ro" debian:trixie bash -euo pipefail -c '
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq
@@ -193,4 +197,4 @@ jobs:
             # The package keeps its own apt source; apt reads it cleanly.
             apt-get update > /tmp/update.log 2>&1 || { cat /tmp/update.log; exit 1; }
             if grep -E "^(Err|E):" /tmp/update.log; then exit 1; fi
-          '
+          ' 2>&1 | tee install.log
