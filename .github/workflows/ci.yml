@@ -174,7 +174,9 @@ jobs:
             # What packages.sh sets up before installing smoothnas.
             install -D -m 644 /src/packaging/smoothnas/usr/share/keyrings/smooth-archive-keyring.gpg \
               /usr/share/keyrings/smooth-archive-keyring.gpg
-            echo "deb [signed-by=/usr/share/keyrings/smooth-archive-keyring.gpg] https://updates.rakuensoftware.com/public common smoothnas" \
+            printf "%s\n" \
+              "deb [signed-by=/usr/share/keyrings/smooth-archive-keyring.gpg] https://updates.rakuensoftware.com/public common main" \
+              "deb [signed-by=/usr/share/keyrings/smooth-archive-keyring.gpg] https://updates.rakuensoftware.com/public smoothnas main" \
               > /etc/apt/sources.list.d/smoothapt-install.list
             printf "Package: linux-image-* linux-headers-*\nPin: release o=Debian\nPin-Priority: -1\n" \
               > /etc/apt/preferences.d/smoothnas-no-debian-kernel

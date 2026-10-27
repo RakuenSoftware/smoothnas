@@ -19,7 +19,8 @@ chmod 644 "$TARGET/usr/share/keyrings/smooth-archive-keyring.gpg"
 # The smoothnas package installs the NAS's own copy of this source; this one
 # is only for the install and is removed below.
 cat > "$TARGET/etc/apt/sources.list.d/smoothapt-install.list" << 'SOURCES'
-deb [signed-by=/usr/share/keyrings/smooth-archive-keyring.gpg] https://updates.rakuensoftware.com/public common smoothnas
+deb [signed-by=/usr/share/keyrings/smooth-archive-keyring.gpg] https://updates.rakuensoftware.com/public common main
+deb [signed-by=/usr/share/keyrings/smooth-archive-keyring.gpg] https://updates.rakuensoftware.com/public smoothnas main
 SOURCES
 # Never install a Debian kernel beside SmoothKernel: DKMS packages recommend
 # the distribution's headers metapackage, which would bring one in.
