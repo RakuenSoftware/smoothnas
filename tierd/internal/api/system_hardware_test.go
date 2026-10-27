@@ -8,7 +8,7 @@ import (
 )
 
 func TestSystemHardwareGPUsIsArray(t *testing.T) {
-	h := NewSystemHandler(nil, nil)
+	h := NewSystemHandler(nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/system/hardware", nil)
 	rr := httptest.NewRecorder()
 
