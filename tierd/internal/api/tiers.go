@@ -26,6 +26,7 @@ type createTierDefinitionRequest struct {
 }
 
 type createTierRequest struct {
+	StorageMode   string                         `json:"storage_mode,omitempty"`
 	Name          string                         `json:"name"`
 	Filesystem    string                         `json:"filesystem"`
 	Tiers         *[]createTierDefinitionRequest `json:"tiers,omitempty"`
@@ -66,6 +67,7 @@ type createTierDefinitionResponse struct {
 }
 
 type createTierResponse struct {
+	StorageMode      string                         `json:"storage_mode"`
 	Name             string                         `json:"name"`
 	Filesystem       string                         `json:"filesystem"`
 	State            string                         `json:"state"`
@@ -98,6 +100,7 @@ type tierDetailResponse struct {
 }
 
 type poolDetailResponse struct {
+	StorageMode      string               `json:"storage_mode"`
 	Name             string               `json:"name"`
 	Filesystem       string               `json:"filesystem"`
 	State            string               `json:"state"`
@@ -952,6 +955,7 @@ func poolDetailFromStore(h *ArraysHandler, poolName string) (*poolDetailResponse
 	}
 
 	resp := &poolDetailResponse{
+		StorageMode:   pool.StorageMode,
 		Name:          pool.Name,
 		Filesystem:    pool.Filesystem,
 		State:         pool.State,
@@ -1027,7 +1031,9 @@ func poolDetailFromStore(h *ArraysHandler, poolName string) (*poolDetailResponse
 			}
 			freeBytes = capacity - usedBytes
 		}
-		resp.CapacityBytes += capacity
+		if pool.StorageMode != "cache" || slot.Rank == slots[len(slots)-1].Rank {
+			resp.CapacityBytes += capacity
+		}
 		resp.Tiers = append(resp.Tiers, tierDetailResponse{
 			Name:             slot.Name,
 			Rank:             slot.Rank,
@@ -1223,6 +1229,11 @@ func (h *ArraysHandler) createTier(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mode, err := db.NormalizeStorageMode(req.StorageMode)
+	if err != nil || (mode == "cache" && len(tierDefs) < 2) {
+		jsonErrorCoded(w, "cache mode requires at least two tiers; storage_mode must be tier or cache", http.StatusBadRequest, "tiers.invalid_storage_mode")
+		return
+	}
 	mountPoint := db.TierMountPoint(req.Name)
 	if info, err := os.Stat(mountPoint); err == nil && !info.IsDir() {
 		jsonError(w, fmt.Sprintf("mount point %s already exists as a file", mountPoint), http.StatusConflict)
@@ -1243,7 +1254,7 @@ func (h *ArraysHandler) createTier(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
-	if err := h.store.CreateTierPoolWithOptions(req.Name, filesystem, tierDefs, req.MetaOnFastest); err != nil {
+	if err := h.store.CreateTierPoolWithOptions(req.Name, filesystem, tierDefs, req.MetaOnFastest, mode); err != nil {
 		if isCreateTierConflict(err) {
 			jsonError(w, fmt.Sprintf("tier %s already exists", req.Name), http.StatusConflict)
 			return
@@ -1268,6 +1279,7 @@ func (h *ArraysHandler) createTier(w http.ResponseWriter, r *http.Request) {
 	h.invalidateAll()
 	w.WriteHeader(http.StatusCreated)
 	resp := createTierResponse{
+		StorageMode:      created.StorageMode,
 		Name:             created.Name,
 		Filesystem:       created.Filesystem,
 		State:            created.State,

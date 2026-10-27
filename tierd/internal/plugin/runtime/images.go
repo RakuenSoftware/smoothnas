@@ -130,7 +130,7 @@ func (c *Client) ListImages(ctx context.Context) ([]ImageSummary, error) {
 // uninstall can be retried after partial failure.
 func (c *Client) RemoveImage(ctx context.Context, ref string) error {
 	q := url.Values{}
-	q.Set("force", "1")
+	q.Set("force", "0")
 	resp, err := c.do(ctx, http.MethodDelete, "/images/"+url.PathEscape(ref), q, nil)
 	if err != nil {
 		if IsNotFound(err) {
@@ -144,10 +144,11 @@ func (c *Client) RemoveImage(ctx context.Context, ref string) error {
 
 // splitRef separates a Docker ref into its fromImage and tag parts
 // the way the Engine API expects them. Examples:
-//   "ubuntu"                     → ("ubuntu", "latest")
-//   "ubuntu:22.04"               → ("ubuntu", "22.04")
-//   "ghcr.io/foo/bar:1.2.3"      → ("ghcr.io/foo/bar", "1.2.3")
-//   "ghcr.io/foo/bar@sha256:abc" → ("ghcr.io/foo/bar@sha256:abc", "")
+//
+//	"ubuntu"                     → ("ubuntu", "latest")
+//	"ubuntu:22.04"               → ("ubuntu", "22.04")
+//	"ghcr.io/foo/bar:1.2.3"      → ("ghcr.io/foo/bar", "1.2.3")
+//	"ghcr.io/foo/bar@sha256:abc" → ("ghcr.io/foo/bar@sha256:abc", "")
 func splitRef(ref string) (from, tag string) {
 	// Digest pins are kept whole; the daemon parses them itself.
 	if strings.Contains(ref, "@") {

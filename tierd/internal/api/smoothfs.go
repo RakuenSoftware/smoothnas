@@ -275,7 +275,7 @@ func (h *SmoothfsHandler) writeStagingStatus(name string) (*smoothfsWriteStaging
 	if err != nil {
 		return nil, err
 	}
-	desired, err := h.store.GetBoolConfig(smoothfsWriteStagingConfigKey(name), false)
+	desired, err := h.store.GetBoolConfig(smoothfsWriteStagingConfigKey(name), pool.Mode == "cache")
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +291,7 @@ func (h *SmoothfsHandler) writeStagingStatus(name string) (*smoothfsWriteStaging
 		KernelEnabled:                     kernelEnabled,
 		FullThresholdPct:                  sysfsUint(filepath.Join(root, "write_staging_full_pct")),
 		EffectiveEnabled:                  desired && supported && kernelEnabled,
-		SmoothNASWakesAllowed:             false,
+		SmoothNASWakesAllowed:             pool.Mode == "cache",
 		StagedBytes:                       sysfsUint(filepath.Join(root, "staged_bytes")),
 		StagedRehomeBytes:                 sysfsUint(filepath.Join(root, "staged_rehome_bytes")),
 		RangeStagedBytes:                  sysfsUint(filepath.Join(root, "range_staged_bytes")),
@@ -523,10 +523,11 @@ func (h *SmoothfsHandler) get(w http.ResponseWriter, _ *http.Request, name strin
 }
 
 type createSmoothfsPoolRequest struct {
-	Name      string   `json:"name"`
-	UUID      string   `json:"uuid,omitempty"`
-	Tiers     []string `json:"tiers"`
-	MountBase string   `json:"mount_base,omitempty"`
+	Mode      smoothfsclient.StorageMode `json:"mode,omitempty"`
+	Name      string                     `json:"name"`
+	UUID      string                     `json:"uuid,omitempty"`
+	Tiers     []string                   `json:"tiers"`
+	MountBase string                     `json:"mount_base,omitempty"`
 }
 
 func (h *SmoothfsHandler) create(w http.ResponseWriter, r *http.Request) {
@@ -536,6 +537,7 @@ func (h *SmoothfsHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cr := smoothfsclient.CreateManagedPoolRequest{
+		Mode:      req.Mode,
 		Name:      req.Name,
 		Tiers:     req.Tiers,
 		MountBase: req.MountBase,
@@ -567,6 +569,7 @@ func (h *SmoothfsHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	row := db.SmoothfsPool{
+		Mode:       string(mp.Mode),
 		UUID:       mp.UUID.String(),
 		Name:       mp.Name,
 		Tiers:      mp.Tiers,
@@ -606,6 +609,7 @@ func (h *SmoothfsHandler) destroy(w http.ResponseWriter, _ *http.Request, name s
 		return
 	}
 	mp := smoothfsclient.ManagedPool{
+		Mode:       smoothfsclient.StorageMode(pool.Mode),
 		Name:       pool.Name,
 		UUID:       parsed,
 		Tiers:      pool.Tiers,

@@ -32,6 +32,7 @@ export default function Tiers() {
   const [spindownIdleByPool, setSpindownIdleByPool] = useState<Record<string, number>>({});
   const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({});
   const [createName, setCreateName] = useState('');
+  const [storageMode, setStorageMode] = useState<'tier' | 'cache'>('tier');
   const [creating, setCreating] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [metaOnFastest, setMetaOnFastest] = useState(false);
@@ -262,7 +263,7 @@ export default function Tiers() {
     setCreating(true);
     try {
       const tiers = showAdvanced ? customTiers : undefined;
-      await api.createTier(name, tiers, metaOnFastest);
+      await api.createTier(name, tiers, metaOnFastest, storageMode);
       setCreateName('');
       setShowAdvanced(false);
       setCustomTiers([{ name: 'NVME', rank: 1 }, { name: 'SSD', rank: 2 }, { name: 'HDD', rank: 3 }]);
@@ -446,12 +447,19 @@ export default function Tiers() {
       <div className="create-card">
         <h2>{t('tiers.section.create')}</h2>
         <div className="create-grid">
+            <label>{t('storage.mode.label')}
+              <select value={storageMode} onChange={e => setStorageMode(e.target.value as 'tier' | 'cache')} disabled={creating}>
+                <option value="tier">{t('storage.mode.tier')}</option>
+                <option value="cache">{t('storage.mode.cache')}</option>
+              </select>
+            </label>
           <label>
             {t('tiers.field.tierName')}
             <input value={createName} onChange={e => setCreateName(e.target.value)} placeholder="media"
               disabled={creating} />
           </label>
         </div>
+        <p className="hint">{t(storageMode === 'cache' ? 'storage.mode.cacheHint' : 'storage.mode.tierHint')}</p>
         <p className="hint">{t('tiers.create.mountHintPrefix')}<code>/mnt/{createName || '{tiername}'}</code>.</p>
         <div style={{ marginTop: 8, marginBottom: 8 }}>
           <button className="btn" style={{ fontSize: 12 }} onClick={() => setShowAdvanced(v => !v)} disabled={creating}>
@@ -521,6 +529,7 @@ export default function Tiers() {
                 <div key={tier.name} className={`tier-card${tier.state === 'destroying' ? ' tier-deleting' : ''}${isAsyncProvisioning ? ' tier-provisioning' : ''}`}>
                   <div className="tier-head">
                     <h2>{tier.name}</h2>
+                    <span>{t(tier.storage_mode === 'cache' ? 'storage.mode.cache' : 'storage.mode.tier')}</span>
                     <span className={`state-badge state-${tier.state}`}>{tier.state}</span>
                     {tier.state === 'destroying' ? (
                       <span className="slot-assigning">{t('tiers.status.deleting')}</span>

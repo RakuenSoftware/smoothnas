@@ -16,6 +16,13 @@
 import type { LanguageTranslations } from '@rakuensoftware/smoothgui';
 
 const en: LanguageTranslations = {
+  'error.tiers.invalid_storage_mode': 'Choose tier or cache; cache mode requires at least two tiers.',
+  'storage.mode.label': "Storage mode",
+  'storage.mode.tier': "Tiered storage",
+  'storage.mode.cache': "Cache with permanent base storage",
+  'storage.mode.tierHint': "Files live on one tier and move between tiers according to placement policy.",
+  'storage.mode.cacheHint': "The final, slowest tier stores every file. Faster storage buffers writes and keeps disposable read copies. Pending writes drain to the base tier; a full cache falls back to base storage.",
+
   // Phase 1 ships the bare-minimum keys (common verbs + nav labels)
   // so the type plumbing exercises every layer. Per-page keys land
   // page-by-page during Phase 2.
@@ -1180,6 +1187,8 @@ const en: LanguageTranslations = {
   'error.sharing.share_name_taken': 'A share with that name already exists',
   'error.sharing.share_not_found': 'Share not found',
   'error.sharing.invalid_export_id': 'Invalid export id',
+  'error.sharing.duplicate_export_client': 'Duplicate NFS export client',
+  'error.sharing.export_exists': 'An NFS export already exists for this path and client',
   'error.sharing.export_not_found': 'NFS export not found',
   'error.sharing.iqn_required': 'IQN is required',
   'error.sharing.target_backing_required': 'Specify exactly one of block_device or backing_file',

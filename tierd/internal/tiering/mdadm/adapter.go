@@ -87,18 +87,26 @@ func (a *Adapter) ensureSmoothfsPoolMount(pool db.TierInstance, slots []db.TierS
 		tiers = append(tiers, mountPath)
 	}
 
+	if pool.StorageMode == "cache" && (len(tiers) < 2 || assigned[len(assigned)-1].Rank != slots[len(slots)-1].Rank) {
+		return nil // wait until the configured base and a cache backing are assigned
+	}
 	req := smoothfsclient.CreateManagedPoolRequest{
+		Mode:      smoothfsclient.StorageMode(pool.StorageMode),
 		Name:      pool.Name,
 		Tiers:     tiers,
 		MountBase: "/mnt",
 	}
 	desired := smoothfsclient.ManagedPool{
+		Mode:       smoothfsclient.StorageMode(pool.StorageMode),
 		Name:       pool.Name,
 		Tiers:      tiers,
 		Mountpoint: mountPoint,
 		UnitPath:   filepath.Join(smoothfsclient.SystemdUnitDir, smoothfsclient.UnitFilenameFor(mountPoint)),
 	}
 	if existing, err := a.store.GetSmoothfsPool(pool.Name); err == nil {
+		if existing.Mode == "cache" && strings.Join(existing.Tiers, "\x00") != strings.Join(tiers, "\x00") {
+			return fmt.Errorf("cache pool %s backing changes require an explicit offline migration", pool.Name)
+		}
 		if parsed, parseErr := uuid.Parse(existing.UUID); parseErr == nil {
 			req.UUID = parsed
 			desired.UUID = parsed
@@ -154,6 +162,7 @@ func (a *Adapter) ensureSmoothfsPoolMount(pool db.TierInstance, slots []db.TierS
 	}
 	if _, err := a.store.GetSmoothfsPool(pool.Name); err == nil {
 		return a.store.UpdateSmoothfsPool(db.SmoothfsPool{
+			Mode:       string(mp.Mode),
 			UUID:       mp.UUID.String(),
 			Name:       mp.Name,
 			Tiers:      mp.Tiers,
@@ -164,6 +173,7 @@ func (a *Adapter) ensureSmoothfsPoolMount(pool db.TierInstance, slots []db.TierS
 		return err
 	}
 	_, err = a.store.CreateSmoothfsPool(db.SmoothfsPool{
+		Mode:       string(mp.Mode),
 		UUID:       mp.UUID.String(),
 		Name:       mp.Name,
 		Tiers:      mp.Tiers,

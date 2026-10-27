@@ -4,6 +4,10 @@
 # tests, manifest) into the installer initrd at /smoothnas/.
 set -e
 
+# SmoothNAS uses the console installer. The build defers browser embedding to
+# keep the initrd small, but the installed initrd must also skip that download.
+printf '\nINSTALLER_BROWSER_DEFERRED=0\n' >> "${INITRD_TMP}/smoothiso-hooks/config.sh"
+
 if [ -d "${SMOOTHNAS_PAYLOAD_DIR}" ]; then
     cp -a "${SMOOTHNAS_PAYLOAD_DIR}/." "${INITRD_TMP}/smoothnas/"
 fi

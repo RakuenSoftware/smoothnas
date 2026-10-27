@@ -147,6 +147,35 @@ grep -q 'run_suite_bounded "/opt/cthon04/\$suite"' "${TEST_ROOT}/cthon04.sh" || 
     exit 1
 }
 
+# smbtorture.sh bounds each test at 60s, sized for real hardware. Under TCG
+# emulation the SmoothKernel guest runs raw.search (OS/2 delete over 700
+# files) in ~53s on an idle guest, so after the NFS suites it overruns and is
+# killed mid-test with no verdict in its log. Allow 300s, and leave a TIMEOUT
+# line as the log's last line so smbtorture.sh's regression summary (which
+# prints `tail -1` of each failing log) says why.
+snippet="$(mktemp)"
+cat > "${snippet}" <<'SNIP'
+
+# [smoothnas-ci] emulation-sized smbtorture bound; see smoothfs-protocol-gate-ci.sh
+smbt_bounded() {
+    local rc=0
+    timeout -k 30 300 "$@" || rc=$?
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        echo "TIMEOUT: smbtorture exceeded 300s and was killed"
+    fi
+    return "$rc"
+}
+SNIP
+sed -i "/^# ---------------- run ----------------\$/r ${snippet}" "${TEST_ROOT}/smbtorture.sh"
+rm -f "${snippet}"
+sed -i 's#^    if timeout 60 smbtorture "\$target" \\$#    if smbt_bounded smbtorture "$target" \\#' \
+    "${TEST_ROOT}/smbtorture.sh"
+grep -q '^smbt_bounded()' "${TEST_ROOT}/smbtorture.sh" \
+    && grep -q 'if smbt_bounded smbtorture "\$target"' "${TEST_ROOT}/smbtorture.sh" || {
+    echo "smbtorture.sh invocation changed upstream; timeout patch did not apply" >&2
+    exit 1
+}
+
 # --------------------------------------------------------------------------
 # Phase 1 — apt sources + light build/virtualisation deps
 # --------------------------------------------------------------------------
@@ -185,7 +214,13 @@ ln -sf "$bb" /sbin/poweroff 2>/dev/null || true
 # Phase 2 — fetch a >=6.18 guest kernel (image + modules + headers)
 # --------------------------------------------------------------------------
 log "Phase 2: fetch >=6.18 guest kernel"
-bash "${TEST_ROOT}/ci_fetch_guest_kernel.sh" | tee "${LOG_DIR}/kfetch.out"
+if [ -n "${SMOOTHFS_GUEST_KERNEL:-}" ]; then
+    bash scripts/ci/fetch-guest-kernel.sh "${TEST_ROOT}/ci_fetch_guest_kernel.sh" | tee "${LOG_DIR}/kfetch.out"
+else
+    # Validate the exact kernel pinned by the ISO, without depending on the
+    # availability of Ubuntu's mainline directory service.
+    bash scripts/ci/fetch-smoothkernel-guest.sh | tee "${LOG_DIR}/kfetch.out"
+fi
 GUEST_KVER="$(sed -n 's/^GUEST_KVER=//p' "${LOG_DIR}/kfetch.out" | tail -1)"
 [ -n "${GUEST_KVER}" ] || { echo "failed to determine GUEST_KVER" >&2; exit 1; }
 log "guest kernel: ${GUEST_KVER}"

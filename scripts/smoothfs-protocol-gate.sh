@@ -86,6 +86,7 @@ if [[ ! -d /opt/cthon04 ]]; then
 fi
 
 run_test cthon04.sh
+run_test nfs_multi_pool_identity.sh
 run_test smbtorture.sh
 run_test smb_vfs_module.sh
 
@@ -97,6 +98,8 @@ for spill in \
     tier_spill_rename_xdev.sh \
     tier_spill_crash_replay.sh \
     write_staging_truncate.sh \
+    write_staging_range_crash_replay.sh \
+    unlink_reclaims_space.sh \
     metadata_tier_activity_gate.sh; do
     run_test "${spill}"
 done

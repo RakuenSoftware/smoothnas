@@ -553,3 +553,19 @@ func TestCreateContainer_ToleratesSlowResponseHeaders(t *testing.T) {
 		t.Fatalf("id = %q, want slow-ok", resp.ID)
 	}
 }
+
+func TestRemoveImagePreservesConflictAndBackendErrors(t *testing.T) {
+	for _, code := range []int{http.StatusConflict, http.StatusInternalServerError} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			sock := newFakeRuntime(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("force") != "0" {
+					t.Error("image cleanup must not force deletion or hide backend failures")
+				}
+				w.WriteHeader(code)
+			}))
+			if err := NewClient(sock).RemoveImage(context.Background(), "example:1"); err == nil {
+				t.Fatal("image deletion failure was hidden")
+			}
+		})
+	}
+}

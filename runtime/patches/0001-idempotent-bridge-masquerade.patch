@@ -1,0 +1,93 @@
+--- a/internal/lxc/network.go
++++ b/internal/lxc/network.go
+@@ -33,6 +33,8 @@
+ // EnsureBridge creates the managed bridge and assigns it the gateway IP if it
+ // does not already exist. Idempotent.
+ func EnsureBridge() error {
++	nftMu.Lock()
++	defer nftMu.Unlock()
+ 	iface, err := net.InterfaceByName(BridgeName)
+ 	if err != nil || iface == nil {
+ 		// Bridge doesn't exist — create it and assign the gateway IP.
+@@ -69,18 +71,16 @@
+ 		}
+ 	}
+ 
+-	// Ensure the nftables table exists with the masquerade rule.
+-	// Using "nft -f" with a table block is idempotent — it merges into any
+-	// existing table rather than replacing it.
++	// Reconcile only our postrouting chain in one atomic transaction.
++	// A table block appends rules on every call; flush removes old duplicates
++	// while retaining prerouting/output DNAT rules used by published ports.
+ 	nftRule := fmt.Sprintf(`
+-table ip %s {
+-	chain postrouting {
+-		type nat hook postrouting priority srcnat; policy accept;
+-		ip saddr 10.100.0.0/24 oifname != "%s" masquerade
+-		ct status dnat masquerade
+-	}
+-}
+-`, NATTableName, BridgeName)
++add table ip %s
++add chain ip %s postrouting { type nat hook postrouting priority srcnat; policy accept; }
++flush chain ip %s postrouting
++add rule ip %s postrouting ip saddr 10.100.0.0/24 oifname != "%s" masquerade
++add rule ip %s postrouting ct status dnat masquerade
++`, NATTableName, NATTableName, NATTableName, NATTableName, BridgeName, NATTableName)
+ 	cmd := exec.Command("nft", "-f", "-")
+ 	cmd.Stdin = strings.NewReader(nftRule)
+ 	if out, err := cmd.CombinedOutput(); err != nil {
+--- /dev/null
++++ b/internal/lxc/network_nat_integration_test.go
+@@ -0,0 +1,51 @@
++package lxc
++
++import (
++	"encoding/json"
++	"os"
++	"os/exec"
++	"testing"
++)
++
++// Run inside an isolated network namespace with LXC2DOCKER_NETWORK_TEST=1.
++func TestEnsureBridgeNATRemainsBounded(t *testing.T) {
++	if os.Getenv("LXC2DOCKER_NETWORK_TEST") != "1" {
++		t.Skip("requires an isolated root network namespace")
++	}
++	if err := EnsureBridge(); err != nil {
++		t.Fatal(err)
++	}
++	if err := AddPortForward("10.100.0.2", 18080, 8080, "tcp"); err != nil {
++		t.Fatal(err)
++	}
++	for range 10 {
++		if err := EnsureBridge(); err != nil {
++			t.Fatal(err)
++		}
++	}
++	out, err := exec.Command("nft", "-j", "list", "table", "ip", NATTableName).CombinedOutput()
++	if err != nil {
++		t.Fatalf("nft: %s: %v", out, err)
++	}
++	var rules struct {
++		Nftables []struct {
++			Rule *struct {
++				Chain string `json:"chain"`
++			} `json:"rule"`
++		} `json:"nftables"`
++	}
++	if err := json.Unmarshal(out, &rules); err != nil {
++		t.Fatal(err)
++	}
++	counts := map[string]int{}
++	for _, entry := range rules.Nftables {
++		if entry.Rule != nil {
++			counts[entry.Rule.Chain]++
++		}
++	}
++	for chain, want := range map[string]int{"postrouting": 2, "prerouting": 1, "output": 1} {
++		if counts[chain] != want {
++			t.Errorf("%s: %d rules, want %d", chain, counts[chain], want)
++		}
++	}
++}

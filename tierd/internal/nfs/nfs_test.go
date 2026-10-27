@@ -205,7 +205,7 @@ func TestServerTuningConfig(t *testing.T) {
 		"threads = 32",
 		"vers3 = y",
 		"vers4.2 = y",
-		"[mountd]",
+		"[mountd]\nport = 20048\nthreads = 1\n",
 		"port = 20048",
 		"[statd]",
 		"port = 32765",

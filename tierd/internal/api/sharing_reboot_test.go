@@ -113,3 +113,47 @@ func TestReapplySharingServicesNoStateIsNoop(t *testing.T) {
 			*smbEnables, *nfsEnables, *iscsiEnables)
 	}
 }
+
+func TestTogglePendingNFSOpensFirewallAndPersistsAcrossOtherToggles(t *testing.T) {
+	h := newTestSharingHandler(t)
+	stubProtocolServices(t)
+	var applied map[string]bool
+	applyFirewallForExports = func(enabled map[string]bool) error {
+		applied = enabled
+		return nil
+	}
+	// The service probe remains false while the non-blocking NFS start waits.
+	for _, step := range []struct {
+		proto, body string
+		wantNFS     bool
+	}{
+		{"nfs", `{"enabled":true}`, true},
+		{"smb", `{"enabled":true}`, true},
+		{"nfs", `{"enabled":false}`, false},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/api/protocols/"+step.proto, strings.NewReader(step.body))
+		w := httptest.NewRecorder()
+		h.Route(w, req)
+		if w.Code != http.StatusOK || applied["nfs"] != step.wantNFS {
+			t.Fatalf("%s: status=%d firewall=%v want nfs=%t", step.proto, w.Code, applied, step.wantNFS)
+		}
+	}
+}
+
+func TestStartupFirewallUsesSavedIntentAndFallsBackToLiveServices(t *testing.T) {
+	h := newTestSharingHandler(t)
+	stubProtocolServices(t)
+	enabledProtocolsForExports = func() map[string]bool {
+		return map[string]bool{"smb": true, "nfs": false, "iscsi": true}
+	}
+	if err := h.store.SetBoolConfig(nfsEnabledConfigKey, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.SetBoolConfig(iscsiEnabledConfigKey, false); err != nil {
+		t.Fatal(err)
+	}
+	got := DesiredSharingProtocols(h.store)
+	if !got["smb"] || !got["nfs"] || got["iscsi"] {
+		t.Fatalf("firewall intent = %v", got)
+	}
+}

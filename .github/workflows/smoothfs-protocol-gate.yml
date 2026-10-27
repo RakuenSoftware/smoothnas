@@ -17,7 +17,7 @@ jobs:
     name: protocol and mixed-client soak
     # Runs on a stock GitHub-hosted runner. SmoothFS needs a >=6.18 kernel
     # (mnt_idmap VFS API) that GitHub's runner images do not ship, so we
-    # boot a clean >=6.18 mainline kernel under virtme-ng/QEMU (KVM via the
+    # boot the ISO-pinned SmoothKernel under virtme-ng/QEMU (KVM via the
     # runner's /dev/kvm), build the module + Samba VFS against it, and run
     # the protocol gate + mixed soak inside that guest.
     #
@@ -42,25 +42,23 @@ jobs:
       - name: Check out smoothnas
         uses: actions/checkout@v6
 
-      - name: Resolve pinned SmoothFS ref
-        id: pin
+      - name: Check out SmoothFS at the pinned ref
         run: |
           set -euo pipefail
           # Track the same ref the ISO/build path consumes, extracted from
-          # `SMOOTHFS_REPO_REF="${SMOOTHFS_REPO_REF:-<ref>}"` in build-iso.sh.
+          # `SMOOTHFS_REPO_REF="${SMOOTHFS_REPO_REF:-<ref>}"` in build-iso.sh,
+          # and fetch it the same way build-iso.sh does. A plain git fetch
+          # (rather than actions/checkout with a computed ref) keeps no token
+          # in the checkout.
           ref="$(grep -oE 'SMOOTHFS_REPO_REF:-[^}]+' iso/build-iso.sh | head -n1 | sed 's/.*:-//')"
           [ -n "$ref" ] || { echo "could not extract SMOOTHFS_REPO_REF from iso/build-iso.sh" >&2; exit 1; }
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "Pinned SmoothFS ref: $ref"
+          git init -q deps/smoothfs
+          git -C deps/smoothfs fetch -q --depth=1 https://github.com/RakuenSoftware/smoothfs.git "$ref"
+          git -C deps/smoothfs checkout -q --detach FETCH_HEAD
+          git -C deps/smoothfs log --oneline -1
 
-      - name: Check out SmoothFS at pinned ref
-        uses: actions/checkout@v6
-        with:
-          repository: RakuenSoftware/smoothfs
-          ref: ${{ steps.pin.outputs.ref }}
-          path: deps/smoothfs
-
-      - name: Run SmoothFS protocol gate + mixed soak in a >=6.18 guest
+      - name: Run SmoothFS protocol gate + mixed soak on the ISO kernel
         run: bash scripts/ci/smoothfs-protocol-gate-ci.sh
         env:
           SMOOTHFS_CHECKOUT: deps/smoothfs

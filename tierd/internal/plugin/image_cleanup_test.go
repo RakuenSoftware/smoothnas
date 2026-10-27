@@ -123,7 +123,7 @@ func TestCleanupOrphanedImages(t *testing.T) {
 		t.Fatalf("removed=%d, want 2", removed)
 	}
 	sort.Strings(rt.removeImages)
-	want := []string{"ghcr.io/x@sha256:dead", "orphan:1.0"}
+	want := []string{"b", "e", "ghcr.io/x@sha256:dead", "orphan:1.0"}
 	if !reflect.DeepEqual(rt.removeImages, want) {
 		t.Fatalf("RemoveImage calls=%v, want %v", rt.removeImages, want)
 	}
@@ -144,5 +144,42 @@ func TestStore_TrackedImageRefs(t *testing.T) {
 	want := []string{"ghcr.io/org/web:testing", "postgres:16"}
 	if !reflect.DeepEqual(refs, want) {
 		t.Fatalf("TrackedImageRefs=%v, want %v", refs, want)
+	}
+}
+
+func TestDemolishReclaimsImageByIDWithMutableAndDigestAliases(t *testing.T) {
+	store := openTestStore(t)
+	if _, err := NewInstaller(store).Install([]byte("name: demo\nservices:\n  web:\n    image: example:1\n")); err != nil {
+		t.Fatal(err)
+	}
+	rt := &fakeRuntime{images: []runtime.ImageSummary{{ID: "sha256:image", RepoTags: []string{"example:1"}}, {ID: "sha256:image", RepoDigests: []string{"example@sha256:digest"}}}}
+	lc := NewLifecycle(store, rt)
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", &recRunner{}), t.TempDir()))
+	if err := lc.Demolish(context.Background(), "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rt.removeImages, []string{"example:1", "example@sha256:digest", "sha256:image"}) {
+		t.Fatalf("image cleanup: %v", rt.removeImages)
+	}
+}
+
+func TestDemolishKeepsImageTrackedByStoppedPluginUsingAnotherAlias(t *testing.T) {
+	store := openTestStore(t)
+	for _, manifest := range []string{
+		"name: demo\nservices:\n  web:\n    image: example:1\n",
+		"name: keeper\nservices:\n  web:\n    image: example@sha256:digest\n",
+	} {
+		if _, err := NewInstaller(store).Install([]byte(manifest)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rt := &fakeRuntime{images: []runtime.ImageSummary{{ID: "sha256:image", RepoTags: []string{"example:1"}}, {ID: "sha256:image", RepoDigests: []string{"example@sha256:digest"}}}}
+	lc := NewLifecycle(store, rt)
+	lc.SetComposeBackend(compose.NewBackend(compose.New("", &recRunner{}), t.TempDir()))
+	if err := lc.Demolish(context.Background(), "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.removeImages) != 0 {
+		t.Fatalf("removed shared image: %v", rt.removeImages)
 	}
 }

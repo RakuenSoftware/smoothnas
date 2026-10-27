@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build the SmoothNAS plugin runtime daemon from LXC2Docker main by default.
+# Build the SmoothNAS plugin runtime daemon from a reviewed upstream commit.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 LXC2DOCKER_REPO="${LXC2DOCKER_REPO:-https://github.com/games-on-whales/LXC2Docker.git}"
-LXC2DOCKER_REF="${LXC2DOCKER_REF:-main}"
+LXC2DOCKER_REF="${LXC2DOCKER_REF:-7171568494541a1c9a776670a1623f3db64d7e46}"
 BUILD_DIR="${PROJECT_DIR}/runtime/build/LXC2Docker"
 OUT="${PROJECT_DIR}/bin/docker-lxc-daemon"
 
@@ -22,6 +22,12 @@ fi
 
 git -C "$BUILD_DIR" checkout --quiet --detach FETCH_HEAD
 git -C "$BUILD_DIR" reset --quiet --hard FETCH_HEAD
+
+# Keep downstream runtime fixes reviewable and apply them to every shipped build.
+for runtime_patch in "$PROJECT_DIR"/runtime/patches/*.patch; do
+    [ -f "$runtime_patch" ] || continue
+    patch --batch --forward -d "$BUILD_DIR" -p1 < "$runtime_patch"
+done
 
 CGO_CFLAGS="$(pkg-config --cflags lxc 2>/dev/null || true)"
 CGO_LDFLAGS="$(pkg-config --libs lxc 2>/dev/null || printf '%s' '-llxc')"

@@ -58,8 +58,11 @@ mkdir -p "${ROOT}"/{fast,slow,server,nfs,cifs,samba/private}
 truncate -s 2G "${ROOT}/fast.img" "${ROOT}/slow.img"
 mkfs.xfs -q -f "${ROOT}/fast.img"
 mkfs.xfs -q -f "${ROOT}/slow.img"
-mount -o loop "${ROOT}/fast.img" "${ROOT}/fast"
-mount -o loop "${ROOT}/slow.img" "${ROOT}/slow"
+# Discard punches freed XFS blocks out of the sparse loop images. Without
+# it their backing tmpfs grows toward 4 GiB even with a 1.2 GiB live set,
+# exhausting the 8 GiB CI guest's default 4 GiB /tmp during extended churn.
+mount -o loop,discard "${ROOT}/fast.img" "${ROOT}/fast"
+mount -o loop,discard "${ROOT}/slow.img" "${ROOT}/slow"
 modprobe smoothfs
 mount -t smoothfs -o "pool=soak,uuid=${UUID},tiers=${ROOT}/fast:${ROOT}/slow" none "${ROOT}/server"
 chmod 1777 "${ROOT}/server"
@@ -140,15 +143,19 @@ writer() {
     local deadline=$((SECONDS + SECONDS_TO_RUN))
     local i=0
     local window=24
-    mkdir -p "${dir}/${prefix}"
+    mkdir -p "${dir}/${prefix}" || return 1
     while (( SECONDS < deadline )); do
-        dd if=/dev/zero of="${dir}/${prefix}/file-${i}.tmp" bs=1M count=16 conv=fsync status=none
-        mv "${dir}/${prefix}/file-${i}.tmp" "${dir}/${prefix}/file-${i}.bin"
+        # wait below handles non-zero status explicitly, which also disables
+        # bash errexit inside this function. Propagate each I/O failure.
+        dd if=/dev/zero of="${dir}/${prefix}/file-${i}.tmp" bs=1M count=16 conv=fsync status=none || return 1
+        mv "${dir}/${prefix}/file-${i}.tmp" "${dir}/${prefix}/file-${i}.bin" || return 1
         if (( i >= window )); then
-            rm -f "${dir}/${prefix}/file-$((i - window)).bin"
+            rm -f "${dir}/${prefix}/file-$((i - window)).bin" || return 1
         fi
         i=$((i + 1))
     done
+    printf '%s\n' "$i" > "${ROOT}/samba/${prefix}.completed" || return 1
+    echo "  ${prefix}: ${i} complete writes"
 }
 
 echo "=== running concurrent local + NFS + SMB writers for ${SECONDS_TO_RUN}s ==="
@@ -162,12 +169,18 @@ soak_rc=0
 for p in "${p1}" "${p2}" "${p3}"; do
     wait "${p}" || { echo "ERROR: a soak writer exited non-zero" >&2; soak_rc=1; }
 done
-[[ ${soak_rc} -eq 0 ]] || exit 1
+if (( soak_rc != 0 )); then
+    df -h "${ROOT}" "${ROOT}/fast" "${ROOT}/slow" >&2 || true
+    du -h "${ROOT}/fast.img" "${ROOT}/slow.img" >&2 || true
+    exit 1
+fi
 
 sync
-mapfile -t zeroes < <(find "${ROOT}/server" -type f -size 0)
+# Inspect only workload files; SmoothFS's own placement log may be empty.
+find "${ROOT}/server/local" "${ROOT}/server/nfs" "${ROOT}/server/smb" -type f ! -size 16777216c > "${ROOT}/incomplete-payloads"
+mapfile -t zeroes < "${ROOT}/incomplete-payloads"
 if (( ${#zeroes[@]} > 0 )); then
-    echo "ERROR: found ${#zeroes[@]} zero-length file(s) after soak:" >&2
+    echo "ERROR: found ${#zeroes[@]} incomplete payload file(s) after soak:" >&2
     for f in "${zeroes[@]}"; do
         rel="${f#"${ROOT}"/server/}"
         stat -c '  union %s bytes  %n' "$f" >&2
@@ -184,6 +197,19 @@ if (( ${#zeroes[@]} > 0 )); then
     dmesg | tail -100 | grep -i smoothfs | sed 's/^/  dmesg: /' >&2
     exit 1
 fi
+
+# Check the expected surviving names too, so missing files cannot pass find.
+for prefix in local nfs smb; do
+    completed=$(cat "${ROOT}/samba/${prefix}.completed")
+    (( completed > 0 )) || { echo "ERROR: ${prefix} completed no writes" >&2; exit 1; }
+    first=$((completed > 24 ? completed - 24 : 0))
+    for ((i=first; i<completed; i++)); do
+        [[ $(stat -c %s "${ROOT}/server/${prefix}/file-${i}.bin") == 16777216 ]] || {
+            echo "ERROR: missing or incomplete ${prefix}/file-${i}.bin" >&2
+            exit 1
+        }
+    done
+done
 
 if dmesg | tail -300 | grep -E 'smoothfs:.*(BUG|WARN|corrupt|lost|panic|Oops)' >/tmp/smoothfs-soak-dmesg.txt; then
     echo "ERROR: suspicious smoothfs dmesg lines:" >&2

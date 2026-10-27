@@ -1,6 +1,8 @@
 package fsarray
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -76,5 +78,64 @@ func TestBuildCommandArgs(t *testing.T) {
 	}
 	if got := BcachefsMountSource(plan); got != "/dev/sdb:/dev/sdc" {
 		t.Fatalf("mount source = %q", got)
+	}
+}
+
+func TestBcachefsFSTabUsesFilesystemIdentity(t *testing.T) {
+	oldPath, oldUUID := fstabPath, bcachefsUUIDForDevice
+	t.Cleanup(func() { fstabPath, bcachefsUUIDForDevice = oldPath, oldUUID })
+	fstabPath = filepath.Join(t.TempDir(), "fstab")
+	bcachefsUUIDForDevice = func(device string) (string, error) {
+		if device != "/dev/sdb" {
+			t.Fatalf("UUID device = %s", device)
+		}
+		return "4a40986a-67d5-46d7-ae1a-04ed1078941b", nil
+	}
+	if err := ensurePersistentFSTabEntry(KindBcachefs, "/dev/sdb:/dev/sdc", "/mnt/archive"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(fstabPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "UUID=4a40986a-67d5-46d7-ae1a-04ed1078941b /mnt/archive bcachefs defaults,nofail 0 0\n"
+	if string(data) != want {
+		t.Fatalf("fstab = %q", data)
+	}
+}
+
+func TestStableMemberIdentitySurvivesDiskNameChange(t *testing.T) {
+	oldID, oldPath := deviceByIDDir, deviceByPathDir
+	t.Cleanup(func() { deviceByIDDir, deviceByPathDir = oldID, oldPath })
+	root := t.TempDir()
+	deviceByIDDir = filepath.Join(root, "by-id")
+	deviceByPathDir = filepath.Join(root, "by-path")
+	if err := os.MkdirAll(deviceByIDDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	oldDevice, newDevice := filepath.Join(root, "sdb"), filepath.Join(root, "sdf")
+	if err := os.WriteFile(oldDevice, []byte("disk"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(deviceByIDDir, "wwn-unique")
+	if err := os.Symlink(oldDevice, alias); err != nil {
+		t.Fatal(err)
+	}
+	recorded := StableDevicePath(oldDevice)
+	if recorded != alias {
+		t.Fatalf("recorded member = %s", recorded)
+	}
+	if err := os.Rename(oldDevice, newDevice); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(newDevice, alias); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(recorded)
+	if err != nil || resolved != newDevice {
+		t.Fatalf("member after enumeration change: %s, %v", resolved, err)
 	}
 }

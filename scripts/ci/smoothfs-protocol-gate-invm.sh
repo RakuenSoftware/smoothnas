@@ -30,6 +30,13 @@ export HOME="${HOME:-/root}"
 mount -t tmpfs tmpfs /tmp 2>/dev/null || true
 chmod 1777 /tmp
 
+# The tests back their tiers with loop-mounted images. SmoothKernel builds
+# loop as a module (CONFIG_BLK_DEV_LOOP=m), and on a real host systemd's
+# static device nodes load it on first use; the initless guest has no
+# /dev/loop-control until the module is in, so every loop mount fails
+# ("failed to setup loop device", mount status 32). Load it up front.
+modprobe loop || { echo "guest: failed to load loop"; exit 1; }
+
 # smbd (smbtorture.sh, smb_vfs_module.sh, the soak) needs /run/samba for its
 # ncalrpc pipe dir — systemd-tmpfiles creates it on a real host; the initless
 # guest doesn't. Without it smbd aborts: "mkdir failed on directory
@@ -118,23 +125,30 @@ lsmod | grep -q '^smoothfs' || { echo "guest: smoothfs not loaded"; exit 1; }
 
 export SMOOTHFS_TEST_ROOT="${SMOOTHFS_TEST_ROOT}"
 
-# Defer smb_vfs_module.sh in the emulated CI environment. Its early assertions
-# (VFS module load, smbclient round-trip, mount.cifs) pass, but the deep
-# Phase 5.8 lease-pin lifecycle + fanotify lease-break conformance depends on
-# kernel-oplock/fanotify timing that diverges on a mainline guest kernel under
-# CPU emulation (TCG) versus the production smoothkernel — the same class of
-# behaviour SmoothFS's own CI only validates on its self-hosted runner. The
-# rest of the protocol suite (cthon04, smbtorture, tier-spill, mixed soak)
-# still runs and gates. Override to "" to force it on a capable runner.
-export SMOOTHFS_GATE_SKIP="${SMOOTHFS_GATE_SKIP-smb_vfs_module.sh}"
+# Run lease-pin and fanotify conformance by default now that SmoothFS
+# explicitly registers upper-inode lease support on modern kernels.
+export SMOOTHFS_GATE_SKIP="${SMOOTHFS_GATE_SKIP-}"
 
 rc=0
+
+# Cache semantics are a release gate alongside the existing tier/protocol tests.
+echo "== guest: cache base-authority harness =="
+if bash "${SMOOTHFS_TEST_ROOT}/cache_mode.sh" > "${GATE_LOG_DIR}/cache-mode.log" 2>&1; then
+    cat "${GATE_LOG_DIR}/cache-mode.log"
+    echo "== cache mode: PASS =="
+else
+    rc=$?
+    cat "${GATE_LOG_DIR}/cache-mode.log"
+    dmesg > "${GATE_LOG_DIR}/cache-mode-dmesg.log" 2>/dev/null || true
+    echo "== cache mode: FAIL (status ${rc}) =="
+    exit "${rc}"
+fi
 
 echo
 echo "############################################################"
 echo "#  SmoothFS protocol conformance gate"
 echo "############################################################"
-if bash "${WORKDIR}/scripts/smoothfs-protocol-gate.sh"; then
+if bash "${WORKDIR}/scripts/smoothfs-protocol-gate.sh" | tee /tmp/protocol-gate.out; then
     echo "== protocol gate: PASS =="
 else
     rc=$?
@@ -159,8 +173,17 @@ fi
 if [ "${rc}" -ne 0 ]; then
     echo "== guest: capturing diagnostics =="
     dmesg 2>/dev/null | grep -iE 'smoothfs|nfsd|cifs' | tail -120 > "${GATE_LOG_DIR}/guest-dmesg.log" 2>/dev/null || true
-    for d in /tmp/cthon-smoothfs /tmp/smbtorture-smoothfs /tmp/smoothfs-vfs58 /tmp/smoothnas-smoothfs-soak; do
+    for d in /tmp/cthon-smoothfs /tmp/smbtorture-smoothfs /tmp/smbt-smoothfs-logs /tmp/smoothfs-vfs58 /tmp/smoothnas-smoothfs-soak; do
         [ -d "$d" ] && cp -a "$d" "${GATE_LOG_DIR}/$(basename "$d")-guest" 2>/dev/null || true
+    done
+    # smbtorture.sh reports a failing MUST_PASS test by name and log path
+    # only, and the guest's /tmp (like its overlay of the copies above) is
+    # gone once the job ends, so print why each one failed.
+    for t in $(sed -n 's/^  FAIL  \([^ ]*\)  (log: .*/\1/p' /tmp/protocol-gate.out 2>/dev/null); do
+        f="/tmp/smbt-smoothfs-logs/smbt-${t}.log"
+        [ -f "$f" ] || continue
+        echo "--- ${f} (tail) ---"
+        tail -n 40 "$f"
     done
 fi
 
