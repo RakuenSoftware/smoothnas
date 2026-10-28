@@ -844,3 +844,56 @@ func TestDeleteRuntimeBondRejectsBadName(t *testing.T) {
 		t.Fatal("expected error for invalid bond name, got nil")
 	}
 }
+
+func TestGenerateBondNetdevPinsMAC(t *testing.T) {
+	content := GenerateBondNetdev(BondConfig{Name: "bond0", Mode: "active-backup", MACAddress: "bc:24:11:a1:b9:de"})
+	if !strings.Contains(content, "[NetDev]\nName=bond0\nKind=bond\nMACAddress=bc:24:11:a1:b9:de\n") {
+		t.Errorf("netdev does not pin the MAC:\n%s", content)
+	}
+	if strings.Contains(GenerateBondNetdev(BondConfig{Name: "bond0", Mode: "active-backup"}), "MACAddress=") {
+		t.Error("netdev without a MAC must not write MACAddress=")
+	}
+}
+
+func TestMemberMAC(t *testing.T) {
+	root := t.TempDir()
+	write := func(path, content string) {
+		t.Helper()
+		full := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// enp1s0 is enslaved: its address is the bond's, perm_hwaddr its own.
+	write("enp1s0/address", "e6:c1:bf:fc:a2:a7")
+	write("enp1s0/bonding_slave/perm_hwaddr", "bc:24:11:00:00:01")
+	write("enp2s0/address", "bc:24:11:00:00:02")
+
+	if got := MemberMAC(root, []string{"enp2s0", "enp1s0"}); got != "bc:24:11:00:00:01" {
+		t.Errorf("MemberMAC = %q, want the first member's permanent MAC", got)
+	}
+	if got := MemberMAC(root, []string{"enp2s0"}); got != "bc:24:11:00:00:02" {
+		t.Errorf("MemberMAC of an unbonded NIC = %q, want its address", got)
+	}
+	if got := MemberMAC(root, []string{"missing0", "enp2s0"}); got != "bc:24:11:00:00:02" {
+		t.Errorf("MemberMAC skipping a missing NIC = %q", got)
+	}
+	if got := MemberMAC(root, []string{"../enp2s0", "enp2s0/../enp1s0"}); got != "" {
+		t.Errorf("MemberMAC followed a path out of a member name: %q", got)
+	}
+	if got := MemberMAC(root, nil); got != "" {
+		t.Errorf("MemberMAC of no members = %q, want empty", got)
+	}
+}
+
+func TestGenerateNetworkFileDHCPIdentifiesByMAC(t *testing.T) {
+	if content := GenerateNetworkFile(InterfaceConfig{Name: "bond0", DHCP4: true}); !strings.Contains(content, "[DHCPv4]\nClientIdentifier=mac\n") {
+		t.Errorf("DHCPv4 config does not identify by MAC:\n%s", content)
+	}
+	if content := GenerateNetworkFile(InterfaceConfig{Name: "bond0", IPv4Addrs: []string{"192.168.1.10/24"}}); strings.Contains(content, "[DHCPv4]") {
+		t.Errorf("static config must not get a [DHCPv4] section:\n%s", content)
+	}
+}

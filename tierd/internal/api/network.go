@@ -278,6 +278,8 @@ func (h *NetworkHandler) createBond(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	bond.MACAddress = network.MemberMAC(defaultSysClassNet, bond.Members)
+
 	err := h.safeApply.Apply("Create bond "+bond.Name, func() error {
 		if err := network.RemoveLegacyCatchAllDHCP(h.networkDir); err != nil {
 			return err
@@ -478,6 +480,8 @@ func (h *NetworkHandler) updateBond(w http.ResponseWriter, r *http.Request, name
 		jsonErrorCoded(w, "a bond must have at least one member interface", http.StatusBadRequest, "network.bond_no_members")
 		return
 	}
+
+	bond.MACAddress = network.MemberMAC(defaultSysClassNet, bond.Members)
 
 	err := h.safeApply.Apply("Update bond "+name, func() error {
 		if err := network.RemoveLegacyCatchAllDHCP(h.networkDir); err != nil {
