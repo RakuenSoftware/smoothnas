@@ -396,6 +396,14 @@ func GenerateNetworkFile(iface InterfaceConfig) string {
 		fmt.Fprintf(&b, "MTUBytes=%d\n", iface.MTU)
 	}
 
+	if iface.DHCP4 {
+		// Identify by MAC, as the installer's first-boot config does:
+		// networkd's default (a DUID with a per-interface IAID) changes
+		// when a NIC's config moves to a bond, so the DHCP server would
+		// see a new client and lease a new address.
+		b.WriteString("\n[DHCPv4]\nClientIdentifier=mac\n")
+	}
+
 	return b.String()
 }
 
