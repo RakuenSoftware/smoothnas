@@ -367,8 +367,12 @@ jobs:
           # Installer UI is whiptail; no browser is bundled or used.
           INSTALLER_BROWSER_DEFERRED: '1'
         run: |
+          # Job logs need admin rights to read; on failure the tail goes into
+          # an annotation, which anyone can read.
+          set -o pipefail
+          trap 'echo "::error title=ISO build failed::$(tail -n 60 iso-build.log | tr -d "\r" | awk "BEGIN{ORS=\"%0A\"} {gsub(/%/,\"%25\"); print}")"' ERR
           chmod +x iso/build-iso.sh
-          ./iso/build-iso.sh ${{ needs.meta.outputs.version }}
+          ./iso/build-iso.sh ${{ needs.meta.outputs.version }} 2>&1 | tee iso-build.log
 
       - name: Stage per-arch release artifacts
         run: |
