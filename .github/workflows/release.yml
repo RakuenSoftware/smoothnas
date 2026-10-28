@@ -374,6 +374,12 @@ jobs:
           chmod +x iso/build-iso.sh
           ./iso/build-iso.sh ${{ needs.meta.outputs.version }} 2>&1 | tee iso-build.log
 
+      # smoothapt keeps each stable release's ISO as the base image for user
+      # images, so it verifies the ISO's provenance as it does the package's.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: iso/output/smoothnas-${{ needs.meta.outputs.version }}-${{ matrix.deb_arch }}.iso
+
       - name: Stage per-arch release artifacts
         run: |
           set -euo pipefail
