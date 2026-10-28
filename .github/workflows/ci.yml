@@ -200,3 +200,24 @@ jobs:
             apt-get update > /tmp/update.log 2>&1 || { cat /tmp/update.log; exit 1; }
             if grep -E "^(Err|E):" /tmp/update.log; then exit 1; fi
           ' 2>&1 | tee install.log
+
+      - name: Check out smoothiso
+        uses: actions/checkout@v6
+        with:
+          repository: RakuenSoftware/smoothiso
+          path: deps/smoothiso
+      - name: Build the ISO
+        env:
+          SMOOTHISO_DIR: ${{ github.workspace }}/deps/smoothiso
+          SMOOTHNAS_DEB: ${{ github.workspace }}/dist/smoothnas_0.0.0-ci_amd64.deb
+          DEB_ARCH: amd64
+          INSTALLER_BROWSER_DEFERRED: '1'
+        run: |
+          # Job logs need admin rights to read; on failure the tail goes into
+          # an annotation, which anyone can read.
+          set -o pipefail
+          trap 'echo "::error title=ISO build failed::$(tail -n 60 iso-build.log | tr -d "\r" | awk "BEGIN{ORS=\"%0A\"} {gsub(/%/,\"%25\"); print}")"' ERR
+          sudo apt-get install -y -qq xorriso isolinux syslinux-common cpio gzip zstd dosfstools debootstrap \
+            apt-utils gnupg debian-archive-keyring ripgrep wget >/dev/null
+          ./iso/build-iso.sh 0.0.0-ci 2>&1 | tee iso-build.log
+          ls -lh iso/output/
