@@ -89,6 +89,11 @@ func MemberMAC(sysRoot string, members []string) string {
 	sorted := append([]string(nil), members...)
 	sort.Strings(sorted)
 	for _, m := range sorted {
+		// Member names reach here from the API: only a bare interface
+		// name may become a path under sysRoot.
+		if m == "" || strings.Contains(m, "..") || m != filepath.Base(m) {
+			continue
+		}
 		// An enslaved NIC's address is the bond's; its own is perm_hwaddr.
 		for _, f := range []string{"bonding_slave/perm_hwaddr", "address"} {
 			data, err := os.ReadFile(filepath.Join(sysRoot, m, f))

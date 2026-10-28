@@ -881,6 +881,9 @@ func TestMemberMAC(t *testing.T) {
 	if got := MemberMAC(root, []string{"missing0", "enp2s0"}); got != "bc:24:11:00:00:02" {
 		t.Errorf("MemberMAC skipping a missing NIC = %q", got)
 	}
+	if got := MemberMAC(root, []string{"../enp2s0", "enp2s0/../enp1s0"}); got != "" {
+		t.Errorf("MemberMAC followed a path out of a member name: %q", got)
+	}
 	if got := MemberMAC(root, nil); got != "" {
 		t.Errorf("MemberMAC of no members = %q, want empty", got)
 	}
