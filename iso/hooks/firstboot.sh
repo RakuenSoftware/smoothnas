@@ -34,6 +34,17 @@ DEBIAN_FRONTEND=noninteractive dpkg --configure --pending
     exit 1
 }
 
+# Run the real postinsts the installer stubbed (packages.sh recorded them):
+# openzfs-zfs-dkms's registers and builds ZFS with DKMS.
+if [ -s /var/lib/smoothnas/reconfigure-at-firstboot ]; then
+    while read -r pkg; do
+        [ -n "$pkg" ] || continue
+        echo "Reconfiguring $pkg (postinst deferred from install)"
+        DEBIAN_FRONTEND=noninteractive dpkg-reconfigure -fnoninteractive "$pkg"
+    done < /var/lib/smoothnas/reconfigure-at-firstboot
+    rm -f /var/lib/smoothnas/reconfigure-at-firstboot
+fi
+
 # DKMS builds OpenZFS and smoothfs for every kernel with headers when their
 # packages install; build whatever the running kernel (the installed
 # SmoothKernel) still lacks, load the modules, and load them at boot.

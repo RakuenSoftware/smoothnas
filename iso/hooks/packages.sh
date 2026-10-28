@@ -69,6 +69,17 @@ if ! DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get install -y \
 fi
 rm -f "$TARGET/etc/apt/sources.list.d/smoothapt-install.list"
 
+# smoothiso replaces debconf-using postinsts with a stub during the install
+# and puts the real ones back afterwards, but nothing runs them: dpkg counts
+# those packages as configured. Among them is openzfs-zfs-dkms, whose real
+# postinst registers ZFS with DKMS. Record them so the first boot reconfigures
+# them (firstboot.sh).
+mkdir -p "$TARGET/var/lib/smoothnas"
+grep -l SMOOTHISO_STUB "$TARGET"/var/lib/dpkg/info/*.postinst 2>/dev/null |
+    sed 's|.*/||; s|\.postinst$||; s|:.*||' | sort -u \
+    > "$TARGET/var/lib/smoothnas/reconfigure-at-firstboot" || true
+echo "  Postinsts deferred to the first boot: $(tr '\n' ' ' < "$TARGET/var/lib/smoothnas/reconfigure-at-firstboot")"
+
 # tcp_bbr is built as a module in Debian's trixie kernel; SmoothKernel ships
 # BBR + FQ built-in but loading it on either kernel is a no-op when present.
 grep -qxF 'tcp_bbr' "$TARGET/etc/modules" 2>/dev/null || \
