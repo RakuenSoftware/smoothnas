@@ -1,0 +1,51 @@
+#!/bin/sh
+set -e
+
+[ "$1" = configure ] || exit 0
+
+# NASes installed before SmoothNAS was a package got tierd, its units and its
+# kernel, OpenZFS and smoothfs through the installer and tierd's own updater.
+# Remove what those left behind, so the package's units are the ones systemd
+# runs and apt takes everything from the archive, not the installer's
+# unsigned local repository.
+for unit in tierd tierd-host-init smoothnas-runtime smoothnas-tls-init smoothnas-gpu-init; do
+	f=/etc/systemd/system/$unit.service
+	if [ -f "$f" ] && grep -qs -e '^Description=SmoothNAS' -e '^Description=Generate SmoothNAS' -e '^Description=Prepare host GPUs for SmoothNAS' "$f"; then
+		rm -f "$f"
+	fi
+done
+rm -f /usr/local/bin/tierd /usr/local/bin/tierd.bak /usr/local/bin/smoothnas-tls-init \
+	/etc/apt/sources.list.d/smoothnas-local.list \
+	/etc/apt/sources.list.d/smoothnas-contrib.list \
+	/etc/apt/preferences.d/smoothnas-samba-vfs \
+	/etc/apt/apt.conf.d/52smoothnas-security-upgrades \
+	/etc/tierd/update-channel /etc/tierd/github-token \
+	/var/lib/tierd/applied-version /var/lib/tierd/smoothfs-ref
+rm -rf /opt/smoothnas/repo /opt/smoothnas/smoothfs-src /opt/smoothnas/package-manifest \
+	/usr/share/tierd-ui.bak /var/lib/tierd/update /var/lib/tierd/private-build
+rmdir /opt/smoothnas 2>/dev/null || true
+
+# reenable: an older install's links may point at the removed units above.
+for unit in smoothnas-gpu-init smoothnas-tls-init smoothnas-runtime tierd-host-init tierd; do
+	systemctl reenable "$unit.service" >/dev/null 2>&1 || true
+done
+
+if [ -d /run/systemd/system ]; then
+	systemctl daemon-reload
+	# --no-block: on an install's first boot this runs inside
+	# smoothnas-firstboot.service, which tierd and the runtime are ordered
+	# after; waiting for them here would deadlock. They start once it ends.
+	# The plugin runtime hosts the plugins' containers: restart it only when
+	# its binary changed.
+	sum=$(sha256sum /usr/lib/smoothnas/docker-lxc-daemon | cut -d' ' -f1)
+	if [ "$sum" != "$(cat /var/lib/smoothnas/runtime.sha256 2>/dev/null)" ]; then
+		systemctl --no-block try-restart smoothnas-runtime.service || true
+	fi
+	systemctl --no-block restart tierd.service || true
+	# The web UI's certificate, and nginx, which cannot start without it: on a
+	# fresh install this package is configured on the first boot, after nginx
+	# has already failed for want of the certificate.
+	systemctl --no-block start smoothnas-tls-init.service nginx.service || true
+fi
+mkdir -p /var/lib/smoothnas
+sha256sum /usr/lib/smoothnas/docker-lxc-daemon | cut -d' ' -f1 > /var/lib/smoothnas/runtime.sha256

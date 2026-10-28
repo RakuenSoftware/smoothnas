@@ -150,7 +150,7 @@ The project installs into a conventional appliance layout:
 | `/var/lib/tierd/tierd.db` | SQLite database |
 | `/var/lib/smoothnas/runtime` | plugin image/template cache and container rootfs |
 | `/var/lib/smoothnas/plugins` | flat (non-tier-bound) plugin volumes |
-| `/etc/tierd/update-channel` | persisted update channel |
+| `/etc/apt/sources.list.d/smoothapt.sources` | the Smooth* archive (smoothnas package) |
 
 The Makefile already captures the expected deployment shape.
 
@@ -305,14 +305,22 @@ smoothfs hang and start from the stack dumps in the job log.
 
 ## Release and Update Model
 
-SmoothNAS currently supports three update channels plus the manual upload path:
+SmoothNAS updates with apt. Everything it runs is one package, `smoothnas`
+(tierd, the web UI, the plugin runtime and their units), whose dependencies
+bring SmoothKernel, OpenZFS and smoothfs from the signed Smooth* archive
+(`https://updates.rakuensoftware.com/public`, suites `common` and `smoothnas`)
+and the storage and sharing tools from Debian. unattended-upgrades installs
+updates from the archive and Debian security as soon as they are published.
+A new kernel takes effect when the operator restarts; the Updates page says
+when that is needed.
 
-- `main`: public stable releases from `RakuenSoftware/smoothnas`
-- `testing`: public prereleases from `RakuenSoftware/smoothnas`
-- `jbailes`: private source builds from `JBailes/SmoothNAS` over SSH using the host `JBailes` account keys
-- local artifact upload and apply flow
-
-The `jbailes` channel is intentionally documented as transitional. It currently clones and builds from source because authenticated private release artifacts are not wired up yet. That should be replaced with a private release-artifact flow once the repo-auth and packaging path exists.
+- Each push to `main` publishes a stable release; smoothapt ingests its
+  attested packages into the `smoothnas` suite.
+- Each push to `testing` publishes a GitHub prerelease (ISO and packages) for
+  testers; the archive does not serve it.
+- smoothfs-samba-vfs depends on its exact Samba, so a Samba update installs
+  together with a matching module, which smoothfs's pipeline rebuilds daily
+  when Debian updates Samba.
 
 ## Branch Workflow
 
@@ -331,7 +339,6 @@ Two specific cleanup tracks are still open and should be treated as engineering 
 
 1. unify the tier implementation around the named-tier-instance model
 2. replace the remaining old `JBailes/SmoothNAS` module-path references with `RakuenSoftware/smoothnas`
-3. replace the temporary `jbailes` SSH source-build updater path with authenticated private release artifacts
 
 The source deep dive calls both out in more detail:
 

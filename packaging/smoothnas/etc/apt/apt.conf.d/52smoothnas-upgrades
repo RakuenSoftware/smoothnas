@@ -1,0 +1,9 @@
+// unattended-upgrades installs Debian security updates and everything from the
+// Smooth* archive (SmoothKernel, OpenZFS, SmoothNAS, smoothfs) as soon as it is
+// published. Samba and smoothfs-samba-vfs move together: the module depends
+// on its exact Samba, so a Samba update waits for a matching module.
+// A new kernel takes effect when the operator restarts the NAS.
+Unattended-Upgrade::Origins-Pattern {
+	"origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+	"origin=RakuenSoftware";
+};

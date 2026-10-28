@@ -1,3 +1,0 @@
-debian/bin/tierd       usr/sbin/
-debian/bin/tierd-cli   usr/bin/
-debian/tierd-host-init.service lib/systemd/system/

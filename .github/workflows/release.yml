@@ -1,5 +1,11 @@
 name: Release
 
+# Each push to testing publishes a prerelease, each push to main a stable
+# release: the installer ISO and the smoothnas package for amd64 and arm64.
+# NASes update with apt: smoothapt (updates.rakuensoftware.com) ingests the
+# stable releases' packages into its smoothnas suite, which takes only
+# packages whose build-provenance attestation names this workflow on main.
+
 on:
   push:
     branches: [testing, main]
@@ -23,6 +29,8 @@ permissions:
   contents: write
   packages: read
   actions: read
+  id-token: write
+  attestations: write
 
 jobs:
   meta:
@@ -33,8 +41,6 @@ jobs:
       prerelease: ${{ steps.meta.outputs.prerelease }}
       tag: ${{ steps.meta.outputs.tag }}
       name: ${{ steps.meta.outputs.name }}
-      smoothkernel_tag: ${{ steps.smoothkernel.outputs.tag }}
-      smoothfs_ref: ${{ steps.smoothfs_ref.outputs.ref }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -116,28 +122,6 @@ jobs:
           fi
 
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Read pinned SmoothKernel release tag
-        id: smoothkernel
-        run: |
-          set -euo pipefail
-          TAG="$(head -n 1 iso/smoothkernel-version | tr -d '[:space:]')"
-          [ -n "$TAG" ] || { echo "iso/smoothkernel-version is empty" >&2; exit 1; }
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Pinned to SmoothKernel release: $TAG"
-
-      - name: Read pinned smoothfs ref
-        id: smoothfs_ref
-        run: |
-          set -euo pipefail
-          # Extract the pinned default from `SMOOTHFS_REPO_REF="${SMOOTHFS_REPO_REF:-<ref>}"`.
-          # <ref> may be a release tag (e.g. v0.2.1) or a 40-char commit SHA;
-          # build-iso.sh checks out either, and this value is propagated verbatim
-          # as the manifest smoothfs_ref.
-          REF="$(grep -oE 'SMOOTHFS_REPO_REF:-[^}]+' iso/build-iso.sh | head -n1 | sed 's/.*:-//')"
-          [ -n "$REF" ] || { echo "Could not extract SMOOTHFS_REPO_REF from iso/build-iso.sh" >&2; exit 1; }
-          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
-          echo "Pinned to smoothfs ref: $REF"
 
   build:
     needs: meta
@@ -344,32 +328,16 @@ jobs:
         timeout-minutes: 10
         run: ./scripts/build-smoothnas-runtime.sh
 
-      - name: Download SmoothKernel + ZFS .debs
+      - name: Build the smoothnas package
         run: |
           set -euo pipefail
-          release_api="https://api.github.com/repos/RakuenSoftware/smoothkernel/releases/tags/${{ needs.meta.outputs.smoothkernel_tag }}"
-          for attempt in 1 2 3; do
-            rm -rf deps/smoothkernel-out
-            mkdir -p deps/smoothkernel-out
-            if timeout 240s bash -c '
-              set -euo pipefail
-              curl -fsSL --connect-timeout 10 --retry 5 --retry-delay 3 "$1" -o "$2/release.json"
-              jq -er ".assets[] | select(.name == \"SHA256SUMS\" or (.name | endswith(\".deb\"))) | [.name, .browser_download_url] | @tsv" "$2/release.json" |
-                while IFS=$'\''\t'\'' read -r name url; do
-                  curl -fL --connect-timeout 10 --retry 5 --retry-delay 3 "$url" -o "$2/$name"
-                done
-              test -s "$2/SHA256SUMS"
-            ' _ "$release_api" deps/smoothkernel-out \
-              && (cd deps/smoothkernel-out && sha256sum -c SHA256SUMS); then
-              break
-            fi
-            echo "::warning::SmoothKernel download attempt ${attempt} failed"
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            sleep "$((attempt * 15))"
-          done
-          ls -lh deps/smoothkernel-out/
+          ./packaging/build-deb.sh "${{ needs.meta.outputs.version }}" "${{ matrix.deb_arch }}" \
+            bin/tierd bin/docker-lxc-daemon tierd-ui/dist/smoothnas-ui dist
+          dpkg-deb --info "dist/smoothnas_${{ needs.meta.outputs.version }}_${{ matrix.deb_arch }}.deb"
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/smoothnas_*.deb
 
       - name: Checkout smoothiso
         if: ${{ contains(matrix.runner, 'self-hosted') == false }}
@@ -394,15 +362,17 @@ jobs:
       - name: Build ISO
         env:
           SMOOTHISO_DIR: ${{ github.workspace }}/deps/smoothiso
-          SMOOTHKERNEL_DIR: ${{ github.workspace }}/deps/smoothkernel-out
-          ZFS_ARTIFACT_DIR: ${{ github.workspace }}/deps/smoothkernel-out
-          SMOOTHFS_REPO_URL: https://github.com/RakuenSoftware/smoothfs.git
+          SMOOTHNAS_DEB: ${{ github.workspace }}/dist/smoothnas_${{ needs.meta.outputs.version }}_${{ matrix.deb_arch }}.deb
           DEB_ARCH: ${{ matrix.deb_arch }}
           # Installer UI is whiptail; no browser is bundled or used.
           INSTALLER_BROWSER_DEFERRED: '1'
         run: |
+          # Job logs need admin rights to read; on failure the tail goes into
+          # an annotation, which anyone can read.
+          set -o pipefail
+          trap 'echo "::error title=ISO build failed::$(tail -n 60 iso-build.log | tr -d "\r" | awk "BEGIN{ORS=\"%0A\"} {gsub(/%/,\"%25\"); print}")"' ERR
           chmod +x iso/build-iso.sh
-          ./iso/build-iso.sh ${{ needs.meta.outputs.version }}
+          ./iso/build-iso.sh ${{ needs.meta.outputs.version }} 2>&1 | tee iso-build.log
 
       - name: Stage per-arch release artifacts
         run: |
@@ -410,18 +380,7 @@ jobs:
           mkdir -p stage
           cp "iso/output/smoothnas-${{ needs.meta.outputs.version }}-${{ matrix.deb_arch }}.iso" \
              "stage/smoothnas-${{ needs.meta.outputs.version }}-${{ matrix.deb_arch }}.iso"
-          cp bin/tierd "stage/tierd-${{ matrix.deb_arch }}"
-          cp bin/docker-lxc-daemon "stage/smoothnas-runtime-${{ matrix.deb_arch }}"
-          # Arch-independent assets are staged from amd64 only so the release
-          # job has exactly one copy of each to upload.
-          if [ "${{ matrix.deb_arch }}" = "amd64" ]; then
-            mkdir -p dist
-            tar -czf dist/tierd-ui.tar.gz -C tierd-ui/dist/smoothnas-ui .
-            cp dist/tierd-ui.tar.gz stage/tierd-ui.tar.gz
-            # Package the smoothfs DKMS source (src/smoothfs/ contents) so the
-            # in-product updater can rebuild the kernel module on installed systems.
-            tar -czf stage/smoothfs-src.tar.gz -C iso/cache/smoothfs-src/src/smoothfs .
-          fi
+          cp "dist/smoothnas_${{ needs.meta.outputs.version }}_${{ matrix.deb_arch }}.deb" stage/
           ls -lh stage/
 
       - name: Upload per-arch artifact
@@ -454,34 +413,11 @@ jobs:
             test -d "$src" || { echo "missing artifact for $arch" >&2; exit 1; }
             for f in "$src"/*; do
               name="$(basename "$f")"
-              if [ -e "dist/$name" ]; then
-                # tierd-ui.tar.gz is staged on amd64 only, but be defensive.
-                continue
-              fi
+              [ -e "dist/$name" ] && continue
               cp "$f" "dist/$name"
             done
           done
 
-          TIERD_AMD64_SHA=$(sha256sum dist/tierd-amd64 | awk '{print $1}')
-          TIERD_ARM64_SHA=$(sha256sum dist/tierd-arm64 | awk '{print $1}')
-          RUNTIME_AMD64_SHA=$(sha256sum dist/smoothnas-runtime-amd64 | awk '{print $1}')
-          RUNTIME_ARM64_SHA=$(sha256sum dist/smoothnas-runtime-arm64 | awk '{print $1}')
-          UI_SHA=$(sha256sum dist/tierd-ui.tar.gz | awk '{print $1}')
-          SMOOTHFS_SRC_SHA=$(sha256sum dist/smoothfs-src.tar.gz | awk '{print $1}')
-          cat > dist/manifest.json <<EOFM
-          {
-            "version": "${{ needs.meta.outputs.version }}",
-            "channel": "${{ needs.meta.outputs.channel }}",
-            "tierd_amd64_sha256": "${TIERD_AMD64_SHA}",
-            "tierd_arm64_sha256": "${TIERD_ARM64_SHA}",
-            "runtime_amd64_sha256": "${RUNTIME_AMD64_SHA}",
-            "runtime_arm64_sha256": "${RUNTIME_ARM64_SHA}",
-            "ui_sha256": "${UI_SHA}",
-            "smoothfs_ref": "${{ needs.meta.outputs.smoothfs_ref }}",
-            "smoothfs_src_sha256": "${SMOOTHFS_SRC_SHA}",
-            "smoothkernel_tag": "${{ needs.meta.outputs.smoothkernel_tag }}"
-          }
-          EOFM
           ls -lh dist/
 
       - name: Create GitHub Release
@@ -535,13 +471,8 @@ jobs:
           assets=(
             "dist/smoothnas-${RELEASE_VERSION}-amd64.iso"
             "dist/smoothnas-${RELEASE_VERSION}-arm64.iso"
-            "dist/tierd-amd64"
-            "dist/tierd-arm64"
-            "dist/smoothnas-runtime-amd64"
-            "dist/smoothnas-runtime-arm64"
-            "dist/tierd-ui.tar.gz"
-            "dist/smoothfs-src.tar.gz"
-            "dist/manifest.json"
+            "dist/smoothnas_${RELEASE_VERSION}_amd64.deb"
+            "dist/smoothnas_${RELEASE_VERSION}_arm64.deb"
           )
           for asset in "${assets[@]}"; do
             test -f "$asset" || { echo "Missing release asset: $asset" >&2; exit 1; }

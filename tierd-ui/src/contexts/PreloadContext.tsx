@@ -2,7 +2,7 @@ import { createContext, useContext, useState, useEffect, useCallback, ReactNode 
 import { api } from '../api/api';
 
 type PreloadKey = 'disks' | 'arrays' | 'nonRaidArrays' | 'filesystemArrays' | 'pools' | 'datasets' | 'zvols'
-  | 'snapshots' | 'protocols' | 'health' | 'alarmHistory' | 'updateChannel';
+  | 'snapshots' | 'protocols' | 'health' | 'alarmHistory';
 
 interface PreloadData {
   disks: any[];
@@ -16,7 +16,6 @@ interface PreloadData {
   protocols: any[];
   health: any | null;
   alarmHistory: any[];
-  updateChannel: any | null;
 }
 
 interface PreloadContextValue extends PreloadData {
@@ -38,12 +37,11 @@ const fetchers: Record<PreloadKey, () => Promise<any>> = {
   protocols: () => api.getProtocols(),
   health: () => api.getHealth(),
   alarmHistory: () => api.getAlarmHistory({ limit: '20' }),
-  updateChannel: () => api.getUpdateChannel(),
 };
 
 const defaults: PreloadData = {
   disks: [], arrays: [], nonRaidArrays: [], filesystemArrays: [], pools: [], datasets: [], zvols: [],
-  snapshots: [], protocols: [], health: null, alarmHistory: [], updateChannel: null,
+  snapshots: [], protocols: [], health: null, alarmHistory: [],
 };
 
 export function PreloadProvider({ children }: { children: ReactNode }) {
