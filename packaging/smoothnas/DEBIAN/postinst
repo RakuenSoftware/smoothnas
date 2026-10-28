@@ -42,6 +42,10 @@ if [ -d /run/systemd/system ]; then
 		systemctl --no-block try-restart smoothnas-runtime.service || true
 	fi
 	systemctl --no-block restart tierd.service || true
+	# The web UI's certificate, and nginx, which cannot start without it: on a
+	# fresh install this package is configured on the first boot, after nginx
+	# has already failed for want of the certificate.
+	systemctl --no-block start smoothnas-tls-init.service nginx.service || true
 fi
 mkdir -p /var/lib/smoothnas
 sha256sum /usr/lib/smoothnas/docker-lxc-daemon | cut -d' ' -f1 > /var/lib/smoothnas/runtime.sha256
