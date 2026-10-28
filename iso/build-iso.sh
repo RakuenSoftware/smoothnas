@@ -55,7 +55,7 @@ prepare_smoothiso_source() {
 
     SMOOTHISO_BUILD_DIR="${CACHE_DIR}/smoothiso-patched"
     rm -rf "$SMOOTHISO_BUILD_DIR"
-    mkdir -p "$WORK_DIR"
+    mkdir -p "$CACHE_DIR" "$WORK_DIR"
     cp -a "$SMOOTHISO_DIR" "$SMOOTHISO_BUILD_DIR"
 
     local patch
