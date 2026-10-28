@@ -297,6 +297,10 @@ func TestApplyDefaultBondPolicyHappyPath(t *testing.T) {
 	if !strings.Contains(string(netdev), "Mode="+DefaultBondMode) {
 		t.Fatalf("netdev missing mode %q\n%s", DefaultBondMode, netdev)
 	}
+	// No address files in the fake tree: the bond is left unpinned.
+	if strings.Contains(string(netdev), "MACAddress=") {
+		t.Fatalf("netdev pins a MAC with none to pin\n%s", netdev)
+	}
 	bondNetwork, _ := os.ReadFile(filepath.Join(netDir, DefaultBondNetworkFilename))
 	if !strings.Contains(string(bondNetwork), "DHCP=ipv4") {
 		t.Fatalf("bond network missing DHCP=ipv4\n%s", bondNetwork)
@@ -603,5 +607,31 @@ func TestRecreateDefaultBondClearsPerNICFilesAndRewritesBond(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(netDir, fn)); err != nil {
 			t.Fatalf("expected default-bond file %s after Re-create: %v", fn, err)
 		}
+	}
+}
+
+func TestApplyDefaultBondPolicyPinsFirstNICMAC(t *testing.T) {
+	store := newStubConfigStore()
+	netDir := t.TempDir()
+	sysRoot := makeFakeSysClassNet(t, map[string]string{
+		"enp1s0": "physical-eth",
+		"enp2s0": "physical-eth",
+	})
+	for name, mac := range map[string]string{"enp1s0": "bc:24:11:00:00:01", "enp2s0": "bc:24:11:00:00:02"} {
+		if err := os.WriteFile(filepath.Join(sysRoot, name, "address"), []byte(mac+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := ApplyDefaultBondPolicy(store, netDir, sysRoot); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	netdev, _ := os.ReadFile(filepath.Join(netDir, DefaultBondNetdevFilename))
+	if !strings.Contains(string(netdev), "MACAddress=bc:24:11:00:00:01\n") {
+		t.Fatalf("default bond not pinned to enp1s0's MAC\n%s", netdev)
+	}
+	bondNetwork, _ := os.ReadFile(filepath.Join(netDir, DefaultBondNetworkFilename))
+	if !strings.Contains(string(bondNetwork), "ClientIdentifier=mac") {
+		t.Fatalf("default bond DHCP does not identify by MAC\n%s", bondNetwork)
 	}
 }

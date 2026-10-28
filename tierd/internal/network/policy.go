@@ -254,6 +254,7 @@ func writeDefaultBondFiles(store ConfigStore, networkDir, sysRoot string) error 
 	}
 
 	bond := DefaultBondPolicy(members)
+	bond.MACAddress = MemberMAC(sysRoot, members)
 	if err := WriteConfigFile(networkDir, DefaultBondNetdevFilename,
 		GenerateBondNetdev(bond)); err != nil {
 		return fmt.Errorf("write default bond netdev: %w", err)
