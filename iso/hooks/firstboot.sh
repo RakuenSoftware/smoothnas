@@ -2,172 +2,10 @@
 # Runs once on the first boot, after smoothiso has reconfigured deferred
 # packages and brought up SSH. Inherits set -euo pipefail from the parent.
 #
-# Builds the DKMS-backed storage stack (OpenZFS, smoothfs, smoothfs Samba VFS)
+# Completes the storage stack's kernel modules (OpenZFS and smoothfs come from
+# the smoothnas package's dependencies as DKMS sources) for the running kernel
 # and finalises tierd PAM + admin bootstrap. The smoothiso parent writes the
 # firstboot-done marker on success.
-
-if [ ! -f /opt/smoothnas/package-manifest ]; then
-    echo "ERROR: missing /opt/smoothnas/package-manifest" >&2
-    exit 1
-fi
-
-# shellcheck disable=SC1091
-. /opt/smoothnas/package-manifest
-
-if [ -z "${SMOOTHKERNEL_HEADERS_PACKAGE:-}" ] || \
-   [ -z "${SMOOTHKERNEL_LIBC_PACKAGE:-}" ] || \
-   [ -z "${SMOOTHKERNEL_ZFS_PACKAGES:-}" ] || \
-   [ -z "${SMOOTHFS_VERSION:-}" ]; then
-    echo "ERROR: SmoothNAS package manifest is incomplete" >&2
-    exit 1
-fi
-
-ensure_kernel_headers_ready() {
-    local kver="$1"
-
-    if [ -z "$kver" ]; then
-        echo "ERROR: cannot validate kernel headers without a kernel version" >&2
-        return 1
-    fi
-    if [ ! -d "/usr/src/linux-headers-$kver" ]; then
-        echo "ERROR: kernel headers missing: /usr/src/linux-headers-$kver" >&2
-        return 1
-    fi
-    if [ ! -e "/lib/modules/$kver/build/include/generated/autoconf.h" ] || \
-       [ ! -e "/lib/modules/$kver/build/Module.symvers" ]; then
-        echo "ERROR: kernel headers for $kver are not DKMS-ready" >&2
-        return 1
-    fi
-}
-
-install_smoothkernel_headers() {
-    local target_kernel
-    target_kernel=$(uname -r)
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        "$SMOOTHKERNEL_LIBC_PACKAGE" \
-        "$SMOOTHKERNEL_HEADERS_PACKAGE"
-    ensure_kernel_headers_ready "$target_kernel"
-}
-
-install_zfs_stack() {
-    DEBIAN_FRONTEND=noninteractive apt-get install -y $SMOOTHKERNEL_ZFS_PACKAGES
-    grep -qxF 'zfs' /etc/modules 2>/dev/null || echo 'zfs' >> /etc/modules
-    modprobe zfs 2>/dev/null || true
-    systemctl enable zfs.target zfs-import.target zfs-import-cache.service zfs-mount.service 2>/dev/null || true
-}
-
-install_smoothfs_dkms() {
-    local target_kernel
-    target_kernel=$(uname -r)
-    mkdir -p /usr/src
-    rm -rf "/usr/src/smoothfs-${SMOOTHFS_VERSION}"
-    cp -a /opt/smoothnas/smoothfs-src "/usr/src/smoothfs-${SMOOTHFS_VERSION}"
-
-    mkdir -p /usr/share/smoothfs-dkms
-    cp /opt/smoothnas/smoothfs-src/scripts/enroll-signing-cert.sh /usr/share/smoothfs-dkms/
-    cp /opt/smoothnas/smoothfs-src/test/module_signing.sh /usr/share/smoothfs-dkms/
-    cp /opt/smoothnas/smoothfs-src/test/kernel_upgrade.sh /usr/share/smoothfs-dkms/
-    chmod +x /usr/share/smoothfs-dkms/*.sh
-
-    ensure_kernel_headers_ready "$target_kernel"
-    dkms remove -m smoothfs -v "$SMOOTHFS_VERSION" --all 2>/dev/null || true
-    dkms add -m smoothfs -v "$SMOOTHFS_VERSION"
-    dkms build -m smoothfs -v "$SMOOTHFS_VERSION" -k "$target_kernel"
-    dkms install -m smoothfs -v "$SMOOTHFS_VERSION" -k "$target_kernel"
-    update-initramfs -u -k "$target_kernel"
-    grep -qxF 'smoothfs' /etc/modules 2>/dev/null || echo 'smoothfs' >> /etc/modules
-    modprobe smoothfs 2>/dev/null || true
-}
-
-enable_debian_source_repos() {
-    # shellcheck disable=SC1091
-    . /etc/os-release
-
-    if apt-get source --print-uris samba >/dev/null 2>&1; then
-        return 0
-    fi
-
-    if [ -f /etc/apt/sources.list.d/debian.sources ]; then
-        awk '
-            /^Types:/ {
-                if ($0 ~ /deb-src/) {
-                    print
-                } else {
-                    sub(/^Types:[[:space:]]*deb/, "Types: deb-src")
-                    print
-                }
-                next
-            }
-            { print }
-        ' /etc/apt/sources.list.d/debian.sources > /etc/apt/sources.list.d/smoothnas-deb-src.sources
-    elif [ -n "${VERSION_CODENAME:-}" ]; then
-        cat > /etc/apt/sources.list.d/smoothnas-deb-src.list <<SRC
-deb-src http://deb.debian.org/debian ${VERSION_CODENAME} main contrib non-free-firmware
-deb-src http://deb.debian.org/debian-security ${VERSION_CODENAME}-security main contrib non-free-firmware
-deb-src http://deb.debian.org/debian ${VERSION_CODENAME}-updates main contrib non-free-firmware
-SRC
-    else
-        echo "ERROR: cannot enable Debian source repositories for smoothfs-samba-vfs" >&2
-        return 1
-    fi
-
-    apt-get update -qq
-}
-
-prepare_samba_source() {
-    local samba_full samba_upstream
-
-    samba_full=$(dpkg-query -W -f='${Version}' samba 2>/dev/null)
-    if [ -z "$samba_full" ]; then
-        echo "ERROR: samba is not installed" >&2
-        return 1
-    fi
-    samba_upstream=$(echo "${samba_full#2:}" | sed 's/-.*//')
-    if [ -d "/tmp/samba-${samba_upstream}" ]; then
-        return 0
-    fi
-
-    enable_debian_source_repos
-    (
-        cd /tmp
-        apt-get source "samba=${samba_full}"
-    )
-}
-
-install_smoothfs_samba_vfs() {
-    local src deb
-
-    src=/opt/smoothnas/smoothfs-src/samba-vfs
-    if [ ! -f "$src/build.sh" ]; then
-        echo "ERROR: missing smoothfs Samba VFS source at $src" >&2
-        return 1
-    fi
-
-    prepare_samba_source
-    DEBIAN_FRONTEND=noninteractive apt-get build-dep -y samba
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq debhelper dpkg-dev
-
-    (
-        cd "$src"
-        dpkg-buildpackage -us -uc -b
-    )
-    deb=$(ls -t /opt/smoothnas/smoothfs-src/smoothfs-samba-vfs_*_*.deb 2>/dev/null | head -n 1)
-    if [ -z "$deb" ]; then
-        echo "ERROR: smoothfs-samba-vfs package was not produced" >&2
-        return 1
-    fi
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "$deb"
-    if ! compgen -G '/usr/lib/*/samba/vfs/smoothfs.so' >/dev/null; then
-        echo "ERROR: smoothfs Samba VFS module did not install" >&2
-        return 1
-    fi
-}
-
-install_firstboot_service_packages() {
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        samba cifs-utils smbclient samba-testsuite
-    systemctl disable --now smbd nmbd winbind samba-ad-dc 2>/dev/null || true
-}
 
 # Promote the installer language selection to the runtime locale file.
 # configure.sh writes /etc/smoothnas/installer-lang during installation;
@@ -186,15 +24,22 @@ printf '%s\n' "$INSTALL_LANG" > /etc/smoothnas/locale
 chmod 644 /etc/smoothnas/locale
 echo "Installer language persisted: $INSTALL_LANG"
 
-apt-get update -qq
-install_smoothkernel_headers
-install_zfs_stack
-install_smoothfs_dkms
-install_firstboot_service_packages
-install_smoothfs_samba_vfs
+# DKMS builds OpenZFS and smoothfs for every kernel with headers when their
+# packages install; build whatever the running kernel (the installed
+# SmoothKernel) still lacks, load the modules, and load them at boot.
+kver=$(uname -r)
+dkms autoinstall -k "$kver"
+for module in zfs smoothfs; do
+    modprobe "$module"
+    grep -qxF "$module" /etc/modules 2>/dev/null || echo "$module" >> /etc/modules
+done
+update-initramfs -u -k "$kver"
+systemctl enable zfs.target zfs-import.target zfs-import-cache.service zfs-mount.service 2>/dev/null || true
+# Sharing services start on demand (tierd manages them).
+systemctl disable --now smbd nmbd winbind samba-ad-dc 2>/dev/null || true
 
 # The TLS certificate nginx needs is generated before nginx starts by
-# smoothnas-tls-init.service (installed by configure.sh), so the web UI is
+# smoothnas-tls-init.service (smoothnas package), so the web UI is
 # reachable while this script builds the storage stack.
 
 # Dedicated PAM service for tierd web UI logins.

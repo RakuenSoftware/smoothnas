@@ -45,13 +45,12 @@ jobs:
       - name: Check out SmoothFS at the pinned ref
         run: |
           set -euo pipefail
-          # Track the same ref the ISO/build path consumes, extracted from
-          # `SMOOTHFS_REPO_REF="${SMOOTHFS_REPO_REF:-<ref>}"` in build-iso.sh,
-          # and fetch it the same way build-iso.sh does. A plain git fetch
-          # (rather than actions/checkout with a computed ref) keeps no token
-          # in the checkout.
-          ref="$(grep -oE 'SMOOTHFS_REPO_REF:-[^}]+' iso/build-iso.sh | head -n1 | sed 's/.*:-//')"
-          [ -n "$ref" ] || { echo "could not extract SMOOTHFS_REPO_REF from iso/build-iso.sh" >&2; exit 1; }
+          # The SmoothFS ref the gate tests, pinned in scripts/ci/smoothfs-ref
+          # (installed NASes take smoothfs from the Smooth* archive). A plain
+          # git fetch (rather than actions/checkout with a computed ref) keeps
+          # no token in the checkout.
+          ref="$(tr -d '[:space:]' < scripts/ci/smoothfs-ref)"
+          [ -n "$ref" ] || { echo "scripts/ci/smoothfs-ref is empty" >&2; exit 1; }
           echo "Pinned SmoothFS ref: $ref"
           git init -q deps/smoothfs
           git -C deps/smoothfs fetch -q --depth=1 https://github.com/RakuenSoftware/smoothfs.git "$ref"

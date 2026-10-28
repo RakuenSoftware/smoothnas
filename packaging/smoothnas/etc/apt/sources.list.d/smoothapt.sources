@@ -1,0 +1,7 @@
+# SmoothNAS's package sources (smoothapt): "common" carries SmoothKernel and
+# OpenZFS, "smoothnas" carries SmoothNAS and smoothfs.
+Types: deb
+URIs: https://updates.rakuensoftware.com/public
+Suites: common smoothnas
+Components: main
+Signed-By: /usr/share/keyrings/smooth-archive-keyring.gpg

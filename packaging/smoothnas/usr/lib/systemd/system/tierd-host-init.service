@@ -1,9 +1,8 @@
 [Unit]
 Description=SmoothNAS host initialization
-Documentation=https://github.com/JBailes/SmoothNAS
-After=local-fs.target systemd-sysusers.service network-online.target
+After=local-fs.target systemd-sysusers.service network-online.target smoothnas-firstboot.service
 Wants=network-online.target
-Before=smoothnas-runtime.service tierd.service
+Before=tierd.service
 
 [Service]
 Type=oneshot
@@ -11,3 +10,6 @@ ExecStart=/usr/sbin/tierd __host_init
 Environment=HOME=/root
 Environment=USER=root
 Environment=LOGNAME=root
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,18 @@
+#!/bin/sh
+# Generates the self-signed TLS certificate nginx serves the SmoothNAS web
+# UI with. Idempotent: an existing certificate is left alone.
+set -eu
+TLS_DIR=/etc/tierd/tls
+[ -f "$TLS_DIR/cert.pem" ] && exit 0
+mkdir -p "$TLS_DIR"
+HOST=$(hostname)
+openssl req -x509 -nodes \
+    -days 3650 \
+    -newkey rsa:2048 \
+    -keyout "$TLS_DIR/key.pem" \
+    -out "$TLS_DIR/cert.pem" \
+    -subj "/CN=${HOST}/O=SmoothNAS" \
+    -addext "subjectAltName=DNS:${HOST},DNS:localhost,IP:127.0.0.1" \
+    2>/dev/null
+chmod 600 "$TLS_DIR/key.pem"
+chmod 644 "$TLS_DIR/cert.pem"

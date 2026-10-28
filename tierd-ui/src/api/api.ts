@@ -1,8 +1,7 @@
-import { apiFetch as _apiFetch, apiFetchForm as _apiFetchForm } from '@rakuensoftware/smoothgui';
+import { apiFetch as _apiFetch } from '@rakuensoftware/smoothgui';
 
 const BASE = '/api';
 const apiFetch = <T = any>(method: string, path: string, body?: unknown) => _apiFetch<T>(method, BASE + path, body);
-const apiFetchForm = <T = any>(method: string, path: string, form: FormData) => _apiFetchForm<T>(method, BASE + path, form);
 
 export const api = {
   // --- Auth ---
@@ -303,17 +302,8 @@ export const api = {
   setTuning: (tuning: any) => apiFetch('PUT', '/system/tuning', tuning),
 
   // --- Updates ---
-  checkUpdate: () => apiFetch('GET', '/system/update/check'),
-  applyUpdate: () => apiFetch('POST', '/system/update/apply', {}),
-  getUpdateProgress: () => apiFetch('GET', '/system/update/progress'),
-  getUpdateChannel: () => apiFetch('GET', '/system/update/channel'),
-  setUpdateChannel: (channel: string) => apiFetch('PUT', '/system/update/channel', { channel }),
-  uploadUpdate: (form: FormData) => apiFetchForm('POST', '/system/update/upload', form),
-
-  // --- Debian Packages ---
-  getDebianStatus: () => apiFetch('GET', '/system/debian/status'),
-  applyDebianPackages: () => apiFetch('POST', '/system/debian/apply', {}),
-  getDebianProgress: () => apiFetch('GET', '/system/debian/progress'),
+  // Updates install automatically (apt); whether one waits for a restart.
+  getRebootStatus: () => apiFetch('GET', '/system/reboot'),
 
   // --- Backup ---
   getBackupConfigs: () => apiFetch<any[]>('GET', '/backup/configs'),

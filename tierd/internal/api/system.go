@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -26,11 +25,10 @@ type logAlertRequest struct {
 // SystemHandler handles /api/system/* endpoints.
 type SystemHandler struct {
 	mon *monitor.Monitor
-	upd *updater.Updater
 }
 
-func NewSystemHandler(mon *monitor.Monitor, upd *updater.Updater) *SystemHandler {
-	return &SystemHandler{mon: mon, upd: upd}
+func NewSystemHandler(mon *monitor.Monitor) *SystemHandler {
+	return &SystemHandler{mon: mon}
 }
 
 // Route dispatches system requests.
@@ -74,67 +72,15 @@ func (h *SystemHandler) Route(w http.ResponseWriter, r *http.Request) {
 		} else {
 			jsonMethodNotAllowed(w)
 		}
-	case "/api/system/update/channel":
+	case "/api/system/reboot":
 		switch r.Method {
 		case http.MethodGet:
-			h.getChannel(w, r)
-		case http.MethodPut:
-			h.setChannel(w, r)
-		default:
-			jsonMethodNotAllowed(w)
-		}
-	case "/api/system/update/check":
-		if r.Method == http.MethodGet {
-			h.checkUpdate(w, r)
-		} else {
-			jsonMethodNotAllowed(w)
-		}
-	case "/api/system/update/apply":
-		if r.Method == http.MethodPost {
-			h.applyUpdate(w, r)
-		} else {
-			jsonMethodNotAllowed(w)
-		}
-	case "/api/system/update/upload":
-		if r.Method == http.MethodPost {
-			h.uploadUpdate(w, r)
-		} else {
-			jsonMethodNotAllowed(w)
-		}
-	case "/api/system/update/progress":
-		if r.Method == http.MethodGet {
-			h.updateProgress(w, r)
-		} else {
-			jsonMethodNotAllowed(w)
-		}
-	case "/api/system/debian/status":
-		if r.Method == http.MethodGet {
-			h.debianStatus(w, r)
-		} else {
-			jsonMethodNotAllowed(w)
-		}
-	case "/api/system/debian/check":
-		if r.Method == http.MethodPost {
-			h.checkDebianPackages(w, r)
-		} else {
-			jsonMethodNotAllowed(w)
-		}
-	case "/api/system/debian/apply":
-		if r.Method == http.MethodPost {
-			h.applyDebianPackages(w, r)
-		} else {
-			jsonMethodNotAllowed(w)
-		}
-	case "/api/system/debian/progress":
-		if r.Method == http.MethodGet {
-			h.debianProgress(w, r)
-		} else {
-			jsonMethodNotAllowed(w)
-		}
-	case "/api/system/reboot":
-		if r.Method == http.MethodPost {
+			// Updates install automatically (apt); this says whether one is
+			// waiting for a restart, which the operator starts.
+			json.NewEncoder(w).Encode(updater.GetRebootStatus())
+		case http.MethodPost:
 			h.reboot(w, r)
-		} else {
+		default:
 			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/shutdown":
@@ -354,135 +300,6 @@ func writeZfsParam(name, value string) error {
 }
 
 // --- Update channel ---
-
-func (h *SystemHandler) getChannel(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, `{"channel":%q}`, h.upd.Channel())
-}
-
-func (h *SystemHandler) setChannel(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Channel string `json:"channel"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonInvalidRequestBody(w)
-		return
-	}
-
-	if err := h.upd.SetChannel(updater.Channel(req.Channel)); err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	fmt.Fprintf(w, `{"channel":%q}`, req.Channel)
-}
-
-// --- Updates ---
-
-func (h *SystemHandler) checkUpdate(w http.ResponseWriter, r *http.Request) {
-	status, err := h.upd.Check()
-	if err != nil {
-		jsonError(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	json.NewEncoder(w).Encode(status)
-}
-
-func (h *SystemHandler) applyUpdate(w http.ResponseWriter, r *http.Request) {
-	if err := h.upd.StartApply(); err != nil {
-		jsonError(w, err.Error(), http.StatusConflict)
-		return
-	}
-	fmt.Fprintf(w, `{"status":"started"}`)
-}
-
-func (h *SystemHandler) updateProgress(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(h.upd.Progress())
-}
-
-func (h *SystemHandler) uploadUpdate(w http.ResponseWriter, r *http.Request) {
-	// 512 MB max — binary + UI + manifest + optional runtime and smoothfs-src tarballs.
-	if err := r.ParseMultipartForm(512 << 20); err != nil {
-		jsonError(w, "invalid upload: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	readFormFile := func(name string) ([]byte, error) {
-		f, _, err := r.FormFile(name)
-		if err != nil {
-			return nil, fmt.Errorf("missing %s: %w", name, err)
-		}
-		defer f.Close()
-		return io.ReadAll(f)
-	}
-
-	manifest, err := readFormFile("manifest")
-	if err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	binary, err := readFormFile("tierd")
-	if err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	ui, err := readFormFile("ui")
-	if err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// smoothnas-runtime is optional for older manifests.
-	var runtimeBinary []byte
-	if f, _, err := r.FormFile("smoothnas-runtime"); err == nil {
-		runtimeBinary, err = io.ReadAll(f)
-		f.Close()
-		if err != nil {
-			jsonError(w, "read smoothnas-runtime: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-	}
-
-	// smoothfs-src is optional — absent on manual uploads that predate this field.
-	var smoothfsSrc []byte
-	if f, _, err := r.FormFile("smoothfs-src"); err == nil {
-		smoothfsSrc, err = io.ReadAll(f)
-		f.Close()
-		if err != nil {
-			jsonError(w, "read smoothfs-src: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-	}
-
-	if err := h.upd.StartManualApply(manifest, binary, ui, runtimeBinary, smoothfsSrc); err != nil {
-		jsonError(w, err.Error(), http.StatusConflict)
-		return
-	}
-	fmt.Fprintf(w, `{"status":"started"}`)
-}
-
-func (h *SystemHandler) debianStatus(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(h.upd.DebianStatus())
-}
-
-func (h *SystemHandler) applyDebianPackages(w http.ResponseWriter, r *http.Request) {
-	if err := h.upd.StartDebianPackageApply(); err != nil {
-		jsonError(w, err.Error(), http.StatusConflict)
-		return
-	}
-	fmt.Fprintf(w, `{"status":"started"}`)
-}
-
-func (h *SystemHandler) checkDebianPackages(w http.ResponseWriter, r *http.Request) {
-	if err := h.upd.CheckDebianPackages(); err != nil {
-		jsonError(w, err.Error(), http.StatusConflict)
-		return
-	}
-	fmt.Fprintf(w, `{"status":"started"}`)
-}
-
-func (h *SystemHandler) debianProgress(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(h.upd.DebianPackageProgress())
-}
 
 // --- Power management ---
 

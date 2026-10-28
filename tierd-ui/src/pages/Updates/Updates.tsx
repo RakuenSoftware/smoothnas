@@ -1,230 +1,44 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useI18n } from '@rakuensoftware/smoothgui';
 import { api } from '../../api/api';
 import { extractError } from '../../utils/errors';
 import Spinner from '../../components/Spinner/Spinner';
 
-// Module-level cache persists across page navigations (component unmount/remount).
-let cachedUpdateInfo: any = null;
-let lastUpdateFetchMs = 0;
-const UPDATE_TTL_MS = 60_000;
+// Updates are plain apt: unattended-upgrades installs Debian security fixes and
+// everything published to the Smooth* archive as soon as it appears. Some only
+// take effect after a restart, which the operator starts from here.
+interface RebootStatus {
+  required: boolean;
+  reasons: string[] | null;
+}
 
 export default function Updates() {
   const { t } = useI18n();
-  const [loadingChannel, setLoadingChannel] = useState(true);
-  const [updateInfo, setUpdateInfo] = useState<any>(null);
-  const [updateChannel, setUpdateChannel] = useState('stable');
-  const [updateChecking, setUpdateChecking] = useState(true);
-  const [updateApplying, setUpdateApplying] = useState(false);
-  const [updateStage, setUpdateStage] = useState('');
-  const [updateError, setUpdateError] = useState('');
-  const [checkError, setCheckError] = useState('');
-  const [pkgApplying, setPkgApplying] = useState(false);
-  const [pkgStage, setPkgStage] = useState('');
-  const [pkgError, setPkgError] = useState('');
-  const [success, setSuccess] = useState('');
-  const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const reconnectTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pkgTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const sawProgressRef = useRef(false);
-  const mountedRef = useRef(false);
+  const [status, setStatus] = useState<RebootStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [restarting, setRestarting] = useState(false);
 
   useEffect(() => {
-    mountedRef.current = true;
     loadData();
-    return () => { mountedRef.current = false; clearIntervalSafe(progressTimerRef); clearIntervalSafe(reconnectTimerRef); clearIntervalSafe(pkgTimerRef); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function clearIntervalSafe(ref: React.MutableRefObject<ReturnType<typeof setInterval> | null>) {
-    if (ref.current) { clearInterval(ref.current); ref.current = null; }
-  }
-
   function loadData() {
-    setLoadingChannel(true);
-    api.getUpdateChannel().then((c: any) => { setUpdateChannel(c.channel); setLoadingChannel(false); }).catch(() => setLoadingChannel(false));
-    checkForUpdates();
-    api.getUpdateProgress().then((p: any) => {
-      if (p.error || p.stage === 'failed') {
-        clearIntervalSafe(progressTimerRef);
-        setUpdateError(p.error || t('updates.error.stoppedUnexpectedly'));
-        setUpdateApplying(false);
-      } else if (p.stage && p.stage !== 'idle' && p.stage !== 'complete') {
-        setUpdateError('');
-        setUpdateApplying(true);
-        setUpdateStage(p.stage);
-        sawProgressRef.current = true;
-        pollProgress();
-      }
-    }).catch(() => {});
-    api.getDebianProgress().then((p: any) => {
-      if (p.error || p.stage === 'failed') {
-        setPkgError(p.error || t('updates.error.stoppedUnexpectedly'));
-        setPkgApplying(false);
-      } else if (p.stage && p.stage !== 'idle' && p.stage !== 'complete') {
-        setPkgApplying(true);
-        setPkgStage(p.stage);
-        pollPackageProgress();
-      }
-    }).catch(() => {});
+    setLoading(true);
+    setError('');
+    api.getRebootStatus()
+      .then((s: RebootStatus) => setStatus(s))
+      .catch(e => setError(extractError(e, t('updates.error.status'))))
+      .finally(() => setLoading(false));
   }
 
-  function checkForUpdates(force = false) {
-    const age = Date.now() - lastUpdateFetchMs;
-    if (!force && cachedUpdateInfo && age < UPDATE_TTL_MS) {
-      setUpdateInfo(cachedUpdateInfo);
-      setUpdateChecking(false);
-      return;
-    }
-    if (cachedUpdateInfo) setUpdateInfo(cachedUpdateInfo);
-    setUpdateChecking(true);
-    setCheckError('');
-    api.checkUpdate().then((info: any) => {
-      if (!info) {
-        setUpdateChecking(false);
-        return;
-      }
-      if (cachedUpdateInfo) {
-        if (!info.stable   && cachedUpdateInfo.stable)   info.stable   = cachedUpdateInfo.stable;
-        if (!info.testing  && cachedUpdateInfo.testing)  info.testing  = cachedUpdateInfo.testing;
-        if (!info.jbailes  && cachedUpdateInfo.jbailes)  info.jbailes  = cachedUpdateInfo.jbailes;
-      }
-      cachedUpdateInfo = info;
-      lastUpdateFetchMs = Date.now();
-      setUpdateInfo(info);
-      setUpdateChecking(false);
-    }).catch((e: any) => {
-      if (!cachedUpdateInfo) setCheckError(extractError(e, t('updates.error.check')));
-      setUpdateChecking(false);
-    });
-  }
-
-  function setChannel(channel: string) {
-    api.setUpdateChannel(channel).then(() => {
-      setUpdateChannel(channel);
-      checkForUpdates(true);
-    }).catch(e => setUpdateError(extractError(e, t('updates.error.setChannel'))));
-  }
-
-  function channelLabel(channel: string): string {
-    if (channel === 'stable') return t('updates.channel.main');
-    if (channel === 'testing') return t('updates.channel.testing');
-    if (channel === 'jbailes') return t('updates.channel.jbailes');
-    return channel;
-  }
-
-  function applyUpdate() {
-    if (!updateInfo?.latest) return;
-    if (!confirm(t('updates.confirm.apply', { version: updateInfo.latest.version }))) return;
-    setUpdateApplying(true);
-    setUpdateError('');
-    setUpdateStage(t('updates.stage.starting'));
-    sawProgressRef.current = false;
-    api.applyUpdate().then(() => pollProgress())
-      .catch(e => { setUpdateError(extractError(e, t('updates.error.startUpdate'))); setUpdateApplying(false); });
-  }
-
-  function uploadManualUpdate(event: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files || []);
-    if (files.length < 3 || files.length > 5) { setUpdateError(t('updates.validate.selectAll')); return; }
-    const manifest = files.find(f => f.name === 'manifest.json');
-    const binary = files.find(f => f.name === 'tierd');
-    const ui = files.find(f => f.name === 'tierd-ui.tar.gz');
-    const runtime = files.find(f => f.name === 'smoothnas-runtime' || f.name.startsWith('smoothnas-runtime-') || f.name === 'docker-lxc-daemon');
-    const smoothfsSrc = files.find(f => f.name === 'smoothfs-src.tar.gz');
-    if (!manifest || !binary || !ui) { setUpdateError(t('updates.validate.expectedFiles')); return; }
-    if (!confirm(t('updates.confirm.manual'))) { event.target.value = ''; return; }
-    const form = new FormData();
-    form.append('manifest', manifest);
-    form.append('tierd', binary);
-    form.append('ui', ui);
-    if (runtime) form.append('smoothnas-runtime', runtime);
-    if (smoothfsSrc) form.append('smoothfs-src', smoothfsSrc);
-    setUpdateApplying(true);
-    setUpdateError('');
-    setUpdateStage(t('updates.stage.uploading'));
-    sawProgressRef.current = false;
-    api.uploadUpdate(form).then(() => pollProgress())
-      .catch(e => { setUpdateError(extractError(e, t('updates.error.upload'))); setUpdateApplying(false); event.target.value = ''; });
-  }
-
-  function pollProgress() {
-    if (!mountedRef.current) return;
-    clearIntervalSafe(progressTimerRef);
-    progressTimerRef.current = setInterval(() => {
-      api.getUpdateProgress().then((p: any) => {
-        setUpdateStage(p.stage);
-        if (p.error || p.stage === 'failed') {
-          setUpdateError(p.error || t('updates.error.stoppedUnexpectedly'));
-          setUpdateApplying(false);
-          clearIntervalSafe(progressTimerRef);
-        } else if ((p.stage === 'restarting' || p.stage === 'rebooting')) {
-          clearIntervalSafe(progressTimerRef);
-          setUpdateStage(t('updates.stage.restarting'));
-          waitForReconnect();
-        } else if (p.stage === 'idle') {
-          if (sawProgressRef.current) {
-            clearIntervalSafe(progressTimerRef);
-            setUpdateStage(t('updates.stage.restarting'));
-            waitForReconnect();
-          } else {
-            setUpdateError(t('updates.error.stoppedUnexpectedly'));
-            setUpdateApplying(false);
-            clearIntervalSafe(progressTimerRef);
-          }
-        } else {
-          sawProgressRef.current = true;
-        }
-      }).catch(() => {
-        clearIntervalSafe(progressTimerRef);
-        setUpdateStage(t('updates.stage.reconnecting'));
-        waitForReconnect();
-      });
-    }, 2000);
-  }
-
-  function waitForReconnect() {
-    if (!mountedRef.current) return;
-    clearIntervalSafe(reconnectTimerRef);
-    reconnectTimerRef.current = setInterval(() => {
-      api.getHealth().then(() => {
-        clearIntervalSafe(reconnectTimerRef);
-        setUpdateApplying(false);
-        setSuccess(t('updates.toast.complete'));
-        setTimeout(() => window.location.reload(), 500);
-      }).catch(() => {});
-    }, 3000);
-  }
-
-  function applyPackageUpdates() {
-    if (!confirm(t('updates.confirm.packages'))) return;
-    setPkgApplying(true);
-    setPkgError('');
-    setPkgStage(t('updates.pkg.starting'));
-    api.applyDebianPackages().then(() => pollPackageProgress())
-      .catch(e => { setPkgError(extractError(e, t('updates.error.startPackages'))); setPkgApplying(false); });
-  }
-
-  function pollPackageProgress() {
-    if (!mountedRef.current) return;
-    clearIntervalSafe(pkgTimerRef);
-    pkgTimerRef.current = setInterval(() => {
-      api.getDebianProgress().then((p: any) => {
-        setPkgStage(p.stage);
-        if (p.error) {
-          setPkgError(p.error);
-          setPkgApplying(false);
-          clearIntervalSafe(pkgTimerRef);
-        } else if (p.stage === 'complete') {
-          setPkgApplying(false);
-          setSuccess(t('updates.toast.packagesComplete'));
-          clearIntervalSafe(pkgTimerRef);
-        } else if (p.stage === 'failed') {
-          setPkgApplying(false);
-          clearIntervalSafe(pkgTimerRef);
-        }
-      }).catch(e => { setPkgError(extractError(e, t('updates.error.getProgress'))); setPkgApplying(false); clearIntervalSafe(pkgTimerRef); });
-    }, 2000);
+  function restart() {
+    if (!window.confirm(t('updates.confirm.restart'))) return;
+    setError('');
+    api.reboot()
+      .then(() => setRestarting(true))
+      .catch(e => setError(extractError(e, t('updates.error.restart'))));
   }
 
   return (
@@ -235,80 +49,24 @@ export default function Updates() {
         <button className="refresh-btn" onClick={loadData}>{t('common.refresh')}</button>
       </div>
 
-      {success && <div className="success">{success}</div>}
-
       <div className="section">
-        <h2>{t('updates.section.smoothnas')}</h2>
-        <Spinner loading={loadingChannel} />
-        {!loadingChannel && (
-          <>
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ fontSize: 13, color: '#666', marginBottom: 8 }}>{t('updates.label.channel')}</div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                {(['stable', 'testing', ...(updateChannel === 'jbailes' || !!updateInfo?.jbailes ? ['jbailes'] : [])] as string[]).map(channel => (
-                  <button key={channel} className={`btn ${updateChannel === channel ? 'primary' : 'secondary'}`} onClick={() => setChannel(channel)}>
-                    {channelLabel(channel)}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {checkError && <div className="error-msg">{checkError}</div>}
-            {updateError && <div className="error-msg">{updateError}</div>}
-            {updateInfo && (() => {
-              const chInfo = updateInfo[updateChannel as 'stable' | 'testing' | 'jbailes'];
-              const responseMatchesChannel = updateInfo.channel === updateChannel;
-              const available = responseMatchesChannel && updateInfo.available;
-              return (
-                <div style={{ background: '#f5f5f5', borderRadius: 8, padding: 16 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
-                    <span style={{ fontSize: 13, color: '#666' }}>
-                      {t('updates.label.running')} <strong>v{updateInfo.current_version}</strong>
-                    </span>
-                    {chInfo && (
-                      <span style={{ fontSize: 13, color: '#666' }}>
-                        {t('updates.label.latest', { channel: channelLabel(updateChannel) })} <strong>v{chInfo.version}</strong>
-                      </span>
-                    )}
-                    {updateChecking && <span style={{ fontSize: 12, color: '#aaa' }}>{t('updates.label.checking')}</span>}
-                  </div>
-                  {available ? (
-                    <>
-                      <p style={{ marginBottom: 8 }}>
-                        {t('updates.label.availablePrefix')} v{updateInfo.current_version} → <strong>v{updateInfo.latest?.version}</strong>
-                      </p>
-                      {updateInfo.latest?.body && (
-                        <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>{updateInfo.latest.body}</p>
-                      )}
-                      <button className="btn primary" onClick={applyUpdate} disabled={updateApplying}>
-                        {updateApplying ? updateStage || t('updates.button.updating') : t('updates.button.applyUpdate')}
-                      </button>
-                    </>
-                  ) : responseMatchesChannel ? (
-                    <p style={{ color: '#16a34a', margin: 0 }}>{t('updates.label.upToDate')}</p>
-                  ) : (
-                    <p style={{ fontSize: 13, color: '#aaa', margin: 0 }}>{t('updates.label.checkingChannel')}</p>
-                  )}
-                </div>
-              );
-            })()}
-            {!updateInfo && updateChecking && <Spinner loading />}
-
-            <div style={{ marginTop: 16 }}>
-              <div style={{ fontSize: 13, color: '#666', marginBottom: 8 }}>{t('updates.label.manualUpdate')}</div>
-              <p style={{ fontSize: 13, color: '#888', marginBottom: 8 }}>{t('updates.label.manualHint')}</p>
-              <input type="file" multiple accept=".json,.gz,*" onChange={uploadManualUpdate} disabled={updateApplying} />
-            </div>
-          </>
+        <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>{t('updates.label.intro')}</p>
+        {error && <div className="error-msg">{error}</div>}
+        <Spinner loading={loading} />
+        {restarting ? (
+          <div className="success">{t('updates.label.restarting')}</div>
+        ) : status?.required ? (
+          <div style={{ background: '#fef3c7', borderRadius: 8, padding: 16, marginBottom: 12 }}>
+            <p style={{ margin: '0 0 8px' }}><strong>{t('updates.label.restartNeeded')}</strong></p>
+            <ul style={{ margin: 0 }}>
+              {(status.reasons ?? []).map(r => <li key={r}>{r}</li>)}
+            </ul>
+          </div>
+        ) : status && (
+          <p style={{ color: '#16a34a', marginBottom: 12 }}>{t('updates.label.noRestart')}</p>
         )}
-      </div>
-
-      <div className="section">
-        <h2>{t('updates.section.packages')}</h2>
-        <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>{t('updates.label.pkgIntro')}</p>
-        {pkgError && <div className="error-msg">{pkgError}</div>}
-        <button className="btn primary" onClick={applyPackageUpdates} disabled={pkgApplying}>
-          {pkgApplying ? pkgStage || t('updates.pkg.updating') : t('updates.button.updatePackages')}
+        <button className={`btn ${status?.required ? 'primary' : 'secondary'}`} onClick={restart} disabled={restarting}>
+          {t('updates.button.restart')}
         </button>
       </div>
     </div>

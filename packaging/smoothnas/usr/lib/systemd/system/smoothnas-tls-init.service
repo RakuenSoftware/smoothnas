@@ -1,0 +1,10 @@
+[Unit]
+Description=Generate SmoothNAS web UI TLS certificate
+Before=nginx.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/smoothnas-tls-init
+
+[Install]
+WantedBy=nginx.service

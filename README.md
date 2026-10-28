@@ -41,7 +41,7 @@ If you know Linux and you want an appliance that still feels like Linux, this is
 - Run co-located apps as managed plugins (local LLM inference, runners, media tools) in isolated containers.
 - Benchmark local and remote targets with live fio-driven telemetry.
 - Monitor disk health and system alerts, and spin idle disks down to save power.
-- Install updates from GitHub releases or local release artifacts.
+- Stay current automatically: SmoothNAS, SmoothKernel, OpenZFS and smoothfs update with apt from the signed Smooth* archive.
 - Use the web UI in English or Dutch.
 
 ## Who It Is For
@@ -153,7 +153,7 @@ Day-2 operations are part of the product, not an afterthought:
 - inspect SMART history and alarms
 - watch alerts and hardware state
 - spin idle disks down to save power
-- adjust update channels and apply new releases
+- see whether an update is waiting for a restart, and restart
 
 ## Architecture At A Glance
 

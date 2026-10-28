@@ -35,7 +35,6 @@ import (
 	zfsmgdadapter "github.com/JBailes/SmoothNAS/tierd/internal/tiering/zfsmgd"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tiermeta"
 	"github.com/JBailes/SmoothNAS/tierd/internal/tuning"
-	"github.com/JBailes/SmoothNAS/tierd/internal/updater"
 )
 
 const tierdUsage = `tierd — SmoothNAS storage management daemon
@@ -478,7 +477,6 @@ func runHostInit() {
 	// Host-level remediation and tuning are boot-time concerns, not part of the
 	// long-lived control-plane process.
 	configureRuntimeStorage()
-	updater.EnsureSystemPackages()
 	if err := nfs.ApplyServerTuning(); err != nil {
 		log.Printf("warning: could not apply NFS tuning: %v", err)
 	}

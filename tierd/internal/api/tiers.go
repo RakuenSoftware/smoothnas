@@ -1066,9 +1066,8 @@ func mountedPathUsageBytes(mountPoint string) uint64 {
 // killMountHolders SIGKILLs every process that has any file open under
 // mountPath. Called from destroyTierPool when normal umount fails
 // because the filesystem is "in use". Uses `fuser -km` from the psmisc
-// package — listed in updater.requiredPackages so it gets installed by
-// EnsureSystemPackages on every appliance, and shipped in the ISO base
-// install. If fuser is somehow missing (manually-built host, broken
+// package — a dependency of the smoothnas package, so every appliance has
+// it. If fuser is somehow missing (manually-built host, broken
 // install) we log loudly so the failure mode is visible.
 //
 // A short pause afterwards gives the kernel time to tear down the
