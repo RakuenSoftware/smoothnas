@@ -24,6 +24,16 @@ printf '%s\n' "$INSTALL_LANG" > /etc/smoothnas/locale
 chmod 644 /etc/smoothnas/locale
 echo "Installer language persisted: $INSTALL_LANG"
 
+# Finish configuring what the installer's chroot could not (Samba and what
+# depends on it, smoothnas included). smoothiso's firstboot tried already,
+# quietly; this one must succeed, and says why if it does not.
+DEBIAN_FRONTEND=noninteractive dpkg --configure --pending
+[ "$(dpkg-query -W -f='${db:Status-Status}' smoothnas)" = installed ] || {
+    echo "ERROR: smoothnas is not configured" >&2
+    dpkg --audit >&2 || true
+    exit 1
+}
+
 # DKMS builds OpenZFS and smoothfs for every kernel with headers when their
 # packages install; build whatever the running kernel (the installed
 # SmoothKernel) still lacks, load the modules, and load them at boot.

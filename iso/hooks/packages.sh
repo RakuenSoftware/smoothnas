@@ -51,8 +51,22 @@ DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get install -y -qq \
 # can; firstboot completes it against the running kernel.
 ui_status "Installing packages" "Installing SmoothNAS, SmoothKernel, OpenZFS and smoothfs." 3 6
 cp /smoothnas/smoothnas.deb "$TARGET/var/cache/apt/archives/smoothnas.deb"
-DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get install -y \
-    /var/cache/apt/archives/smoothnas.deb 2>&1 || die "Failed to install SmoothNAS"
+# Some postinsts cannot run in the installer's chroot: samba-common's ucf
+# fails there ("Bad file descriptor"), and with it everything depending on
+# Samba, smoothnas included. Every package must still be downloaded and
+# unpacked here; the ones left unconfigured are configured on the first boot
+# (smoothiso's dpkg --configure --pending, then firstboot.sh, which fails if
+# anything is still unconfigured).
+if ! DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get install -y \
+        /var/cache/apt/archives/smoothnas.deb 2>&1; then
+    status=$(chroot "$TARGET" dpkg-query -W -f='${db:Status-Status}' smoothnas 2>/dev/null || true)
+    case "$status" in
+        installed|unpacked|half-configured) ;;
+        *) die "Failed to install SmoothNAS (smoothnas is '${status:-not unpacked}')" ;;
+    esac
+    echo "  Left for the first boot to configure:"
+    chroot "$TARGET" dpkg --audit 2>/dev/null | sed 's/^/    /' || true
+fi
 rm -f "$TARGET/etc/apt/sources.list.d/smoothapt-install.list"
 
 # tcp_bbr is built as a module in Debian's trixie kernel; SmoothKernel ships

@@ -32,13 +32,16 @@ done
 
 if [ -d /run/systemd/system ]; then
 	systemctl daemon-reload
+	# --no-block: on an install's first boot this runs inside
+	# smoothnas-firstboot.service, which tierd and the runtime are ordered
+	# after; waiting for them here would deadlock. They start once it ends.
 	# The plugin runtime hosts the plugins' containers: restart it only when
 	# its binary changed.
 	sum=$(sha256sum /usr/lib/smoothnas/docker-lxc-daemon | cut -d' ' -f1)
 	if [ "$sum" != "$(cat /var/lib/smoothnas/runtime.sha256 2>/dev/null)" ]; then
-		systemctl try-restart smoothnas-runtime.service || true
+		systemctl --no-block try-restart smoothnas-runtime.service || true
 	fi
-	systemctl restart tierd.service || true
+	systemctl --no-block restart tierd.service || true
 fi
 mkdir -p /var/lib/smoothnas
 sha256sum /usr/lib/smoothnas/docker-lxc-daemon | cut -d' ' -f1 > /var/lib/smoothnas/runtime.sha256
