@@ -305,6 +305,10 @@ export const api = {
   // --- Updates ---
   // Updates install automatically (apt); whether one waits for a restart.
   getRebootStatus: () => apiFetch('GET', '/system/reboot'),
+  getUpdateStatus: () => apiFetch('GET', '/system/updates'),
+  checkUpdates: () => apiFetch('POST', '/system/updates/check', {}),
+  installUpdates: () => apiFetch('POST', '/system/updates/install', {}),
+  getUpdateLog: (offset: number) => apiFetch('GET', `/system/updates/log?offset=${offset}`),
 
   // --- Backup ---
   getBackupConfigs: () => apiFetch<any[]>('GET', '/backup/configs'),

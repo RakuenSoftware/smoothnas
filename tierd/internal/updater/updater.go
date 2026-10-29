@@ -29,6 +29,16 @@ var (
 	// tests can fake them.
 	installedKernel = smoothKernelRelease
 	runningKernel   = unameRelease
+
+	// dkmsModules are the out-of-tree modules whose updated package only
+	// takes effect once the module is reloaded, which on a NAS means a
+	// reboot: the loaded version is read from sysfs.
+	dkmsModules = []struct{ module, pkg, name string }{
+		{"smoothfs", "smoothfs-dkms", "smoothfs"},
+		{"zfs", "openzfs-zfs-dkms", "OpenZFS"},
+	}
+	sysModuleDir     = "/sys/module"
+	installedVersion = dpkgVersion
 )
 
 // GetRebootStatus reports whether a reboot is needed for installed updates to
@@ -37,6 +47,13 @@ func GetRebootStatus() RebootStatus {
 	var st RebootStatus
 	if installed, running := installedKernel(), runningKernel(); installed != "" && running != "" && installed != running {
 		st.Reasons = append(st.Reasons, "SmoothKernel "+installed+" is installed; running "+running)
+	}
+	for _, m := range dkmsModules {
+		loaded := readFirstLine(sysModuleDir + "/" + m.module + "/version")
+		installed := upstreamVersion(installedVersion(m.pkg))
+		if loaded != "" && installed != "" && loaded != installed {
+			st.Reasons = append(st.Reasons, m.name+" "+installed+" is installed; running "+loaded)
+		}
 	}
 	if _, err := os.Stat(debianRebootRequiredPath); err == nil {
 		reason := "Debian updates"
@@ -74,6 +91,31 @@ func unameRelease() string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func dpkgVersion(pkg string) string {
+	out, err := exec.Command("dpkg-query", "-W", "-f=${Version}", pkg).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// upstreamVersion strips the Debian revision and any "+..." suffix from a
+// package version ("0.3.2+samba4.22-1" and "0.3.2-1" both give "0.3.2"), to
+// compare with the version a module reports.
+func upstreamVersion(v string) string {
+	if i := strings.IndexAny(v, "+-"); i >= 0 {
+		v = v[:i]
+	}
+	return v
+}
+
+func readFirstLine(path string) string {
+	if lines := readLines(path); len(lines) > 0 {
+		return lines[0]
+	}
+	return ""
 }
 
 // readLines returns the distinct non-empty lines of a file.

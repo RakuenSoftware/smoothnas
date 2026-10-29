@@ -22,6 +22,8 @@ func TestKernelReleaseFromDepends(t *testing.T) {
 func TestGetRebootStatus(t *testing.T) {
 	dir := t.TempDir()
 	debianRebootRequiredPath = filepath.Join(dir, "reboot-required")
+	sysModuleDir = filepath.Join(dir, "sys-module")
+	installedVersion = func(string) string { return "" }
 	installed, running := "7.2.10-74-smoothkernel", "7.2.10-74-smoothkernel"
 	installedKernel = func() string { return installed }
 	runningKernel = func() string { return running }
@@ -57,5 +59,54 @@ func TestGetRebootStatus(t *testing.T) {
 	installed = ""
 	if st := GetRebootStatus(); st.Required {
 		t.Fatalf("without SmoothKernel: %+v", st)
+	}
+}
+
+func TestRebootStatusForDKMSModules(t *testing.T) {
+	dir := t.TempDir()
+	debianRebootRequiredPath = filepath.Join(dir, "reboot-required")
+	installedKernel = func() string { return "" }
+	runningKernel = func() string { return "" }
+	sysModuleDir = filepath.Join(dir, "sys-module")
+	versions := map[string]string{
+		"smoothfs-dkms":    "0.3.2-1",
+		"openzfs-zfs-dkms": "2.3.4-1",
+	}
+	installedVersion = func(pkg string) string { return versions[pkg] }
+	write := func(module, version string) {
+		os.MkdirAll(filepath.Join(sysModuleDir, module), 0755)
+		os.WriteFile(filepath.Join(sysModuleDir, module, "version"), []byte(version+"\n"), 0644)
+	}
+
+	// Module not loaded: nothing to compare.
+	if st := GetRebootStatus(); st.Required {
+		t.Fatalf("no modules loaded: %+v", st)
+	}
+
+	// smoothfs 0.3.2 installed while 0.3.1 is still loaded.
+	write("smoothfs", "0.3.1")
+	write("zfs", "2.3.4")
+	st := GetRebootStatus()
+	if !st.Required || len(st.Reasons) != 1 || st.Reasons[0] != "smoothfs 0.3.2 is installed; running 0.3.1" {
+		t.Fatalf("pending smoothfs: %+v", st)
+	}
+
+	// After the reboot the loaded module matches.
+	write("smoothfs", "0.3.2")
+	if st := GetRebootStatus(); st.Required {
+		t.Fatalf("after reboot: %+v", st)
+	}
+}
+
+func TestUpstreamVersion(t *testing.T) {
+	for in, want := range map[string]string{
+		"0.3.2-1": "0.3.2",
+		"0.3.2+samba4.22.11+dfsg.0+deb13u1-1": "0.3.2",
+		"2.3.4":  "2.3.4",
+		"":       "",
+	} {
+		if got := upstreamVersion(in); got != want {
+			t.Errorf("upstreamVersion(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
