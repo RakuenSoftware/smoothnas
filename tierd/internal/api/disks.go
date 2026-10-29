@@ -287,21 +287,34 @@ func (h *DisksHandler) IdentifyDisk(w http.ResponseWriter, r *http.Request, devi
 
 // WipeDisk handles POST /api/disks/{id}/wipe.
 func (h *DisksHandler) WipeDisk(w http.ResponseWriter, r *http.Request, devicePath string) {
-	// Safety: refuse to wipe OS disks. Everything else is eligible because
-	// wipe is the operator escape hatch for stale ZFS/mdadm/LVM signatures.
-	disks, err := h.disksCache.GetOrFetch(disk.List)
+	// Safety: wipe is the escape hatch for stale ZFS/mdadm/LVM signatures,
+	// so it refuses any disk carrying live storage: the OS disk, a member of
+	// an imported pool, running array or volume group, or a mounted disk.
+	// Checked against a fresh listing, never the cache.
+	disks, err := disk.List()
 	if err != nil {
 		serverError(w, err)
 		return
 	}
+	found := false
 	for _, d := range disks {
 		if d.Path == devicePath {
+			found = true
 			if d.Assignment == "os" {
 				jsonErrorCoded(w, "cannot wipe OS disk", http.StatusBadRequest, "disks.cannot_wipe_os")
 				return
 			}
+			if d.InUse {
+				jsonErrorCoded(w, "disk "+devicePath+" is in use ("+d.Assignment+"); remove it from its pool or array first",
+					http.StatusConflict, "disks.cannot_wipe_in_use")
+				return
+			}
 			break
 		}
+	}
+	if !found {
+		jsonErrorCoded(w, "disk "+devicePath+" not found", http.StatusNotFound, "disks.not_found")
+		return
 	}
 
 	jobID := jobs.Start()

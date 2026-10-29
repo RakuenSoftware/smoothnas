@@ -168,6 +168,7 @@ const nl: LanguageTranslations = {
   'disks.actions.wipe': 'Wissen',
   'disks.actions.wiping': 'Wissen…',
   'disks.actions.wipe.osBlocked': 'OS-schijven kunnen niet via de UI worden gewist',
+  'disks.actions.wipe.inUseBlocked': 'In gebruik door een pool, array of mount; haal de schijf daar eerst uit',
   'disks.actions.wipe.title': 'Schijf veilig wissen',
   'disks.wipe.title': 'Schijf wissen',
   'disks.wipe.message': '{path} wissen? Alle data op deze schijf wordt vernietigd.',

@@ -33,7 +33,7 @@ export default function Pools() {
   const stopPollRef = useRef<(() => void) | null>(null);
 
   const unassignedDisks = disks.filter((d: any) => d.assignment === 'unassigned');
-  const zfsMemberDisks = importablePools.length > 0 ? disks.filter((d: any) => d.assignment === 'zfs-pool') : [];
+  const zfsMemberDisks = importablePools.length > 0 ? disks.filter((d: any) => d.assignment === 'zfs-pool' && !d.in_use) : [];
 
   useEffect(() => { if (pools !== undefined) setLoading(false); }, [pools]);
   useEffect(() => {
