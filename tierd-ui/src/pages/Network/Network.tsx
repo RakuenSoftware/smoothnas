@@ -119,11 +119,13 @@ export default function Network() {
     setEditForm({
       dhcp: !!(seed?.dhcp4 || seed?.dhcp6),
       ipv4: (seed?.ipv4_addrs || [])[0] || '',
-      gateway4: seed?.gateway4 || '',
+      // On DHCP the configured gateway/DNS are empty; seed the ones the
+      // lease provides so switching to static keeps them.
+      gateway4: seed?.gateway4 || seed?.current_gateway4 || '',
       ipv6: (seed?.ipv6_addrs || [])[0] || '',
       gateway6: seed?.gateway6 || '',
       mtu: seed?.mtu ? String(seed.mtu) : '',
-      dns: (seed?.dns || []).join(','),
+      dns: (seed?.dns?.length ? seed.dns : (seed?.current_gateway4 ? seed?.current_dns || [] : [])).join(','),
     });
     setEditTarget(target);
     setError('');

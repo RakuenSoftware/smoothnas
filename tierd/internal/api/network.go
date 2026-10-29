@@ -164,7 +164,7 @@ func (h *NetworkHandler) configureInterface(w http.ResponseWriter, r *http.Reque
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !requireUplinkConfig(w, name, cfg.DHCP4, cfg.IPv4Addrs, cfg.Gateway4, cfg.DNS) {
+	if !requireUplinkConfig(w, name, cfg.DHCP4, cfg.IPv4Addrs, &cfg.Gateway4, &cfg.DNS) {
 		return
 	}
 
@@ -198,17 +198,31 @@ var defaultRouteDevice = func() string {
 	return ""
 }
 
-// requireUplinkConfig rejects a static IPv4 configuration without a gateway
-// and DNS on the interface that carries the default route. Writing one
-// leaves the NAS unable to resolve or reach anything off the LAN, and
-// updates fail silently from then on. Other interfaces (a storage-only
-// network, say) may legitimately have neither. Writes the error and
-// returns false when the change is refused.
-func requireUplinkConfig(w http.ResponseWriter, name string, dhcp4 bool, ipv4 []string, gw4 string, dns []string) bool {
-	if dhcp4 || len(ipv4) == 0 || (gw4 != "" && len(dns) > 0) {
+// Runtime uplink values; vars so tests can fake them.
+var (
+	runtimeGateway4 = network.RuntimeGateway4
+	runtimeDNS      = network.RuntimeDNS
+)
+
+// requireUplinkConfig keeps a static address on the interface carrying the
+// default route usable. Switching it from DHCP to static used to drop the
+// gateway and DNS servers the lease provided, leaving a NAS that could
+// resolve nothing, so apt and unattended upgrades failed silently. A
+// gateway or DNS left empty is filled with what the link is using now; the
+// change is refused only when there is nothing to keep. Other interfaces (a
+// storage-only network, say) may legitimately have neither. Writes the
+// error and returns false when the change is refused.
+func requireUplinkConfig(w http.ResponseWriter, name string, dhcp4 bool, ipv4 []string, gw4 *string, dns *[]string) bool {
+	if dhcp4 || len(ipv4) == 0 || defaultRouteDevice() != name {
 		return true
 	}
-	if defaultRouteDevice() != name {
+	if *gw4 == "" {
+		*gw4 = runtimeGateway4(name)
+	}
+	if len(*dns) == 0 {
+		*dns = runtimeDNS(name)
+	}
+	if *gw4 != "" && len(*dns) > 0 {
 		return true
 	}
 	jsonErrorCoded(w, name+" carries the default route: a static address on it needs a gateway and at least one DNS server, or the NAS loses internet access and updates",
@@ -307,7 +321,7 @@ func (h *NetworkHandler) createBond(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !requireUplinkConfig(w, bond.Name, bond.DHCP4, bond.IPv4Addrs, bond.Gateway4, bond.DNS) {
+	if !requireUplinkConfig(w, bond.Name, bond.DHCP4, bond.IPv4Addrs, &bond.Gateway4, &bond.DNS) {
 		return
 	}
 	// A bond with no members can never gain carrier — it comes up DOWN and
@@ -512,7 +526,7 @@ func (h *NetworkHandler) updateBond(w http.ResponseWriter, r *http.Request, name
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !requireUplinkConfig(w, bond.Name, bond.DHCP4, bond.IPv4Addrs, bond.Gateway4, bond.DNS) {
+	if !requireUplinkConfig(w, bond.Name, bond.DHCP4, bond.IPv4Addrs, &bond.Gateway4, &bond.DNS) {
 		return
 	}
 	// A bond with no members can never gain carrier — it comes up DOWN and

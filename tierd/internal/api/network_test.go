@@ -91,33 +91,44 @@ func TestNetworkUpdateBondRejectsEmptyMembers(t *testing.T) {
 }
 
 func TestRequireUplinkConfig(t *testing.T) {
-	orig := defaultRouteDevice
+	origDev, origGW, origDNS := defaultRouteDevice, runtimeGateway4, runtimeDNS
+	t.Cleanup(func() { defaultRouteDevice, runtimeGateway4, runtimeDNS = origDev, origGW, origDNS })
 	defaultRouteDevice = func() string { return "bond0" }
-	t.Cleanup(func() { defaultRouteDevice = orig })
+	leaseGW, leaseDNS := "192.168.1.1", []string{"192.168.1.1"}
+	runtimeGateway4 = func(string) string { return leaseGW }
+	runtimeDNS = func(string) []string { return leaseDNS }
 
-	cases := []struct {
-		name    string
-		iface   string
-		dhcp    bool
-		ipv4    []string
-		gw      string
-		dns     []string
-		allowed bool
-	}{
-		{"static uplink without DNS", "bond0", false, []string{"192.168.1.254/23"}, "192.168.1.1", nil, false},
-		{"static uplink without gateway", "bond0", false, []string{"192.168.1.254/23"}, "", []string{"192.168.1.1"}, false},
-		{"static uplink complete", "bond0", false, []string{"192.168.1.254/23"}, "192.168.1.1", []string{"192.168.1.1"}, true},
-		{"DHCP uplink", "bond0", true, nil, "", nil, true},
-		{"static storage-only NIC", "enp2s0", false, []string{"10.10.0.2/24"}, "", nil, true},
+	// DHCP -> static on the uplink with gateway and DNS left empty keeps
+	// the ones the lease provided.
+	gw, dns := "", []string(nil)
+	rec := httptest.NewRecorder()
+	if !requireUplinkConfig(rec, "bond0", false, []string{"192.168.1.254/23"}, &gw, &dns) {
+		t.Fatalf("refused: %s", rec.Body.String())
 	}
-	for _, c := range cases {
-		rec := httptest.NewRecorder()
-		got := requireUplinkConfig(rec, c.iface, c.dhcp, c.ipv4, c.gw, c.dns)
-		if got != c.allowed {
-			t.Errorf("%s: allowed=%v, want %v (body %s)", c.name, got, c.allowed, rec.Body.String())
-		}
-		if !got && (rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "network.uplink_needs_gateway_dns")) {
-			t.Errorf("%s: expected a coded 400, got %d %s", c.name, rec.Code, rec.Body.String())
-		}
+	if gw != "192.168.1.1" || len(dns) != 1 || dns[0] != "192.168.1.1" {
+		t.Fatalf("expected lease values kept, got gw=%q dns=%v", gw, dns)
+	}
+
+	// Values the operator entered win over the lease.
+	gw, dns = "192.168.1.2", []string{"9.9.9.9"}
+	if !requireUplinkConfig(httptest.NewRecorder(), "bond0", false, []string{"192.168.1.254/23"}, &gw, &dns) || gw != "192.168.1.2" || dns[0] != "9.9.9.9" {
+		t.Fatalf("operator values overwritten: gw=%q dns=%v", gw, dns)
+	}
+
+	// Nothing to keep (no lease DNS): refused with a coded error.
+	leaseDNS = nil
+	gw, dns = "", nil
+	rec = httptest.NewRecorder()
+	if requireUplinkConfig(rec, "bond0", false, []string{"192.168.1.254/23"}, &gw, &dns) {
+		t.Fatal("expected refusal without any DNS server")
+	}
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "network.uplink_needs_gateway_dns") {
+		t.Fatalf("expected a coded 400, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A storage-only NIC may be static without either.
+	gw, dns = "", nil
+	if !requireUplinkConfig(httptest.NewRecorder(), "enp2s0", false, []string{"10.10.0.2/24"}, &gw, &dns) || gw != "" || dns != nil {
+		t.Fatalf("storage NIC changed or refused: gw=%q dns=%v", gw, dns)
 	}
 }
