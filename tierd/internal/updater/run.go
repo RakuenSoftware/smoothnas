@@ -64,12 +64,14 @@ var ErrRunning = fmt.Errorf("an update run is already in progress")
 // Start begins a check (refresh the package lists) or an install (refresh,
 // then install every available update) in the background.
 func Start(action string) error {
-	var cmd string
+	// The script is built only from constants: action selects one, and
+	// its value never reaches the shell.
+	var script string
 	switch action {
 	case ActionCheck:
-		cmd = aptUpdate
+		script = runScript(ActionCheck, aptUpdate, runLogPath)
 	case ActionInstall:
-		cmd = aptUpdate + " && " + aptUpgrade
+		script = runScript(ActionInstall, aptUpdate+" && "+aptUpgrade, runLogPath)
 	default:
 		return fmt.Errorf("unknown update action %q", action)
 	}
@@ -82,7 +84,7 @@ func Start(action string) error {
 	if err := os.WriteFile(runLogPath, nil, 0o644); err != nil {
 		return err
 	}
-	return startUnit(runScript(action, cmd, runLogPath))
+	return startUnit(script)
 }
 
 func runScript(action, cmd, logPath string) string {
