@@ -148,6 +148,7 @@ const en: LanguageTranslations = {
   'disks.actions.wipe': 'Wipe',
   'disks.actions.wiping': 'Wiping…',
   'disks.actions.wipe.osBlocked': 'OS disks cannot be wiped from the UI',
+  'disks.actions.wipe.inUseBlocked': 'In use by a pool, array or mount; remove it from there first',
   'disks.actions.wipe.title': 'Securely erase this disk',
   'disks.wipe.title': 'Wipe Disk',
   'disks.wipe.message': 'Wipe {path}? All data on this disk will be destroyed.',

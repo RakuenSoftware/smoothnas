@@ -249,8 +249,9 @@ export default function Disks() {
                       <button
                         className="btn danger"
                         onClick={() => wipeDisk(disk)}
-                        disabled={wipingDisks.has(disk.name) || disk.assignment === 'os'}
-                        title={disk.assignment === 'os' ? t('disks.actions.wipe.osBlocked') : t('disks.actions.wipe.title')}
+                        disabled={wipingDisks.has(disk.name) || disk.assignment === 'os' || disk.in_use}
+                        title={disk.assignment === 'os' ? t('disks.actions.wipe.osBlocked')
+                          : disk.in_use ? t('disks.actions.wipe.inUseBlocked') : t('disks.actions.wipe.title')}
                       >
                         {wipingDisks.has(disk.name) ? t('disks.actions.wiping') : t('disks.actions.wipe')}
                       </button>

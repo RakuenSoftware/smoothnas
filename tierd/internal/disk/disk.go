@@ -32,6 +32,11 @@ type Disk struct {
 	DriveType  string `json:"drive_type"` // "HDD", "SSD", or "NVMe"
 	Mountpoint string `json:"mountpoint"` // non-empty if any partition is mounted
 	Assignment string `json:"assignment"` // "unassigned", "os", "mdadm-array", "zfs-pool", etc.
+	// InUse is true when the disk carries live storage: a member of an
+	// imported ZFS pool, a running md array or an LVM volume group, or
+	// mounted. Such a disk must never be wiped; a disk whose Assignment
+	// comes only from a leftover signature is not in use.
+	InUse bool `json:"in_use"`
 }
 
 type PowerStatus struct {
@@ -88,6 +93,8 @@ func List() ([]Disk, error) {
 		size := parseSize(string(dev.Size))
 		diskPath := normalizeDiskPath(dev.Path)
 		assignment := assignmentForDevice(dev, diskPath, assigned)
+		_, live := assigned[diskPath]
+		mountpoint := findMountpoint(dev)
 
 		d := Disk{
 			Name:       dev.Name,
@@ -100,8 +107,9 @@ func List() ([]Disk, error) {
 			Transport:  dev.Tran,
 			Rotational: dev.Rota,
 			DriveType:  classifyDrive(dev),
-			Mountpoint: findMountpoint(dev),
+			Mountpoint: mountpoint,
 			Assignment: assignment,
+			InUse:      live || mountpoint != "" || assignment == "os",
 		}
 
 		disks = append(disks, d)
@@ -183,6 +191,11 @@ func assignedDisks() map[string]string {
 		mergeAssignedMDADMMembers(result, string(data))
 	}
 
+	// LVM physical volumes that belong to a volume group.
+	if out, err := exec.Command("pvs", "--noheadings", "-o", "pv_name,vg_name").Output(); err == nil {
+		mergeAssignedLVMMembers(result, string(out))
+	}
+
 	return result
 }
 
@@ -194,6 +207,25 @@ func mergeAssignedZPoolMembers(result map[string]string, status string) {
 		}
 		if strings.HasPrefix(fields[0], "/dev/") {
 			result[normalizeDiskPath(fields[0])] = "zfs-pool"
+		}
+	}
+}
+
+// mergeAssignedLVMMembers records disks holding a PV that is in a volume
+// group (`pvs -o pv_name,vg_name`). A PV on an md array or partition of
+// another member is covered by that member's own entry.
+func mergeAssignedLVMMembers(result map[string]string, pvs string) {
+	for _, line := range strings.Split(pvs, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || !strings.HasPrefix(fields[0], "/dev/") {
+			continue
+		}
+		path := normalizeDiskPath(fields[0])
+		if strings.HasPrefix(path, "/dev/md") || strings.HasPrefix(path, "/dev/dm-") {
+			continue
+		}
+		if _, ok := result[path]; !ok {
+			result[path] = "lvm"
 		}
 	}
 }

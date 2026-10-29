@@ -667,3 +667,25 @@ func searchStr(s, substr string) bool {
 	}
 	return false
 }
+
+func TestParseZPoolMemberDisks(t *testing.T) {
+	// zpool status -LP output for a pool built from by-id names: -L prints
+	// the resolved devices, which must map to whole disks.
+	members := parseZPoolMemberDisks(`
+  pool: tank
+ state: ONLINE
+config:
+
+	NAME           STATE     READ WRITE CKSUM
+	tank           ONLINE       0     0     0
+	  raidz2-0     ONLINE       0     0     0
+	    /dev/sda1  ONLINE       0     0     0
+	    /dev/sdb1  ONLINE       0     0     0
+	    /dev/nvme0n1p1  ONLINE  0     0     0
+`)
+	for _, want := range []string{"/dev/sda", "/dev/sdb", "/dev/nvme0n1"} {
+		if !members[want] {
+			t.Errorf("%s not recognised as an imported pool member: %v", want, members)
+		}
+	}
+}

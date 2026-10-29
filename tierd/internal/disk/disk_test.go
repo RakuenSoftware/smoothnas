@@ -254,3 +254,29 @@ func TestPowerStatusEligibility(t *testing.T) {
 		t.Fatalf("expected non-rotational disk to be ineligible: %+v", status)
 	}
 }
+
+func TestMergeAssignedLVMMembers(t *testing.T) {
+	origEval := evalSymlinks
+	evalSymlinks = func(path string) (string, error) { return path, nil }
+	defer func() { evalSymlinks = origEval }()
+
+	assigned := map[string]string{"/dev/nvme0n1": "mdadm"}
+	mergeAssignedLVMMembers(assigned, `
+  /dev/md0       tier-media-NVME
+  /dev/sdg1      tier-media-SSD
+  /dev/nvme0n1p3 other-vg
+  /dev/sdh
+`)
+	if got := assigned["/dev/sdg"]; got != "lvm" {
+		t.Fatalf("PV in a volume group must mark its disk in use, got %q", got)
+	}
+	if _, ok := assigned["/dev/md0"]; ok {
+		t.Fatal("an md array is not a disk; its members carry the mdadm entry")
+	}
+	if got := assigned["/dev/nvme0n1"]; got != "mdadm" {
+		t.Fatalf("an existing assignment must not be overwritten, got %q", got)
+	}
+	if _, ok := assigned["/dev/sdh"]; ok {
+		t.Fatal("a PV without a volume group is not live storage")
+	}
+}
