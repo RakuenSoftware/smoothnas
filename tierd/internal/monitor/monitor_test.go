@@ -163,3 +163,85 @@ func TestFormatInt64(t *testing.T) {
 	}
 }
 
+
+// runCycle simulates one poll in which the given scopes were checked and the
+// given alerts raised.
+func runCycle(m *Monitor, scopes [][2]string, alerts ...Alert) {
+	m.beginCycle()
+	for _, s := range scopes {
+		m.markChecked(s[0], s[1])
+	}
+	for _, a := range alerts {
+		m.addAlert(a)
+	}
+	m.endCycle()
+	m.cleanExpired()
+}
+
+func TestDismissedAlertStaysDismissedWhileConditionPersists(t *testing.T) {
+	m := New(nil, nil)
+	scope := [][2]string{{"smart", "/dev/sdg"}}
+	failed := Alert{Source: "smart", Severity: "critical", Message: "SMART health check FAILED", Device: "/dev/sdg", Timestamp: time.Now()}
+
+	runCycle(m, scope, failed)
+	if m.AlertCount() != 1 {
+		t.Fatalf("expected 1 alert, got %d", m.AlertCount())
+	}
+	m.ClearAlert(m.GetAlerts()[0].ID)
+
+	for i := 0; i < 3; i++ {
+		runCycle(m, scope, failed)
+		if m.AlertCount() != 0 {
+			t.Fatalf("cycle %d: dismissed alert came back", i)
+		}
+	}
+
+	// Condition clears, then recurs: the recurrence alerts again.
+	runCycle(m, scope)
+	runCycle(m, scope, failed)
+	if m.AlertCount() != 1 {
+		t.Fatalf("expected recurrence to alert, got %d alerts", m.AlertCount())
+	}
+}
+
+func TestDismissalKeptWhenCheckDidNotRun(t *testing.T) {
+	m := New(nil, nil)
+	failed := Alert{Source: "smart", Severity: "critical", Message: "SMART health check FAILED", Device: "/dev/sdg", Timestamp: time.Now()}
+
+	runCycle(m, [][2]string{{"smart", "/dev/sdg"}}, failed)
+	m.ClearAlert(m.GetAlerts()[0].ID)
+
+	// A cycle where the disk could not be read says nothing about the
+	// condition, so the dismissal must survive it.
+	runCycle(m, nil)
+	runCycle(m, [][2]string{{"smart", "/dev/sdg"}}, failed)
+	if m.AlertCount() != 0 {
+		t.Fatalf("dismissal lost after an unchecked cycle: %d alerts", m.AlertCount())
+	}
+}
+
+func TestResolvedAlertIsRemoved(t *testing.T) {
+	m := New(nil, nil)
+	scope := [][2]string{{"mdadm", "/dev/md0"}}
+	degraded := Alert{Source: "mdadm", Severity: "warning", Message: "Array md0 is degraded (1/2 disks active)", Device: "/dev/md0", Timestamp: time.Now()}
+
+	runCycle(m, scope, degraded)
+	runCycle(m, scope)
+	if m.AlertCount() != 0 {
+		t.Fatalf("expected resolved alert to be removed, got %d", m.AlertCount())
+	}
+}
+
+func TestPersistentAlertSurvivesExpiry(t *testing.T) {
+	m := New(nil, nil)
+	scope := [][2]string{{"smart", "/dev/sdc"}}
+	old := Alert{Source: "smart", Severity: "warning", Message: "Reallocated_Sector_Ct = 1", Device: "/dev/sdc", Timestamp: time.Now().Add(-25 * time.Hour)}
+
+	runCycle(m, scope, old)
+	id := m.GetAlerts()[0].ID
+	runCycle(m, scope, old)
+	alerts := m.GetAlerts()
+	if len(alerts) != 1 || alerts[0].ID != id {
+		t.Fatalf("expected the same alert to persist past 24h, got %+v", alerts)
+	}
+}

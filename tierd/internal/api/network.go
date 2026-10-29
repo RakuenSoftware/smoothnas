@@ -175,7 +175,7 @@ func (h *NetworkHandler) configureInterface(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 // validateIPConfig is the shared CIDR / gateway / MTU validator used
@@ -303,7 +303,7 @@ func (h *NetworkHandler) createBond(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusCreated)
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 func (h *NetworkHandler) routeBond(w http.ResponseWriter, r *http.Request) {
@@ -377,7 +377,7 @@ func (h *NetworkHandler) breakBond(w http.ResponseWriter, _ *http.Request, name 
 		jsonError(w, err.Error(), http.StatusConflict)
 		return
 	}
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 // multiFlowStatus is the response shape for GET /api/network/multi-flow.
@@ -438,7 +438,7 @@ func (h *NetworkHandler) recreateDefaultBond(w http.ResponseWriter, _ *http.Requ
 		jsonError(w, err.Error(), http.StatusConflict)
 		return
 	}
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 func (h *NetworkHandler) updateBond(w http.ResponseWriter, r *http.Request, name string) {
@@ -505,7 +505,7 @@ func (h *NetworkHandler) updateBond(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 func (h *NetworkHandler) deleteBond(w http.ResponseWriter, r *http.Request, name string) {
@@ -527,7 +527,7 @@ func (h *NetworkHandler) deleteBond(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 // --- VLANs ---
@@ -588,7 +588,7 @@ func (h *NetworkHandler) createVLAN(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusCreated)
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 func (h *NetworkHandler) routeVLAN(w http.ResponseWriter, r *http.Request) {
@@ -635,7 +635,7 @@ func (h *NetworkHandler) updateVLAN(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 func (h *NetworkHandler) deleteVLAN(w http.ResponseWriter, r *http.Request, name string) {
@@ -649,7 +649,7 @@ func (h *NetworkHandler) deleteVLAN(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 // --- DNS (no safe-apply) ---
@@ -770,7 +770,7 @@ func (h *NetworkHandler) routeRoutes(w http.ResponseWriter, r *http.Request) {
 		}
 
 		w.WriteHeader(http.StatusCreated)
-		fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+		h.writeApplied(w)
 	default:
 		jsonMethodNotAllowed(w)
 	}
@@ -787,7 +787,7 @@ func (h *NetworkHandler) routeRoute(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, err.Error(), http.StatusConflict)
 			return
 		}
-		fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+		h.writeApplied(w)
 	} else {
 		jsonMethodNotAllowed(w)
 	}
@@ -825,6 +825,40 @@ func (h *NetworkHandler) getPending(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(status)
+}
+
+// writeApplied answers a successful safe-apply with the confirmation window
+// and the change's one-time confirm token.
+func (h *NetworkHandler) writeApplied(w http.ResponseWriter) {
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":                 "applied",
+		"confirm_within_seconds": 90,
+		"confirm_token":          h.safeApply.Token(),
+	})
+}
+
+// ConfirmWithToken confirms the pending change from a confirmation link. It
+// is served without a session: after an address change the browser reaches
+// the new address with no session cookie, and the unguessable one-time token
+// from the apply response is the authorisation.
+func (h *NetworkHandler) ConfirmWithToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		jsonMethodNotAllowed(w)
+		return
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonInvalidRequestBody(w)
+		return
+	}
+	if err := h.safeApply.ConfirmWithToken(body.Token); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	fmt.Fprintf(w, `{"status":"confirmed"}`)
 }
 
 func (h *NetworkHandler) confirmPending(w http.ResponseWriter, r *http.Request) {

@@ -6,6 +6,7 @@ import { api } from '../../api/api';
 import { extractError } from '../../utils/errors';
 import Spinner from '../../components/Spinner/Spinner';
 import ConfirmDialog from '../../components/ConfirmDialog/ConfirmDialog';
+import NumberInput from '../../components/NumberInput/NumberInput';
 
 export default function Datasets() {
   const { t } = useI18n();
@@ -97,7 +98,7 @@ export default function Datasets() {
               </select>
             </label>
             <label>{t('datasets.field.quota')}
-              <input type="number" value={newDs.quota} onChange={e => setNewDs(p => ({ ...p, quota: parseInt(e.target.value) || 0 }))} />
+              <NumberInput value={newDs.quota} onChange={n => setNewDs(p => ({ ...p, quota: n }))} />
             </label>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>

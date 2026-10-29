@@ -60,7 +60,6 @@ export default function Network() {
   const [routes, setRoutes] = useState<any[]>([]);
   const [hostname, setHostname] = useState('');
   const [dns, setDns] = useState<any>({});
-  const [pending, setPending] = useState<any>(null);
   const [multiFlow, setMultiFlow] = useState<any>(null);
   // Phase 7: per-NIC stats drill-down. statsOpen is the NIC name
   // currently expanded ('' when nothing is open). statsHistory
@@ -89,7 +88,14 @@ export default function Network() {
   const [modeChangeBond, setModeChangeBond] = useState<string | null>(null);
   const [modeChoice, setModeChoice] = useState<string>(BOND_MODES[0]);
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => {
+    loadData();
+    // The layout-wide pending-change banner fires this after Confirm/Revert.
+    const reload = () => loadData();
+    window.addEventListener('network-change-settled', reload);
+    return () => window.removeEventListener('network-change-settled', reload);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function loadData() {
     setLoading(true);
@@ -102,17 +108,6 @@ export default function Network() {
     api.getHostname().then((h: any) => { setHostname(h?.hostname || ''); done(); }).catch(done);
     api.getDns().then((d: any) => { setDns(d || {}); done(); }).catch(done);
     api.getMultiFlow().then((m: any) => { setMultiFlow(m); done(); }).catch(done);
-    api.getPendingChange().then(setPending).catch(() => {});
-  }
-
-  function confirm() {
-    api.confirmChange().then(() => { setPending(null); loadData(); })
-      .catch(e => setError(extractError(e, t('network.error.confirm'))));
-  }
-
-  function revert() {
-    api.revertChange().then(() => { setPending(null); loadData(); })
-      .catch(e => setError(extractError(e, t('network.error.revert'))));
   }
 
   // ---- Edit-IP form -----------------------------------------------------
@@ -498,9 +493,19 @@ export default function Network() {
     const promise = editTarget.kind === 'bond'
       ? api.updateBond(editTarget.name, { ...body, name: editTarget.name, mode: bonds.find(b => b.name === editTarget.name)?.mode || 'balance-alb', members: bonds.find(b => b.name === editTarget.name)?.members || [] })
       : api.configureInterface(editTarget.name, body);
+    const target = editTarget;
     promise
-      .then(() => {
+      .then((res: any) => {
         cancelEditIP();
+        // The change moves the address this page was loaded from: the
+        // old address stops answering, so continue at the new one, where
+        // loading the confirm page confirms the change.
+        const newHost = (body.ipv4_addrs?.[0] || '').split('/')[0];
+        if (res?.confirm_token && newHost && newHost !== location.hostname
+            && servesHost(target.name, location.hostname)) {
+          window.location.href = `${location.protocol}//${newHost}/confirm-network?token=${encodeURIComponent(res.confirm_token)}`;
+          return;
+        }
         loadData();
       })
       .catch(e => setError(extractError(e, t('network.error.applyIp'))))
@@ -526,6 +531,14 @@ export default function Network() {
       if (i.gateway4) return i.gateway4;
     }
     return '';
+  }
+
+  // servesHost reports whether the interface (or bond) currently carries
+  // the address the browser is using.
+  function servesHost(name: string, host: string): boolean {
+    const i = findInterface(name);
+    const addrs = [...(i?.addresses || []), ...(i?.ipv4_addrs || []), ...(i?.ipv6_addrs || [])];
+    return addrs.some((a: string) => a.split('/')[0] === host);
   }
 
   function ifaceAddresses(i: any): string {
@@ -980,13 +993,6 @@ export default function Network() {
 
       {error && <div className="error-msg">{error}</div>}
 
-      {pending && (
-        <div className="safe-apply-banner">
-          <span>{t('network.pending.message', { seconds: pending.remaining_seconds ?? pending.revert_in ?? '?' })}</span>
-          <button className="btn primary" onClick={confirm}>{t('network.pending.confirm')}</button>
-          <button className="btn danger" onClick={revert}>{t('network.pending.revert')}</button>
-        </div>
-      )}
 
       {modeChangeBond && (
         <div className="create-form">

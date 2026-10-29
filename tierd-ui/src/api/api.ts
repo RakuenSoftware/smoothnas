@@ -285,6 +285,7 @@ export const api = {
   getPendingChange: () => apiFetch('GET', '/network/pending'),
   confirmChange: () => apiFetch('POST', '/network/pending/confirm', {}),
   revertChange: () => apiFetch('POST', '/network/pending/revert', {}),
+  confirmChangeWithToken: (token: string) => apiFetch('POST', '/network/pending/confirm-token', { token }),
 
   // --- Network Tests ---
   getExternalSpeedtestServers: () => apiFetch<any[]>('GET', '/network-tests/external/servers'),
