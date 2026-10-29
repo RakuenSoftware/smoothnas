@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -81,6 +82,24 @@ func (h *SystemHandler) Route(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPost:
 			h.reboot(w, r)
 		default:
+			jsonMethodNotAllowed(w)
+		}
+	case "/api/system/updates":
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(updater.GetUpdateStatus())
+		} else {
+			jsonMethodNotAllowed(w)
+		}
+	case "/api/system/updates/check", "/api/system/updates/install":
+		if r.Method == http.MethodPost {
+			h.startUpdate(w, strings.TrimPrefix(path, "/api/system/updates/"))
+		} else {
+			jsonMethodNotAllowed(w)
+		}
+	case "/api/system/updates/log":
+		if r.Method == http.MethodGet {
+			h.updateLog(w, r)
+		} else {
 			jsonMethodNotAllowed(w)
 		}
 	case "/api/system/shutdown":
@@ -309,6 +328,32 @@ func (h *SystemHandler) reboot(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(500 * time.Millisecond)
 		exec.Command("systemctl", "reboot").Run()
 	}()
+}
+
+// startUpdate starts an operator update run (check or install). The run
+// executes in its own systemd unit so it survives tierd restarting when the
+// smoothnas package itself is upgraded.
+func (h *SystemHandler) startUpdate(w http.ResponseWriter, action string) {
+	if err := updater.Start(action); err != nil {
+		status := http.StatusInternalServerError
+		if err == updater.ErrRunning {
+			status = http.StatusConflict
+		}
+		jsonError(w, err.Error(), status)
+		return
+	}
+	fmt.Fprintf(w, `{"status":"started"}`)
+}
+
+// updateLog returns the update run log from ?offset= on, for the live view.
+func (h *SystemHandler) updateLog(w http.ResponseWriter, r *http.Request) {
+	offset, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
+	text, next, err := updater.ReadLog(offset)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{"text": text, "next_offset": next})
 }
 
 func (h *SystemHandler) shutdown(w http.ResponseWriter, r *http.Request) {

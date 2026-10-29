@@ -697,6 +697,50 @@ func TestSafeApplyDoubleApply(t *testing.T) {
 	sa.Confirm()
 }
 
+func TestSafeApplyConfirmWithToken(t *testing.T) {
+	sa := testSafeApply(t)
+
+	if err := sa.Apply("change address", func() error { return nil }); err != nil {
+		t.Fatalf("apply error: %v", err)
+	}
+	token := sa.Token()
+	if len(token) != 64 {
+		t.Fatalf("expected a 64-char hex token, got %q", token)
+	}
+
+	if err := sa.ConfirmWithToken(""); err == nil {
+		t.Error("empty token must not confirm")
+	}
+	if err := sa.ConfirmWithToken(strings.Repeat("0", 64)); err == nil {
+		t.Error("wrong token must not confirm")
+	}
+	if !sa.IsPending() {
+		t.Fatal("change should still be pending after rejected tokens")
+	}
+
+	if err := sa.ConfirmWithToken(token); err != nil {
+		t.Fatalf("confirm with token: %v", err)
+	}
+	if sa.IsPending() {
+		t.Error("should not be pending after token confirm")
+	}
+	if sa.Token() != "" {
+		t.Error("token must be cleared once the change is confirmed")
+	}
+	if err := sa.ConfirmWithToken(token); err == nil {
+		t.Error("a used token must not confirm again")
+	}
+
+	// Each change gets a fresh token.
+	if err := sa.Apply("second change", func() error { return nil }); err != nil {
+		t.Fatalf("apply error: %v", err)
+	}
+	if sa.Token() == token {
+		t.Error("expected a new token for a new change")
+	}
+	sa.Confirm()
+}
+
 func TestSafeApplyConfirmWithoutPending(t *testing.T) {
 	sa := testSafeApply(t)
 

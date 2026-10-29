@@ -22,6 +22,9 @@ type BondConfig struct {
 	SLAAC     bool            `json:"slaac"`
 	MTU       int             `json:"mtu"`
 	DNS       []string        `json:"dns"`
+	// Runtime values, as on Interface.
+	CurrentGateway4 string   `json:"current_gateway4"`
+	CurrentDNS      []string `json:"current_dns"`
 
 	// MACAddress pins the bond's MAC (see MemberMAC). Left empty,
 	// systemd-networkd generates one, which no DHCP server has seen.

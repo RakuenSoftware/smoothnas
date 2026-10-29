@@ -12,6 +12,7 @@ import {
 import { useAuth } from '../../contexts/AuthContext';
 import { api } from '../../api/api';
 import LanguagePicker from '../LanguagePicker/LanguagePicker';
+import PendingNetworkBanner from '../PendingNetworkBanner/PendingNetworkBanner';
 
 // Phase 2 of the SmoothNAS i18n proposal: chrome conversion.
 // Sidebar nav labels + sections, top-bar user menu, and the reboot
@@ -118,6 +119,7 @@ export default function Layout() {
       navItems={buildNavItems(t)}
       topBarContent={<TopBar />}
     >
+      <PendingNetworkBanner />
       <Outlet />
     </AppShell>
   );

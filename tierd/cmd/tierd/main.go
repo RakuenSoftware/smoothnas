@@ -156,6 +156,9 @@ func main() {
 
 	// Start background monitor.
 	mon := monitor.New(historyStore, alarmStore)
+	if err := mon.SetDismissalStore(store.DB()); err != nil {
+		log.Printf("load alert dismissals: %v", err)
+	}
 	mon.SetArraySizeChangedCallback(func(arrayPath string) {
 		tierManager.ExpandStorageForArray(arrayPath)
 	})

@@ -269,6 +269,7 @@ func newRouterFull(store *db.Store, version string, startTime time.Time, history
 		w.Header().Set("Content-Type", "application/json")
 		authHandler.Login(w, r)
 	})
+	root.HandleFunc("/api/network/pending/confirm-token", networkHandler.ConfirmWithToken)
 	root.Handle("/api/terminal", authTerminal)
 	root.Handle("/api/", jsonAuthed)
 

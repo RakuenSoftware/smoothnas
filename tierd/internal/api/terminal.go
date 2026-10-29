@@ -1,15 +1,23 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
 	sgauth "github.com/RakuenSoftware/smoothgui/auth"
 	"github.com/creack/pty/v2"
 	"nhooyr.io/websocket"
 )
+
+// terminalPingInterval keeps an idle session's connection alive. nginx
+// closes a proxied connection that carries no data for proxy_read_timeout
+// (60 s by default), which ended any session whose command printed nothing
+// for a minute, such as a DKMS build during an upgrade.
+const terminalPingInterval = 20 * time.Second
 
 // TerminalHandler serves an interactive shell over a WebSocket.
 type TerminalHandler struct{}
@@ -78,6 +86,27 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		closeOnce.Do(func() { close(done) })
+	}()
+
+	// Keepalive: a ping every terminalPingInterval keeps traffic on the
+	// connection while the shell is quiet.
+	go func() {
+		ticker := time.NewTicker(terminalPingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				pingCtx, cancel := context.WithTimeout(ctx, terminalPingInterval)
+				err := conn.Ping(pingCtx)
+				cancel()
+				if err != nil {
+					closeOnce.Do(func() { close(done) })
+					return
+				}
+			}
+		}
 	}()
 
 	// WebSocket → PTY

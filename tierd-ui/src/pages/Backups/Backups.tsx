@@ -3,6 +3,7 @@ import { useI18n } from '@rakuensoftware/smoothgui';
 import { api } from '../../api/api';
 import { useToast } from '../../contexts/ToastContext';
 import ConfirmDialog from '../../components/ConfirmDialog/ConfirmDialog';
+import NumberInput from '../../components/NumberInput/NumberInput';
 
 interface BackupConfig {
   id: number;
@@ -134,8 +135,7 @@ export default function Backups() {
     setForm(f => ({ ...f, [key]: value }));
   }
 
-  function setWorkerCount(value: string) {
-    const n = Number(value);
+  function setWorkerCount(n: number) {
     if (!Number.isInteger(n)) return;
     setField('parallelism', Math.min(16, Math.max(1, n)));
   }
@@ -309,13 +309,12 @@ export default function Backups() {
             </label>
             <label title={t('backups.tooltip.workerCount')}>
               {t('backups.field.workerCount')}
-              <input
-                type="number"
+              <NumberInput
                 min={1}
                 max={16}
                 step={1}
                 value={form.parallelism}
-                onChange={e => setWorkerCount(e.target.value)}
+                onChange={setWorkerCount}
               />
             </label>
           </div>

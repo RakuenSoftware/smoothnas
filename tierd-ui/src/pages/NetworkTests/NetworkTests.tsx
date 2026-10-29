@@ -3,6 +3,7 @@ import { useI18n } from '@rakuensoftware/smoothgui';
 import { api } from '../../api/api';
 import { extractError } from '../../utils/errors';
 import NetworkTestChart from '../../charts/NetworkTestChart';
+import NumberInput from '../../components/NumberInput/NumberInput';
 
 export default function NetworkTests() {
   const { t } = useI18n();
@@ -122,9 +123,9 @@ export default function NetworkTests() {
         {testType === 'local' && (
           <div className="form-row">
             <label>{t('benchmarks.net.targetHost')} <input value={host} onChange={e => setHost(e.target.value)} placeholder="192.168.1.100" /></label>
-            <label>{t('benchmarks.net.port')} <input type="number" value={port} onChange={e => setPort(parseInt(e.target.value))} /></label>
-            <label>{t('benchmarks.io.duration')} <input type="number" value={duration} onChange={e => setDuration(parseInt(e.target.value))} min={5} max={120} /></label>
-            <label>{t('benchmarks.net.streams')} <input type="number" value={streams} onChange={e => setStreams(parseInt(e.target.value))} min={1} max={32} /></label>
+            <label>{t('benchmarks.net.port')} <NumberInput value={port} onChange={setPort} /></label>
+            <label>{t('benchmarks.io.duration')} <NumberInput value={duration} onChange={setDuration} min={5} max={120} /></label>
+            <label>{t('benchmarks.net.streams')} <NumberInput value={streams} onChange={setStreams} min={1} max={32} /></label>
             <label>{t('benchmarks.io.mode')}
               <select value={mode} onChange={e => setMode(e.target.value as any)}>
                 <option value="download">{t('benchmarks.net.download')}</option>
