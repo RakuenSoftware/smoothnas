@@ -39,7 +39,9 @@ jobs:
 
       - name: Build
         working-directory: tierd
-        run: CGO_ENABLED=1 go build -o ../bin/tierd ./cmd/tierd/
+        run: |
+          ../scripts/ci/go-mod-download.sh .
+          CGO_ENABLED=1 go build -o ../bin/tierd ./cmd/tierd/
 
   test-backend:
     runs-on: ubuntu-24.04
@@ -56,7 +58,9 @@ jobs:
 
       - name: Run Go tests
         working-directory: tierd
-        run: CGO_ENABLED=1 go test ./... -count=1
+        run: |
+          ../scripts/ci/go-mod-download.sh .
+          CGO_ENABLED=1 go test ./... -count=1
 
   build-frontend:
     runs-on: ubuntu-24.04
@@ -155,6 +159,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libpam0g-dev build-essential lxc-dev pkg-config patch
       - name: Build tierd, the UI and the plugin runtime
         run: |
+          scripts/ci/go-mod-download.sh tierd
           (cd tierd && CGO_ENABLED=1 go build -ldflags "-X main.version=0.0.0-ci" -o ../bin/tierd ./cmd/tierd/)
           (cd tierd-ui && echo '//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}' >> .npmrc && npm ci && npm run build)
           scripts/build-smoothnas-runtime.sh

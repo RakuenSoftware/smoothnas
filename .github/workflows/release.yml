@@ -316,7 +316,9 @@ jobs:
           # some self-hosted libc header combinations that symbol is
           # only exposed when GNU extensions are explicitly enabled.
           CGO_CFLAGS: "-O2 -g -D_GNU_SOURCE"
-        run: CGO_ENABLED=1 go build -ldflags "-X main.version=${{ needs.meta.outputs.version }}" -o ../bin/tierd ./cmd/tierd/
+        run: |
+          ../scripts/ci/go-mod-download.sh .
+          CGO_ENABLED=1 go build -ldflags "-X main.version=${{ needs.meta.outputs.version }}" -o ../bin/tierd ./cmd/tierd/
 
       - name: Build tierd-ui frontend
         working-directory: tierd-ui
