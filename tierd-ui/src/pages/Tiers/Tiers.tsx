@@ -7,6 +7,7 @@ import { extractError, isApiError } from '../../utils/errors';
 import Spinner from '../../components/Spinner/Spinner';
 import ConfirmDialog from '../../components/ConfirmDialog/ConfirmDialog';
 import NamespaceFiles from './NamespaceFiles';
+import NumberInput from '../../components/NumberInput/NumberInput';
 
 function formatBytes(n: number): string {
   if (!n || n <= 0) return '0 B';
@@ -243,8 +244,8 @@ export default function Tiers() {
     return unassignedBackings().find(c => c.key === key);
   }
 
-  function updateCustomTier(i: number, field: 'name' | 'rank', value: string) {
-    setCustomTiers(prev => prev.map((t, idx) => idx === i ? { ...t, [field]: field === 'rank' ? Number(value) : value } : t));
+  function updateCustomTier(i: number, field: 'name' | 'rank', value: string | number) {
+    setCustomTiers(prev => prev.map((t, idx) => idx === i ? { ...t, [field]: value } : t));
   }
 
   function addCustomTier() {
@@ -480,8 +481,8 @@ export default function Tiers() {
                   <input key={`n${i}`} value={ct.name} placeholder={t('tiers.field.levelNamePlaceholder')}
                     onChange={e => updateCustomTier(i, 'name', e.target.value)}
                     disabled={creating} style={{ fontSize: 13 }} />
-                  <input key={`r${i}`} type="number" min={1} value={ct.rank}
-                    onChange={e => updateCustomTier(i, 'rank', e.target.value)}
+                  <NumberInput key={`r${i}`} min={1} value={ct.rank}
+                    onChange={n => updateCustomTier(i, 'rank', n)}
                     disabled={creating} style={{ fontSize: 13 }} />
                   <button key={`x${i}`} style={{ fontSize: 13, padding: '2px 6px' }}
                     onClick={() => removeCustomTier(i)} disabled={creating || customTiers.length <= 1}>✕</button>
@@ -584,14 +585,13 @@ export default function Tiers() {
                             </span>
                           )}
                           {!policy.enabled && (
-                            <input
-                              type="number"
+                            <NumberInput
                               min={1}
                               max={330}
                               style={{ width: 52, fontSize: 11 }}
                               title={t('tiers.spindown.idleMinutesTooltip')}
                               value={spindownIdleByPool[tier.name] ?? 20}
-                              onChange={e => setSpindownIdleByPool(prev => ({ ...prev, [tier.name]: Number(e.target.value) }))}
+                              onChange={n => setSpindownIdleByPool(prev => ({ ...prev, [tier.name]: n }))}
                             />
                           )}
                           <button

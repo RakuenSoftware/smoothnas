@@ -1,6 +1,9 @@
 package network
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -31,6 +34,7 @@ type SafeApply struct {
 	pending    bool
 	timer      *time.Timer
 	desc       string
+	token      string // one-time confirm token for the pending change
 	applied    time.Time
 	networkDir string
 	backupDir  string
@@ -87,6 +91,7 @@ func (s *SafeApply) Apply(description string, writeConfig func() error) error {
 
 	// Start countdown.
 	s.pending = true
+	s.token = newConfirmToken()
 	s.desc = description
 	s.applied = time.Now()
 
@@ -108,6 +113,39 @@ func (s *SafeApply) Apply(description string, writeConfig func() error) error {
 	return nil
 }
 
+// Token returns the confirm token of the pending change, or "" if none.
+// The UI carries it to the new address after a change that moves the
+// address the browser is using, where no session cookie exists yet.
+func (s *SafeApply) Token() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.pending {
+		return ""
+	}
+	return s.token
+}
+
+// ConfirmWithToken confirms the pending change if token matches its confirm
+// token. Reaching the appliance with the token proves the new network
+// configuration works, which is what confirmation is meant to establish.
+func (s *SafeApply) ConfirmWithToken(token string) error {
+	s.mu.Lock()
+	ok := s.pending && token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) == 1
+	s.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("no pending change matches this confirmation link")
+	}
+	return s.Confirm()
+}
+
+func newConfirmToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand: %v", err))
+	}
+	return hex.EncodeToString(b)
+}
+
 // Confirm makes the pending change permanent.
 func (s *SafeApply) Confirm() error {
 	s.mu.Lock()
@@ -125,6 +163,7 @@ func (s *SafeApply) Confirm() error {
 	os.RemoveAll(s.backupDir)
 
 	s.pending = false
+	s.token = ""
 	s.timer = nil
 	return nil
 }
@@ -151,6 +190,7 @@ func (s *SafeApply) Revert() error {
 	}
 
 	s.pending = false
+	s.token = ""
 	s.timer = nil
 	return nil
 }

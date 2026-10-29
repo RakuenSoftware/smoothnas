@@ -32,6 +32,7 @@ import Network from './pages/Network/Network';
 import Users from './pages/Users/Users';
 import Settings from './pages/Settings/Settings';
 import Terminal from './pages/Terminal/Terminal';
+import ConfirmNetwork from './pages/ConfirmNetwork/ConfirmNetwork';
 import Benchmarks from './pages/Benchmarks/Benchmarks';
 import Updates from './pages/Updates/Updates';
 import Backups from './pages/Backups/Backups';
@@ -132,6 +133,7 @@ export default function App() {
         <ToastProvider>
           <Routes>
             <Route path="/login" element={<LoginPage appName="SmoothNAS" subtitle="Storage Management" />} />
+            <Route path="/confirm-network" element={<ConfirmNetwork />} />
             <Route element={<ProtectedLayout />}>
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
               <Route path="/dashboard" element={<Dashboard />} />

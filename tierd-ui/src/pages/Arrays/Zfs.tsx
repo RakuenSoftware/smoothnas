@@ -8,6 +8,7 @@ import ConfirmDialog from '../../components/ConfirmDialog/ConfirmDialog';
 import Datasets from '../Datasets/Datasets';
 import Zvols from '../Zvols/Zvols';
 import Snapshots from '../Snapshots/Snapshots';
+import NumberInput from '../../components/NumberInput/NumberInput';
 
 type Tab = 'pools' | 'datasets' | 'zvols' | 'snapshots';
 
@@ -259,14 +260,13 @@ export default function Zfs() {
                         {policy && (
                           <>
                             {!policy.enabled && (
-                              <input
-                                type="number"
+                              <NumberInput
                                 min={1}
                                 max={330}
                                 title="Idle minutes before HDDs spin down"
                                 style={{ width: 56 }}
                                 value={spindownIdleByPool[pool.name] ?? 20}
-                                onChange={e => setSpindownIdleByPool(prev => ({ ...prev, [pool.name]: Number(e.target.value) }))}
+                                onChange={n => setSpindownIdleByPool(prev => ({ ...prev, [pool.name]: n }))}
                               />
                             )}
                             {' '}

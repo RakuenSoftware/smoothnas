@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os/exec"
 	"strings"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
@@ -163,6 +164,9 @@ func (h *NetworkHandler) configureInterface(w http.ResponseWriter, r *http.Reque
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !requireUplinkConfig(w, name, cfg.DHCP4, cfg.IPv4Addrs, &cfg.Gateway4, &cfg.DNS) {
+		return
+	}
 
 	err := h.safeApply.Apply("Configure interface "+name, func() error {
 		if err := network.RemoveLegacyCatchAllDHCP(h.networkDir); err != nil {
@@ -175,7 +179,55 @@ func (h *NetworkHandler) configureInterface(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
+}
+
+// defaultRouteDevice returns the interface carrying the IPv4 default route,
+// or "" if there is none; a var so tests can fake it.
+var defaultRouteDevice = func() string {
+	out, err := exec.Command("ip", "-4", "route", "show", "default").Output()
+	if err != nil {
+		return ""
+	}
+	f := strings.Fields(string(out))
+	for i := 0; i+1 < len(f); i++ {
+		if f[i] == "dev" {
+			return f[i+1]
+		}
+	}
+	return ""
+}
+
+// Runtime uplink values; vars so tests can fake them.
+var (
+	runtimeGateway4 = network.RuntimeGateway4
+	runtimeDNS      = network.RuntimeDNS
+)
+
+// requireUplinkConfig keeps a static address on the interface carrying the
+// default route usable. Switching it from DHCP to static used to drop the
+// gateway and DNS servers the lease provided, leaving a NAS that could
+// resolve nothing, so apt and unattended upgrades failed silently. A
+// gateway or DNS left empty is filled with what the link is using now; the
+// change is refused only when there is nothing to keep. Other interfaces (a
+// storage-only network, say) may legitimately have neither. Writes the
+// error and returns false when the change is refused.
+func requireUplinkConfig(w http.ResponseWriter, name string, dhcp4 bool, ipv4 []string, gw4 *string, dns *[]string) bool {
+	if dhcp4 || len(ipv4) == 0 || defaultRouteDevice() != name {
+		return true
+	}
+	if *gw4 == "" {
+		*gw4 = runtimeGateway4(name)
+	}
+	if len(*dns) == 0 {
+		*dns = runtimeDNS(name)
+	}
+	if *gw4 != "" && len(*dns) > 0 {
+		return true
+	}
+	jsonErrorCoded(w, name+" carries the default route: a static address on it needs a gateway and at least one DNS server, or the NAS loses internet access and updates",
+		http.StatusBadRequest, "network.uplink_needs_gateway_dns")
+	return false
 }
 
 // validateIPConfig is the shared CIDR / gateway / MTU validator used
@@ -269,6 +321,9 @@ func (h *NetworkHandler) createBond(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !requireUplinkConfig(w, bond.Name, bond.DHCP4, bond.IPv4Addrs, &bond.Gateway4, &bond.DNS) {
+		return
+	}
 	// A bond with no members can never gain carrier — it comes up DOWN and
 	// strands whatever IP config was written to it. Reject it loudly instead
 	// of writing a dead bond. (Empty members reached here e.g. when the UI
@@ -303,7 +358,7 @@ func (h *NetworkHandler) createBond(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusCreated)
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 func (h *NetworkHandler) routeBond(w http.ResponseWriter, r *http.Request) {
@@ -377,7 +432,7 @@ func (h *NetworkHandler) breakBond(w http.ResponseWriter, _ *http.Request, name 
 		jsonError(w, err.Error(), http.StatusConflict)
 		return
 	}
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 // multiFlowStatus is the response shape for GET /api/network/multi-flow.
@@ -438,7 +493,7 @@ func (h *NetworkHandler) recreateDefaultBond(w http.ResponseWriter, _ *http.Requ
 		jsonError(w, err.Error(), http.StatusConflict)
 		return
 	}
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 func (h *NetworkHandler) updateBond(w http.ResponseWriter, r *http.Request, name string) {
@@ -469,6 +524,9 @@ func (h *NetworkHandler) updateBond(w http.ResponseWriter, r *http.Request, name
 	}
 	if err := validateIPConfig(bond.IPv4Addrs, bond.IPv6Addrs, bond.Gateway4, bond.Gateway6, bond.MTU, bond.DNS); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !requireUplinkConfig(w, bond.Name, bond.DHCP4, bond.IPv4Addrs, &bond.Gateway4, &bond.DNS) {
 		return
 	}
 	// A bond with no members can never gain carrier — it comes up DOWN and
@@ -505,7 +563,7 @@ func (h *NetworkHandler) updateBond(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 func (h *NetworkHandler) deleteBond(w http.ResponseWriter, r *http.Request, name string) {
@@ -527,7 +585,7 @@ func (h *NetworkHandler) deleteBond(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 // --- VLANs ---
@@ -588,7 +646,7 @@ func (h *NetworkHandler) createVLAN(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusCreated)
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 func (h *NetworkHandler) routeVLAN(w http.ResponseWriter, r *http.Request) {
@@ -635,7 +693,7 @@ func (h *NetworkHandler) updateVLAN(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 func (h *NetworkHandler) deleteVLAN(w http.ResponseWriter, r *http.Request, name string) {
@@ -649,7 +707,7 @@ func (h *NetworkHandler) deleteVLAN(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 
-	fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+	h.writeApplied(w)
 }
 
 // --- DNS (no safe-apply) ---
@@ -770,7 +828,7 @@ func (h *NetworkHandler) routeRoutes(w http.ResponseWriter, r *http.Request) {
 		}
 
 		w.WriteHeader(http.StatusCreated)
-		fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+		h.writeApplied(w)
 	default:
 		jsonMethodNotAllowed(w)
 	}
@@ -787,7 +845,7 @@ func (h *NetworkHandler) routeRoute(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, err.Error(), http.StatusConflict)
 			return
 		}
-		fmt.Fprintf(w, `{"status":"applied","confirm_within_seconds":90}`)
+		h.writeApplied(w)
 	} else {
 		jsonMethodNotAllowed(w)
 	}
@@ -825,6 +883,40 @@ func (h *NetworkHandler) getPending(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(status)
+}
+
+// writeApplied answers a successful safe-apply with the confirmation window
+// and the change's one-time confirm token.
+func (h *NetworkHandler) writeApplied(w http.ResponseWriter) {
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":                 "applied",
+		"confirm_within_seconds": 90,
+		"confirm_token":          h.safeApply.Token(),
+	})
+}
+
+// ConfirmWithToken confirms the pending change from a confirmation link. It
+// is served without a session: after an address change the browser reaches
+// the new address with no session cookie, and the unguessable one-time token
+// from the apply response is the authorisation.
+func (h *NetworkHandler) ConfirmWithToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		jsonMethodNotAllowed(w)
+		return
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonInvalidRequestBody(w)
+		return
+	}
+	if err := h.safeApply.ConfirmWithToken(body.Token); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	fmt.Fprintf(w, `{"status":"confirmed"}`)
 }
 
 func (h *NetworkHandler) confirmPending(w http.ResponseWriter, r *http.Request) {

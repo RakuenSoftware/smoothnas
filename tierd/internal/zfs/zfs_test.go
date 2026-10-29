@@ -571,41 +571,15 @@ func TestCheckARCAlerts(t *testing.T) {
 		t.Errorf("expected no alert for good L2ARC hit rate, got %d", len(alerts))
 	}
 
-	// ARC pressure alert when c <= c_min AND ARC has seen meaningful traffic.
-	pressured := &ARCStats{
-		Hits: 500, Misses: 1500,
-		C: 67108864, CMin: 67108864, CMax: 1073741824,
-	}
-	alerts = CheckARCAlerts(pressured)
-	if len(alerts) != 1 {
-		t.Errorf("expected 1 ARC pressure alert, got %d", len(alerts))
-	} else if alerts[0].Severity != "warning" {
-		t.Errorf("expected warning severity, got %s", alerts[0].Severity)
-	}
-
-	// No ARC pressure alert when c <= c_min but ARC is idle (e.g. no pools).
-	// ZFS initialises c == c_min by default, so without an activity guard this
-	// would permanently fire on any system with ZFS loaded and no pools.
-	idle := &ARCStats{C: 67108864, CMin: 67108864, CMax: 1073741824}
-	if alerts := CheckARCAlerts(idle); len(alerts) != 0 {
-		t.Errorf("expected no alert for idle ARC with no traffic, got %d", len(alerts))
-	}
-
-	// No ARC pressure alert when c > c_min.
-	healthy := &ARCStats{C: 268435456, CMin: 67108864, CMax: 1073741824}
-	if alerts := CheckARCAlerts(healthy); len(alerts) != 0 {
-		t.Errorf("expected no alert for healthy ARC, got %d", len(alerts))
-	}
-
-	// Both alerts fire simultaneously.
-	both := &ARCStats{
-		Hits: 500, Misses: 1500,
-		L2Hits: 10, L2Misses: 1990, // 0.5% hit rate, high traffic
-		C: 67108864, CMin: 67108864, CMax: 1073741824,
-	}
-	alerts = CheckARCAlerts(both)
-	if len(alerts) != 2 {
-		t.Errorf("expected 2 alerts (L2ARC + ARC pressure), got %d", len(alerts))
+	// No alert for the ARC at c_min, idle or under traffic: shrinking is
+	// normal ZFS behaviour, not something the user can act on.
+	for _, st := range []*ARCStats{
+		{Hits: 500, Misses: 1500, C: 67108864, CMin: 67108864, CMax: 1073741824},
+		{C: 67108864, CMin: 67108864, CMax: 1073741824},
+	} {
+		if alerts := CheckARCAlerts(st); len(alerts) != 0 {
+			t.Errorf("expected no alert for ARC at c_min, got %v", alerts)
+		}
 	}
 }
 
@@ -692,4 +666,26 @@ func searchStr(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestParseZPoolMemberDisks(t *testing.T) {
+	// zpool status -LP output for a pool built from by-id names: -L prints
+	// the resolved devices, which must map to whole disks.
+	members := parseZPoolMemberDisks(`
+  pool: tank
+ state: ONLINE
+config:
+
+	NAME           STATE     READ WRITE CKSUM
+	tank           ONLINE       0     0     0
+	  raidz2-0     ONLINE       0     0     0
+	    /dev/sda1  ONLINE       0     0     0
+	    /dev/sdb1  ONLINE       0     0     0
+	    /dev/nvme0n1p1  ONLINE  0     0     0
+`)
+	for _, want := range []string{"/dev/sda", "/dev/sdb", "/dev/nvme0n1"} {
+		if !members[want] {
+			t.Errorf("%s not recognised as an imported pool member: %v", want, members)
+		}
+	}
 }

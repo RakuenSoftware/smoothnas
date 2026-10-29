@@ -84,7 +84,9 @@ export default function Arrays() {
   const stopPollRef = useRef<(() => void) | null>(null);
 
   const unassignedDisks = disks.filter((d: any) => d.assignment === 'unassigned');
-  const zfsMemberDisks = disks.filter((d: any) => d.assignment === 'zfs-pool');
+  // Only disks with a ZFS label that no imported pool uses: an imported
+  // pool's members are live storage and must never be offered for wiping.
+  const zfsMemberDisks = disks.filter((d: any) => d.assignment === 'zfs-pool' && !d.in_use);
 
   function nextArrayName(): string {
     const used = new Set(

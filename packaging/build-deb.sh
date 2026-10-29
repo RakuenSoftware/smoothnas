@@ -19,9 +19,13 @@ UI_DIR="${5:?}"
 OUT_DIR="${6:?}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# smoothfs must be at least the release containing the SmoothFS the protocol
+# gate validated; an older one lacks the fixes the gate passed on.
+SMOOTHFS_MIN_VERSION="${SMOOTHFS_MIN_VERSION:-$("${SCRIPT_DIR}/../scripts/ci/smoothfs-min-version.sh")}"
+
 DEPENDS="linux-image-smoothkernel, linux-headers-smoothkernel, \
 openzfs-zfsutils, openzfs-zfs-dkms, openzfs-zfs-zed, \
-smoothfs-dkms, smoothfs-samba-vfs, \
+smoothfs-dkms (>= ${SMOOTHFS_MIN_VERSION}), smoothfs-samba-vfs (>= ${SMOOTHFS_MIN_VERSION}), \
 dkms, build-essential, libelf-dev, initramfs-tools, kmod, libc6, libpam0g, \
 samba, smbclient, cifs-utils, nfs-kernel-server, targetcli-fb, python3-rtslib-fb, \
 nginx, nftables, iptables, iproute2, openssl, curl, \

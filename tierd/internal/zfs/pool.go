@@ -312,19 +312,22 @@ func WipeZFSMemberDisks(paths []string) error {
 	if err != nil {
 		return fmt.Errorf("list disks: %w", err)
 	}
-	assigned := make(map[string]string, len(disks))
+	byPath := make(map[string]disk.Disk, len(disks))
 	for _, d := range disks {
-		assigned[d.Path] = d.Assignment
+		byPath[d.Path] = d
 	}
 	for _, path := range paths {
 		if err := ValidateDiskPath(path); err != nil {
 			return err
 		}
-		if assigned[path] != "zfs-pool" {
+		d, ok := byPath[path]
+		if !ok || d.Assignment != "zfs-pool" {
 			return fmt.Errorf("disk %s is not a ZFS pool member", path)
 		}
-		if activeMembers[path] {
-			return fmt.Errorf("disk %s belongs to an imported ZFS pool; destroy or export the pool before wiping it", path)
+		// Two independent checks: the disk listing's live-use flag and the
+		// imported pools' members, so a miss in one cannot wipe a live pool.
+		if d.InUse || activeMembers[path] {
+			return fmt.Errorf("disk %s belongs to an imported ZFS pool or other live storage; destroy or export the pool before wiping it", path)
 		}
 	}
 	for _, path := range paths {
@@ -337,16 +340,30 @@ func WipeZFSMemberDisks(paths []string) error {
 
 func activeZPoolMemberDisks() map[string]bool {
 	members := make(map[string]bool)
-	out, err := exec.Command("zpool", "status", "-P").Output()
+	// -L resolves vdev symlinks: pools built from /dev/disk/by-id names
+	// otherwise list members no /dev/sdX path ever matched, and the guard
+	// let an imported pool's disks be wiped.
+	out, err := exec.Command("zpool", "status", "-LP").Output()
 	if err != nil {
 		return members
 	}
-	for _, line := range strings.Split(string(out), "\n") {
+	return parseZPoolMemberDisks(string(out))
+}
+
+// parseZPoolMemberDisks maps `zpool status -LP` vdev paths to whole disks,
+// resolving any symlink that remains.
+func parseZPoolMemberDisks(status string) map[string]bool {
+	members := make(map[string]bool)
+	for _, line := range strings.Split(status, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 || !strings.HasPrefix(fields[0], "/dev/") {
 			continue
 		}
-		members[wholeDiskPath(fields[0])] = true
+		path := fields[0]
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			path = resolved
+		}
+		members[wholeDiskPath(path)] = true
 	}
 	return members
 }

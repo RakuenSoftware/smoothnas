@@ -32,6 +32,10 @@ type Interface struct {
 	DHCP6      bool     `json:"dhcp6"`
 	SLAAC      bool     `json:"slaac"`      // IPv6 SLAAC (accept RA)
 	DNS        []string `json:"dns"`        // upstream DNS servers configured on this link
+	// What the link is using right now; on DHCP these come from the lease
+	// while Gateway4/DNS (the configured values) are empty.
+	CurrentGateway4 string   `json:"current_gateway4"`
+	CurrentDNS      []string `json:"current_dns"`
 	Assignment string   `json:"assignment"` // "standalone", "bond-member", "unused"
 	BondName   string   `json:"bond_name"`  // non-empty if bond member
 }
@@ -177,6 +181,8 @@ func ListInterfacesWithConfig(networkDir string) ([]Interface, error) {
 			iface.Driver = parts[len(parts)-1]
 		}
 
+		iface.CurrentGateway4 = RuntimeGateway4(iface.Name)
+		iface.CurrentDNS = RuntimeDNS(iface.Name)
 		ifaces = append(ifaces, iface)
 	}
 
@@ -612,6 +618,8 @@ func ListBondsWithConfig(networkDir string) ([]BondConfig, error) {
 			fmt.Sscanf(mtu, "%d", &bond.MTU)
 		}
 
+		bond.CurrentGateway4 = RuntimeGateway4(bond.Name)
+		bond.CurrentDNS = RuntimeDNS(bond.Name)
 		bonds = append(bonds, bond)
 	}
 

@@ -40,5 +40,6 @@ export CGO_ENABLED=1 CGO_CFLAGS CGO_LDFLAGS
 # upstream bumps its Go version.
 export GOTOOLCHAIN=auto
 
+"$(dirname "$0")/ci/go-mod-download.sh" "$BUILD_DIR"
 go -C "$BUILD_DIR" build -o "$OUT" ./cmd/docker-lxc-daemon
 echo "built $OUT from LXC2Docker $LXC2DOCKER_REF ($(git -C "$BUILD_DIR" rev-parse --short HEAD))"

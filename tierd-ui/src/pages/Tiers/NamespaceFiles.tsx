@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useI18n } from '@rakuensoftware/smoothgui';
 import { api } from '../../api/api';
 import { useToast } from '../../contexts/ToastContext';
+import NumberInput from '../../components/NumberInput/NumberInput';
 
 type FileEntry = {
   path: string;
@@ -70,10 +71,9 @@ export default function NamespaceFiles({ nsID }: { nsID: string }) {
           placeholder="prefix (e.g. storage/backup)"
           style={{ flex: 1, fontSize: 13 }}
         />
-        <input
-          type="number"
+        <NumberInput
           value={limit}
-          onChange={e => setLimit(Number(e.target.value) || 200)}
+          onChange={setLimit}
           style={{ width: 80, fontSize: 13 }}
           min={1}
           max={5000}

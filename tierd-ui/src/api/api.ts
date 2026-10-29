@@ -285,6 +285,7 @@ export const api = {
   getPendingChange: () => apiFetch('GET', '/network/pending'),
   confirmChange: () => apiFetch('POST', '/network/pending/confirm', {}),
   revertChange: () => apiFetch('POST', '/network/pending/revert', {}),
+  confirmChangeWithToken: (token: string) => apiFetch('POST', '/network/pending/confirm-token', { token }),
 
   // --- Network Tests ---
   getExternalSpeedtestServers: () => apiFetch<any[]>('GET', '/network-tests/external/servers'),
@@ -304,6 +305,10 @@ export const api = {
   // --- Updates ---
   // Updates install automatically (apt); whether one waits for a restart.
   getRebootStatus: () => apiFetch('GET', '/system/reboot'),
+  getUpdateStatus: () => apiFetch('GET', '/system/updates'),
+  checkUpdates: () => apiFetch('POST', '/system/updates/check', {}),
+  installUpdates: () => apiFetch('POST', '/system/updates/install', {}),
+  getUpdateLog: (offset: number) => apiFetch('GET', `/system/updates/log?offset=${offset}`),
 
   // --- Backup ---
   getBackupConfigs: () => apiFetch<any[]>('GET', '/backup/configs'),

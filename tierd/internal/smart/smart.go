@@ -15,6 +15,10 @@ type Data struct {
 	SerialNumber  string      `json:"serial_number"`
 	FirmwareVer   string      `json:"firmware_version"`
 	HealthPassed  bool        `json:"health_passed"`
+	// HealthKnown is false when smartctl reported no overall health
+	// result: no SMART support, a card reader or virtual device, or a
+	// device it could not open. HealthPassed means nothing then.
+	HealthKnown bool `json:"health_known"`
 	Temperature   int         `json:"temperature_celsius"`
 	PowerOnHours  int         `json:"power_on_hours"`
 	Attributes    []Attribute `json:"attributes"`
@@ -48,7 +52,7 @@ type smartctlJSON struct {
 	SerialNumber    string `json:"serial_number"`
 	FirmwareVersion string `json:"firmware_version"`
 	SmartStatus     struct {
-		Passed bool `json:"passed"`
+		Passed *bool `json:"passed"`
 	} `json:"smart_status"`
 	Temperature struct {
 		Current int `json:"current"`
@@ -114,7 +118,11 @@ func ReadData(devicePath string) (*Data, error) {
 	if len(out) == 0 {
 		return nil, fmt.Errorf("smartctl returned no output for %s", devicePath)
 	}
+	return parseData(devicePath, out)
+}
 
+// parseData parses smartctl --json --all output.
+func parseData(devicePath string, out []byte) (*Data, error) {
 	var raw smartctlJSON
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, fmt.Errorf("parse smartctl output: %w", err)
@@ -125,7 +133,10 @@ func ReadData(devicePath string) (*Data, error) {
 		ModelName:    raw.ModelName,
 		SerialNumber: raw.SerialNumber,
 		FirmwareVer:  raw.FirmwareVersion,
-		HealthPassed: raw.SmartStatus.Passed,
+	}
+	if raw.SmartStatus.Passed != nil {
+		data.HealthKnown = true
+		data.HealthPassed = *raw.SmartStatus.Passed
 	}
 
 	// ATA drives.

@@ -4,6 +4,7 @@ import { api } from '../../api/api';
 import { extractError } from '../../utils/errors';
 import BenchChart from '../../charts/BenchChart';
 import NetworkTestChart from '../../charts/NetworkTestChart';
+import NumberInput from '../../components/NumberInput/NumberInput';
 
 export default function Benchmarks() {
   const { t } = useI18n();
@@ -329,8 +330,8 @@ export default function Benchmarks() {
               {BLOCK_SIZES.map(b => <option key={b} value={b}>{b}</option>)}
             </select>
           </label>
-          <label>{t('benchmarks.io.duration')} <input type="number" value={duration} onChange={e => setDuration(parseInt(e.target.value))} min={5} max={300} /></label>
-          <label>{t('benchmarks.io.fileSize')} <input type="number" value={sizeMB} onChange={e => setSizeMB(parseInt(e.target.value))} min={64} /></label>
+          <label>{t('benchmarks.io.duration')} <NumberInput value={duration} onChange={setDuration} min={5} max={300} /></label>
+          <label>{t('benchmarks.io.fileSize')} <NumberInput value={sizeMB} onChange={setSizeMB} min={64} /></label>
         </div>
 
         {protocol !== 'iscsi' && protocol !== 'local' && (
@@ -432,7 +433,7 @@ export default function Benchmarks() {
             </p>
             <div className="form-row">
               <label>{t('benchmarks.system.duration')}
-                <input type="number" value={sysDuration} onChange={e => setSysDuration(parseInt(e.target.value))} min={5} max={120} />
+                <NumberInput value={sysDuration} onChange={setSysDuration} min={5} max={120} />
               </label>
             </div>
 
@@ -524,9 +525,9 @@ export default function Benchmarks() {
             {netTestType === 'local' && (
               <div className="form-row">
                 <label>{t('benchmarks.net.targetHost')} <input value={netHost} onChange={e => setNetHost(e.target.value)} placeholder="192.168.1.100" /></label>
-                <label>{t('benchmarks.net.port')} <input type="number" value={netPort} onChange={e => setNetPort(parseInt(e.target.value))} /></label>
-                <label>{t('benchmarks.io.duration')} <input type="number" value={netDuration} onChange={e => setNetDuration(parseInt(e.target.value))} min={5} max={120} /></label>
-                <label>{t('benchmarks.net.streams')} <input type="number" value={netStreams} onChange={e => setNetStreams(parseInt(e.target.value))} min={1} max={32} /></label>
+                <label>{t('benchmarks.net.port')} <NumberInput value={netPort} onChange={setNetPort} /></label>
+                <label>{t('benchmarks.io.duration')} <NumberInput value={netDuration} onChange={setNetDuration} min={5} max={120} /></label>
+                <label>{t('benchmarks.net.streams')} <NumberInput value={netStreams} onChange={setNetStreams} min={1} max={32} /></label>
                 <label>{t('benchmarks.io.mode')}
                   <select value={netMode} onChange={e => setNetMode(e.target.value as any)}>
                     <option value="download">{t('benchmarks.net.download')}</option>

@@ -147,18 +147,8 @@ func CheckARCAlerts(stats *ARCStats) []HealthAlert {
 		}
 	}
 
-	// ARC pressure alert: fire when the ARC has been pushed to (or below) its
-	// minimum size AND the ARC has been exercised enough to make the signal
-	// meaningful. Without the activity guard, a system with no ZFS pools (and
-	// therefore ~0 ARC usage) permanently trips this alert: ZFS initialises
-	// c == c_min by default, so c <= c_min is trivially true from boot.
-	arcTotal := stats.Hits + stats.Misses
-	if stats.CMin > 0 && stats.C <= stats.CMin && arcTotal >= 1000 {
-		alerts = append(alerts, HealthAlert{
-			Severity: "warning",
-			Message:  "ARC has been pushed to its minimum size — system is under memory pressure",
-		})
-	}
+	// No alert for the ARC sitting at c_min: the ARC shrinks to make room for
+	// other memory demand by design, and there is nothing for the user to do.
 
 	return alerts
 }
