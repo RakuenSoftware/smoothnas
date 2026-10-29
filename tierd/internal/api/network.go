@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os/exec"
 	"strings"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
@@ -163,6 +164,9 @@ func (h *NetworkHandler) configureInterface(w http.ResponseWriter, r *http.Reque
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !requireUplinkConfig(w, name, cfg.DHCP4, cfg.IPv4Addrs, cfg.Gateway4, cfg.DNS) {
+		return
+	}
 
 	err := h.safeApply.Apply("Configure interface "+name, func() error {
 		if err := network.RemoveLegacyCatchAllDHCP(h.networkDir); err != nil {
@@ -176,6 +180,40 @@ func (h *NetworkHandler) configureInterface(w http.ResponseWriter, r *http.Reque
 	}
 
 	h.writeApplied(w)
+}
+
+// defaultRouteDevice returns the interface carrying the IPv4 default route,
+// or "" if there is none; a var so tests can fake it.
+var defaultRouteDevice = func() string {
+	out, err := exec.Command("ip", "-4", "route", "show", "default").Output()
+	if err != nil {
+		return ""
+	}
+	f := strings.Fields(string(out))
+	for i := 0; i+1 < len(f); i++ {
+		if f[i] == "dev" {
+			return f[i+1]
+		}
+	}
+	return ""
+}
+
+// requireUplinkConfig rejects a static IPv4 configuration without a gateway
+// and DNS on the interface that carries the default route. Writing one
+// leaves the NAS unable to resolve or reach anything off the LAN, and
+// updates fail silently from then on. Other interfaces (a storage-only
+// network, say) may legitimately have neither. Writes the error and
+// returns false when the change is refused.
+func requireUplinkConfig(w http.ResponseWriter, name string, dhcp4 bool, ipv4 []string, gw4 string, dns []string) bool {
+	if dhcp4 || len(ipv4) == 0 || (gw4 != "" && len(dns) > 0) {
+		return true
+	}
+	if defaultRouteDevice() != name {
+		return true
+	}
+	jsonErrorCoded(w, name+" carries the default route: a static address on it needs a gateway and at least one DNS server, or the NAS loses internet access and updates",
+		http.StatusBadRequest, "network.uplink_needs_gateway_dns")
+	return false
 }
 
 // validateIPConfig is the shared CIDR / gateway / MTU validator used
@@ -267,6 +305,9 @@ func (h *NetworkHandler) createBond(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateIPConfig(bond.IPv4Addrs, bond.IPv6Addrs, bond.Gateway4, bond.Gateway6, bond.MTU, bond.DNS); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !requireUplinkConfig(w, bond.Name, bond.DHCP4, bond.IPv4Addrs, bond.Gateway4, bond.DNS) {
 		return
 	}
 	// A bond with no members can never gain carrier — it comes up DOWN and
@@ -469,6 +510,9 @@ func (h *NetworkHandler) updateBond(w http.ResponseWriter, r *http.Request, name
 	}
 	if err := validateIPConfig(bond.IPv4Addrs, bond.IPv6Addrs, bond.Gateway4, bond.Gateway6, bond.MTU, bond.DNS); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !requireUplinkConfig(w, bond.Name, bond.DHCP4, bond.IPv4Addrs, bond.Gateway4, bond.DNS) {
 		return
 	}
 	// A bond with no members can never gain carrier — it comes up DOWN and

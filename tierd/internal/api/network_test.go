@@ -89,3 +89,35 @@ func TestNetworkUpdateBondRejectsEmptyMembers(t *testing.T) {
 		t.Fatalf("body = %s", w.Body.String())
 	}
 }
+
+func TestRequireUplinkConfig(t *testing.T) {
+	orig := defaultRouteDevice
+	defaultRouteDevice = func() string { return "bond0" }
+	t.Cleanup(func() { defaultRouteDevice = orig })
+
+	cases := []struct {
+		name    string
+		iface   string
+		dhcp    bool
+		ipv4    []string
+		gw      string
+		dns     []string
+		allowed bool
+	}{
+		{"static uplink without DNS", "bond0", false, []string{"192.168.1.254/23"}, "192.168.1.1", nil, false},
+		{"static uplink without gateway", "bond0", false, []string{"192.168.1.254/23"}, "", []string{"192.168.1.1"}, false},
+		{"static uplink complete", "bond0", false, []string{"192.168.1.254/23"}, "192.168.1.1", []string{"192.168.1.1"}, true},
+		{"DHCP uplink", "bond0", true, nil, "", nil, true},
+		{"static storage-only NIC", "enp2s0", false, []string{"10.10.0.2/24"}, "", nil, true},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		got := requireUplinkConfig(rec, c.iface, c.dhcp, c.ipv4, c.gw, c.dns)
+		if got != c.allowed {
+			t.Errorf("%s: allowed=%v, want %v (body %s)", c.name, got, c.allowed, rec.Body.String())
+		}
+		if !got && (rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "network.uplink_needs_gateway_dns")) {
+			t.Errorf("%s: expected a coded 400, got %d %s", c.name, rec.Code, rec.Body.String())
+		}
+	}
+}
