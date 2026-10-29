@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +57,10 @@ type Monitor struct {
 	seen     map[string]bool
 	checked  map[string]bool
 	lastSeen map[string]bool // seen from the last completed cycle
+
+	// DNS check state: lookups failed in a row, and when the last check ran.
+	dnsFailures  int
+	lastDNSCheck time.Time
 
 	// context lifecycle (created on Start, cancelled on Stop)
 	ctx    context.Context
@@ -235,6 +240,7 @@ func (m *Monitor) poll() {
 	m.cleanHistory()
 	m.checkMdadm()
 	m.checkZFS()
+	m.checkDNS()
 	m.endCycle()
 	m.cleanExpired()
 }
@@ -430,6 +436,64 @@ func (m *Monitor) checkZFS() {
 			Source:    "zfs",
 			Severity:  alert.Severity,
 			Message:   alert.Message,
+			Timestamp: now,
+		})
+	}
+}
+
+// dnsCheckHost is resolved to tell whether name resolution works: it is the
+// update archive, so a failure also means updates cannot install.
+const dnsCheckHost = "updates.rakuensoftware.com"
+
+// dnsCheckInterval spaces the DNS checks; the poll itself runs every 30 s.
+const dnsCheckInterval = 5 * time.Minute
+
+// lookupHost is a var so tests can fake resolution.
+var lookupHost = func(ctx context.Context, host string) ([]string, error) {
+	return net.DefaultResolver.LookupHost(ctx, host)
+}
+
+// dnsAlertMessage is the alert raised while names cannot be resolved.
+const dnsAlertMessage = "DNS is not working: the NAS cannot resolve " + dnsCheckHost +
+	". Updates, plugins and the speed test fail until a DNS server is set on the Network page."
+
+// checkDNS raises an alert when name resolution fails twice in a row (one
+// failure can be a blip) and clears it once a lookup succeeds. A NAS with a
+// static address and no DNS server otherwise fails every update silently.
+func (m *Monitor) checkDNS() {
+	now := time.Now()
+	m.mu.Lock()
+	due := now.Sub(m.lastDNSCheck) >= dnsCheckInterval
+	m.mu.Unlock()
+	if !due {
+		// Not checked this cycle: keep the alert's state as it is.
+		m.mu.Lock()
+		if m.lastSeen[alertKey("network", "", dnsAlertMessage)] && m.seen != nil {
+			m.seen[alertKey("network", "", dnsAlertMessage)] = true
+		}
+		m.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_, err := lookupHost(ctx, dnsCheckHost)
+	cancel()
+
+	m.mu.Lock()
+	m.lastDNSCheck = now
+	if err == nil {
+		m.dnsFailures = 0
+	} else {
+		m.dnsFailures++
+	}
+	failing := m.dnsFailures >= 2
+	m.mu.Unlock()
+
+	m.markChecked("network", "")
+	if failing {
+		m.addAlert(Alert{
+			Source:    "network",
+			Severity:  "critical",
+			Message:   dnsAlertMessage,
 			Timestamp: now,
 		})
 	}

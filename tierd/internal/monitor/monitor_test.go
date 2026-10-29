@@ -1,6 +1,8 @@
 package monitor
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -255,5 +257,49 @@ func TestDriveIDIsStableAcrossDeviceNames(t *testing.T) {
 	}
 	if got := driveID(&smart.Data{}, "/dev/sdg"); got != "/dev/sdg" {
 		t.Fatalf("expected the path when there is no serial, got %q", got)
+	}
+}
+
+func TestDNSAlert(t *testing.T) {
+	orig := lookupHost
+	t.Cleanup(func() { lookupHost = orig })
+	fail := true
+	lookupHost = func(context.Context, string) ([]string, error) {
+		if fail {
+			return nil, errors.New("no such host")
+		}
+		return []string{"169.58.198.41"}, nil
+	}
+	m := New(nil, nil)
+	cycle := func() {
+		m.mu.Lock()
+		m.lastDNSCheck = time.Time{} // every cycle is due in the test
+		m.mu.Unlock()
+		m.beginCycle()
+		m.checkDNS()
+		m.endCycle()
+	}
+
+	cycle()
+	if m.AlertCount() != 0 {
+		t.Fatal("one failed lookup must not alert")
+	}
+	cycle()
+	if m.AlertCount() != 1 || m.GetAlerts()[0].Source != "network" {
+		t.Fatalf("expected a DNS alert after two failures, got %+v", m.GetAlerts())
+	}
+
+	// Between checks (not due), the alert stays.
+	m.beginCycle()
+	m.checkDNS()
+	m.endCycle()
+	if m.AlertCount() != 1 {
+		t.Fatal("alert dropped on a cycle without a DNS check")
+	}
+
+	fail = false
+	cycle()
+	if m.AlertCount() != 0 {
+		t.Fatal("alert not cleared after DNS recovered")
 	}
 }
