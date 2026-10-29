@@ -192,6 +192,16 @@ func (m *Monitor) persistDismissal(a Alert, dismissed bool) {
 	}
 }
 
+// driveID names a drive by model and serial number. /dev/sdX names are
+// reassigned at boot, so alerts and their dismissals keyed by them moved
+// between drives across reboots.
+func driveID(data *smart.Data, path string) string {
+	if data.SerialNumber == "" {
+		return path
+	}
+	return strings.TrimSpace(data.ModelName + " " + data.SerialNumber)
+}
+
 func alertKey(source, device, message string) string {
 	return source + "\x00" + device + "\x00" + message
 }
@@ -294,7 +304,8 @@ func (m *Monitor) checkSMART() {
 		if err != nil {
 			continue
 		}
-		m.markChecked("smart", d.Path)
+		drive := driveID(data, d.Path)
+		m.markChecked("smart", drive)
 
 		// Record history hourly.
 		if recordHistory && m.history != nil {
@@ -320,19 +331,21 @@ func (m *Monitor) checkSMART() {
 					Source:    "smart",
 					Severity:  string(event.Severity),
 					Message:   event.AttributeName + " = " + formatInt64(event.Value),
-					Device:    event.DevicePath,
+					Device:    drive,
 					Timestamp: now,
 				})
 			}
 		}
 
-		// Check SMART health status.
-		if !data.HealthPassed {
+		// Check SMART health status. A device that reports no health result
+		// at all (a card reader, a virtual device, no SMART support) has not
+		// failed; it has nothing to report.
+		if data.HealthKnown && !data.HealthPassed {
 			m.addAlert(Alert{
 				Source:    "smart",
 				Severity:  "critical",
 				Message:   "SMART health check FAILED",
-				Device:    d.Path,
+				Device:    drive,
 				Timestamp: now,
 			})
 		}

@@ -14,9 +14,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	diskpkg "github.com/JBailes/SmoothNAS/tierd/internal/disk"
+	"github.com/JBailes/SmoothNAS/tierd/internal/initramfs"
 )
 
 // Array represents an mdadm RAID array.
@@ -689,8 +691,13 @@ func Scrub(path string) error {
 	return nil
 }
 
+// confMu serialises mdadm.conf rewrites across concurrent array jobs.
+var confMu sync.Mutex
+
 // updateConf regenerates /etc/mdadm/mdadm.conf from the current array state.
 func updateConf() error {
+	confMu.Lock()
+	defer confMu.Unlock()
 	out, err := exec.Command("mdadm", "--detail", "--scan").Output()
 	if err != nil {
 		return fmt.Errorf("mdadm scan: %w", err)
@@ -702,8 +709,11 @@ func updateConf() error {
 		return nil
 	}
 
-	// Update initramfs so arrays assemble on boot.
-	exec.Command("update-initramfs", "-u").Run()
+	// Update initramfs so arrays assemble on boot. Serialised: concurrent
+	// array jobs each landing here corrupted the image.
+	if err := initramfs.Update(); err != nil {
+		return fmt.Errorf("refresh initramfs: %w", err)
+	}
 	return nil
 }
 

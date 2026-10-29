@@ -3,6 +3,8 @@ package monitor
 import (
 	"testing"
 	"time"
+
+	"github.com/JBailes/SmoothNAS/tierd/internal/smart"
 )
 
 func TestNewMonitor(t *testing.T) {
@@ -243,5 +245,15 @@ func TestPersistentAlertSurvivesExpiry(t *testing.T) {
 	alerts := m.GetAlerts()
 	if len(alerts) != 1 || alerts[0].ID != id {
 		t.Fatalf("expected the same alert to persist past 24h, got %+v", alerts)
+	}
+}
+
+func TestDriveIDIsStableAcrossDeviceNames(t *testing.T) {
+	d := &smart.Data{ModelName: "WDC WD80EFZZ", SerialNumber: "WD-CA0ABC12"}
+	if a, b := driveID(d, "/dev/sdc"), driveID(d, "/dev/sda"); a != b || a != "WDC WD80EFZZ WD-CA0ABC12" {
+		t.Fatalf("drive ID depends on the device name: %q vs %q", a, b)
+	}
+	if got := driveID(&smart.Data{}, "/dev/sdg"); got != "/dev/sdg" {
+		t.Fatalf("expected the path when there is no serial, got %q", got)
 	}
 }

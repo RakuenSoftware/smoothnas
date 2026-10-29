@@ -54,7 +54,7 @@ for module in zfs smoothfs; do
     modprobe "$module"
     grep -qxF "$module" /etc/modules 2>/dev/null || echo "$module" >> /etc/modules
 done
-update-initramfs -u -k "$kver"
+flock /run/lock/smoothnas-initramfs.lock update-initramfs -u -k "$kver"
 systemctl enable zfs.target zfs-import.target zfs-import-cache.service zfs-mount.service 2>/dev/null || true
 # Sharing services start on demand (tierd manages them).
 systemctl disable --now smbd nmbd winbind samba-ad-dc 2>/dev/null || true
