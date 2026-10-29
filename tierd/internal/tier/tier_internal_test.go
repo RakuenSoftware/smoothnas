@@ -226,3 +226,30 @@ func TestProvisionPerTierStorageRepairsDirtyFilesystem(t *testing.T) {
 		t.Fatalf("expected 2 mount attempts (fail + retry), got %d", mountAttempts)
 	}
 }
+
+func TestProvisionPerTierStoragePersistsExistingLV(t *testing.T) {
+	// Disks reused from an earlier install already carry the tier's LV;
+	// provisioning mounts it and must still persist the mount, or the pool
+	// does not come back after a reboot.
+	m := newTestManager(t, map[string]string{"HDD": "/dev/md1"})
+	stubTierLVM(t)
+
+	var persisted []string
+	reset := (&backend.MdadmHooks{
+		LVExists:  func(string, string) (bool, error) { return true, nil },
+		IsMounted: func(string) bool { return false },
+		EnsureFSTabEntry: func(vg, lv, mount, fs string) error {
+			persisted = append(persisted, vg+"/"+lv+" "+mount+" "+fs)
+			return nil
+		},
+	}).Install()
+	t.Cleanup(reset)
+
+	if err := m.ProvisionPerTierStorage("media", "HDD"); err != nil {
+		t.Fatalf("ProvisionPerTierStorage: %v", err)
+	}
+	want := []string{"tier-media-HDD/data /mnt/.tierd-backing/media/HDD xfs"}
+	if !reflect.DeepEqual(persisted, want) {
+		t.Fatalf("fstab entries = %v, want %v", persisted, want)
+	}
+}

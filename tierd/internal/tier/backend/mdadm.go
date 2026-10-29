@@ -218,6 +218,12 @@ func (mdadmBackend) Provision(poolName, tierName, ref, mountPoint string, opts P
 				}
 			}
 		}
+		// The LV can pre-exist (disks reused from an earlier install or a
+		// re-provision); without the fstab entry the backing is not mounted
+		// at boot and the pool does not come back after a reboot.
+		if err := mdEnsureFSTabEntry(vg, mdadmLVName, mountPoint, fsKind); err != nil {
+			log.Printf("tier provision: fstab entry for %s/%s: %v", vg, mdadmLVName, err)
+		}
 		return nil
 	}
 
