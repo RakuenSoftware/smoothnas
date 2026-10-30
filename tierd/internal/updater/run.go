@@ -52,6 +52,15 @@ const aptUpdate = "apt-get -o APT::Update::Error-Mode=any -o DPkg::Lock::Timeout
 const aptUpgrade = "apt-get -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef " +
 	"-o Dpkg::Options::=--force-confold -y full-upgrade"
 
+// aptRepair finishes an interrupted dpkg run and resolves broken
+// dependencies before installing: after a power cut or a killed upgrade,
+// full-upgrade otherwise refuses with "Unmet dependencies" until someone
+// runs these by hand. dpkg --configure -a is allowed to fail (the lock may
+// be held by an unattended run); apt-get -f then waits for the lock.
+const aptRepair = "{ dpkg --configure -a || true; } && " +
+	"apt-get -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef " +
+	"-o Dpkg::Options::=--force-confold -y --fix-broken install"
+
 // Run actions.
 const (
 	ActionCheck   = "check"
@@ -71,7 +80,7 @@ func Start(action string) error {
 	case ActionCheck:
 		script = runScript(ActionCheck, aptUpdate, runLogPath)
 	case ActionInstall:
-		script = runScript(ActionInstall, aptUpdate+" && "+aptUpgrade, runLogPath)
+		script = runScript(ActionInstall, aptUpdate+" && "+aptRepair+" && "+aptUpgrade, runLogPath)
 	default:
 		return fmt.Errorf("unknown update action %q", action)
 	}

@@ -27,6 +27,11 @@ def status(scenario, state):
         return {"running": False, "available": [], "reboot": {"required": True, "reasons": [REASON]},
                 "last_run": {"action": "install", "started_at": "t0", "finished_at": "t1", "exit_code": 0, "errors": []}}
     if scenario == "up_to_date":
+        # A check started from the page: the run is active but its log still
+        # holds the previous (finished install) run, as just after starting.
+        if state["checks"]:
+            return {"running": True, "available": [], "reboot": no_reboot,
+                    "last_run": {"action": "install", "started_at": "t0", "finished_at": "t1", "exit_code": 0, "errors": []}}
         return {"running": False, "available": [], "reboot": no_reboot,
                 "last_run": {"action": "check", "started_at": "t0", "finished_at": "2026-10-29T18:00:00Z", "exit_code": 0, "errors": []}}
     if scenario == "check_failed":
@@ -49,7 +54,7 @@ with sync_playwright() as playwright:
         context = browser.new_context(ignore_https_errors=os.environ.get("ALLOW_INSECURE_TLS") == "1")
         context.add_init_script("localStorage.setItem('sn_session','true'); localStorage.setItem('sn_user','qa');")
         reboots = []
-        state = {"installs": 0}
+        state = {"installs": 0, "checks": 0}
 
         def respond(route):
             request = route.request
@@ -61,6 +66,9 @@ with sync_playwright() as playwright:
                 data = {"status": "ok"}
             elif path == "/api/system/updates":
                 data = status(scenario, state)
+            elif path == "/api/system/updates/check" and request.method == "POST":
+                state["checks"] += 1
+                data = {"status": "started"}
             elif path == "/api/system/updates/install" and request.method == "POST":
                 state["installs"] += 1
                 data = {"status": "started"}
@@ -96,6 +104,9 @@ with sync_playwright() as playwright:
             expect(page.get_by_text("SmoothNAS is up to date.", exact=False)).to_be_visible()
             expect(page.get_by_text("No restart is pending.", exact=True)).to_be_visible()
             assert reboots == []
+            page.get_by_role("button", name="Check for updates", exact=True).click()
+            expect(page.get_by_text("Checking for updates…", exact=True)).to_be_visible()
+            assert page.get_by_text("Installing updates…", exact=False).count() == 0, "a check was labelled as an install"
         elif scenario == "check_failed":
             expect(page.get_by_text("Checking for updates failed", exact=False)).to_be_visible()
             expect(page.get_by_text(RESOLVE_ERR, exact=True)).to_be_visible()
