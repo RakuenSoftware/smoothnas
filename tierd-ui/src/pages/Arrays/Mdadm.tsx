@@ -190,7 +190,7 @@ export default function Mdadm() {
           <h3>Create Array</h3>
           <div className="form-row">
             <label>Name
-              <input value={newArray.name} onChange={e => setNewArray(p => ({ ...p, name: e.target.value }))} placeholder="md0" />
+              <input value={newArray.name} onChange={e => setNewArray(p => ({ ...p, name: e.target.value }))} />
             </label>
             <label>RAID Level
               <select value={newArray.level} onChange={e => setNewArray(p => ({ ...p, level: e.target.value }))}>

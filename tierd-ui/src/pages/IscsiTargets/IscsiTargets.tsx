@@ -228,11 +228,11 @@ export default function IscsiTargets() {
             </label>
           </div>
           <div className="form-row">
-            <label>{t('iscsi.field.iqn')} <input value={newTarget.iqn} onChange={e => setNewTarget(p => ({ ...p, iqn: e.target.value }))} placeholder="iqn.2024-01.com.example:storage" /></label>
+            <label>{t('iscsi.field.iqn')} <input value={newTarget.iqn} onChange={e => setNewTarget(p => ({ ...p, iqn: e.target.value }))} /></label>
             {newTarget.mode === 'block' ? (
-              <label>{t('iscsi.field.blockDevice')} <input value={newTarget.block_device} onChange={e => setNewTarget(p => ({ ...p, block_device: e.target.value }))} placeholder="/dev/zvol/tank/vol0" /></label>
+              <label>{t('iscsi.field.blockDevice')} <input value={newTarget.block_device} onChange={e => setNewTarget(p => ({ ...p, block_device: e.target.value }))} /></label>
             ) : (
-              <label>{t('iscsi.field.backingFile')} <input value={newTarget.backing_file} onChange={e => setNewTarget(p => ({ ...p, backing_file: e.target.value }))} placeholder="/mnt/smoothfs/pool0/lun0.img" /></label>
+              <label>{t('iscsi.field.backingFile')} <input value={newTarget.backing_file} onChange={e => setNewTarget(p => ({ ...p, backing_file: e.target.value }))} /></label>
             )}
           </div>
           {newTarget.mode === 'file' && (

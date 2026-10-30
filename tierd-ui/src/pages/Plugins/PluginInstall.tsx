@@ -584,7 +584,6 @@ function SourceStep({
               onGPUSelection(null);
               onChange(e.target.value);
             }}
-            placeholder={t('plugins.install.source.placeholder')}
             spellCheck={false}
             disabled={busy}
           />
@@ -1008,7 +1007,6 @@ function ConfigInput({
         type={field.secret ? 'password' : field.type === 'number' ? 'number' : 'text'}
         value={value}
         onChange={e => onChange(e.target.value)}
-        placeholder={field.default ?? ''}
         min={field.min}
         max={field.max}
         step={field.step}

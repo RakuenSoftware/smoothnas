@@ -307,7 +307,6 @@ function OverviewTab({ detail, name, onChanged }: { detail: Detail; name: string
             type="text"
             className="mono"
             value={image}
-            placeholder={t('plugins.detail.image.placeholder')}
             onChange={e => setImage(e.target.value)}
           />
           <button className="btn" disabled={saving} onClick={() => savePin(image.trim())}>
@@ -538,7 +537,6 @@ function ModelsTab({
           type="url"
           value={url}
           onChange={e => setUrl(e.target.value)}
-          placeholder="https://..."
           disabled={busy || running}
         />
 
@@ -558,7 +556,6 @@ function ModelsTab({
           type="text"
           value={sha256}
           onChange={e => setSha256(e.target.value)}
-          placeholder="sha256:..."
           disabled={busy || running}
         />
 

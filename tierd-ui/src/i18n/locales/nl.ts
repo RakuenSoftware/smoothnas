@@ -863,7 +863,6 @@ const nl: LanguageTranslations = {
   'tiers.section.create': 'Tier aanmaken',
   'tiers.section.levels': 'Tier-niveaus',
   'tiers.field.tierName': 'Tier-naam',
-  'tiers.field.levelNamePlaceholder': 'bv. NVME',
   'tiers.field.metaOnFastest': 'Alle tier-metadata alleen op de snelste tier opslaan',
   'tiers.field.unassignedOption': '— niet toegewezen —',
   'tiers.create.mountHintPrefix': 'Het tier-mount-punt wordt ',
