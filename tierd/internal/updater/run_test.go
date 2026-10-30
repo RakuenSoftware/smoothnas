@@ -84,7 +84,7 @@ func TestStart(t *testing.T) {
 	if data, _ := os.ReadFile(runLogPath); len(data) != 0 {
 		t.Errorf("expected the log truncated for a new run, got %q", data)
 	}
-	for _, want := range []string{"APT::Update::Error-Mode=any", "full-upgrade", "--force-confold", startMarker + " install", endMarker, runLogPath} {
+	for _, want := range []string{"APT::Update::Error-Mode=any", "dpkg --configure -a", "--fix-broken install", "full-upgrade", "--force-confold", startMarker + " install", endMarker, runLogPath} {
 		if !strings.Contains(script, want) {
 			t.Errorf("install script missing %q: %s", want, script)
 		}
@@ -93,8 +93,8 @@ func TestStart(t *testing.T) {
 	if err := Start(ActionCheck); err != nil {
 		t.Fatalf("start check: %v", err)
 	}
-	if strings.Contains(script, "full-upgrade") {
-		t.Errorf("check must not install: %s", script)
+	if strings.Contains(script, "full-upgrade") || strings.Contains(script, "--fix-broken") {
+		t.Errorf("check must not change packages: %s", script)
 	}
 
 	active = true

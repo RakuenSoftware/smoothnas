@@ -285,6 +285,12 @@ func (h *DisksHandler) IdentifyDisk(w http.ResponseWriter, r *http.Request, devi
 	fmt.Fprintf(w, `{"status":"identifying"}`)
 }
 
+// InvalidateDisks drops the cached disk listing; other handlers call it
+// after changing what is on a disk.
+func (h *DisksHandler) InvalidateDisks() {
+	h.disksCache.Invalidate()
+}
+
 // WipeDisk handles POST /api/disks/{id}/wipe.
 func (h *DisksHandler) WipeDisk(w http.ResponseWriter, r *http.Request, devicePath string) {
 	// Safety: wipe is the escape hatch for stale ZFS/mdadm/LVM signatures,
