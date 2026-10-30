@@ -1,3 +1,8 @@
-// Refresh package lists and run unattended-upgrades daily.
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
+// Refresh package lists and run unattended-upgrades every hour, so a fix
+// published to the Smooth* archive (a SmoothKernel point release, say) is
+// installed within the hour. Debian's own schedule would take up to a day:
+// once-a-day gates, and timers twice a day with up to 12h of random delay.
+// "always" lifts the gates; the timers' hourly schedule is in
+// /usr/lib/systemd/system/apt-daily{,-upgrade}.timer.d/smoothnas-hourly.conf.
+APT::Periodic::Update-Package-Lists "always";
+APT::Periodic::Unattended-Upgrade "always";
