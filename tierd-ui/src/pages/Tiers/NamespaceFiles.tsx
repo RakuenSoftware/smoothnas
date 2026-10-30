@@ -68,7 +68,6 @@ export default function NamespaceFiles({ nsID }: { nsID: string }) {
           value={prefix}
           onChange={e => setPrefix(e.target.value)}
           // i18n-allow: example value, not user copy
-          placeholder="prefix (e.g. storage/backup)"
           style={{ flex: 1, fontSize: 13 }}
         />
         <NumberInput

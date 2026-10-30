@@ -456,7 +456,7 @@ export default function Tiers() {
             </label>
           <label>
             {t('tiers.field.tierName')}
-            <input value={createName} onChange={e => setCreateName(e.target.value)} placeholder="media"
+            <input value={createName} onChange={e => setCreateName(e.target.value)}
               disabled={creating} />
           </label>
         </div>
@@ -478,7 +478,7 @@ export default function Tiers() {
               <span />
               {customTiers.map((ct, i) => (
                 <>
-                  <input key={`n${i}`} value={ct.name} placeholder={t('tiers.field.levelNamePlaceholder')}
+                  <input key={`n${i}`} value={ct.name}
                     onChange={e => updateCustomTier(i, 'name', e.target.value)}
                     disabled={creating} style={{ fontSize: 13 }} />
                   <NumberInput key={`r${i}`} min={1} value={ct.rank}

@@ -81,13 +81,13 @@ export default function Zvols() {
           <h3>{t('zvols.create.title')}</h3>
           <div className="form-row">
             <label>{t('zvols.field.name')}
-              <input value={newZvol.name} onChange={e => setNewZvol(p => ({ ...p, name: e.target.value }))} placeholder="tank/vol0" />
+              <input value={newZvol.name} onChange={e => setNewZvol(p => ({ ...p, name: e.target.value }))} />
             </label>
             <label>{t('zvols.field.size')}
-              <input value={newZvol.size} onChange={e => setNewZvol(p => ({ ...p, size: e.target.value }))} placeholder="100G" />
+              <input value={newZvol.size} onChange={e => setNewZvol(p => ({ ...p, size: e.target.value }))} />
             </label>
             <label>{t('zvols.field.blockSize')}
-              <input value={newZvol.block_size} onChange={e => setNewZvol(p => ({ ...p, block_size: e.target.value }))} placeholder="4K" />
+              <input value={newZvol.block_size} onChange={e => setNewZvol(p => ({ ...p, block_size: e.target.value }))} />
             </label>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>

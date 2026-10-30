@@ -560,7 +560,7 @@ export default function Arrays() {
               <h3>{t('arrays.create.mdadmTitle')}</h3>
               <div className="form-row">
                 <label>{t('arrays.field.name')}
-                  <input value={newArray.name} onChange={e => setNewArray(p => ({ ...p, name: e.target.value }))} placeholder="md0" />
+                  <input value={newArray.name} onChange={e => setNewArray(p => ({ ...p, name: e.target.value }))} />
                 </label>
                 <label>{t('arrays.field.raidLevel')}
                   <select value={newArray.level} onChange={e => setNewArray(p => ({ ...p, level: e.target.value }))}>
@@ -600,7 +600,7 @@ export default function Arrays() {
               <h3>{t('arrays.create.nonraidTitle')}</h3>
               <div className="form-row">
                 <label>{t('arrays.field.name')}
-                  <input value={newNonRaidArray.name} onChange={e => setNewNonRaidArray(p => ({ ...p, name: e.target.value }))} placeholder="nr0" />
+                  <input value={newNonRaidArray.name} onChange={e => setNewNonRaidArray(p => ({ ...p, name: e.target.value }))} />
                 </label>
                 <label>{t('arrays.field.filesystem')}
                   <select value={newNonRaidArray.filesystem} onChange={e => setNewNonRaidArray(p => ({ ...p, filesystem: e.target.value }))}>
@@ -608,7 +608,7 @@ export default function Arrays() {
                   </select>
                 </label>
                 <label>{t('arrays.field.mountBase')}
-                  <input value={newNonRaidArray.mount_base} onChange={e => setNewNonRaidArray(p => ({ ...p, mount_base: e.target.value }))} placeholder="/mnt/nonraid" />
+                  <input value={newNonRaidArray.mount_base} onChange={e => setNewNonRaidArray(p => ({ ...p, mount_base: e.target.value }))} />
                 </label>
               </div>
               <DiskRolePicker
@@ -649,7 +649,7 @@ export default function Arrays() {
               <h3>{t('arrays.create.zfsTitle')}</h3>
               <div className="form-row">
                 <label>{t('arrays.field.name')}
-                  <input value={newPool.name} onChange={e => setNewPool(p => ({ ...p, name: e.target.value }))} placeholder="tank" />
+                  <input value={newPool.name} onChange={e => setNewPool(p => ({ ...p, name: e.target.value }))} />
                 </label>
                 <label>{t('arrays.field.vdevType')}
                   <select value={newPool.vdev_type} onChange={e => setNewPool(p => ({ ...p, vdev_type: e.target.value }))}>
@@ -708,7 +708,7 @@ export default function Arrays() {
               <h3>{createTab === 'btrfs' ? t('arrays.create.btrfsTitle') : t('arrays.create.bcachefsTitle')}</h3>
               <div className="form-row">
                 <label>{t('arrays.field.name')}
-                  <input value={newFSArray.name} onChange={e => setNewFSArray(p => ({ ...p, name: e.target.value }))} placeholder="fs0" />
+                  <input value={newFSArray.name} onChange={e => setNewFSArray(p => ({ ...p, name: e.target.value }))} />
                 </label>
                 {createTab === 'btrfs' ? (
                   <>

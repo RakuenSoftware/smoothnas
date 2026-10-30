@@ -100,6 +100,9 @@ jobs:
           echo '//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}' >> .npmrc
           npm ci
 
+      - name: No example values in placeholders
+        run: python3 scripts/ci/check-placeholders.py tierd-ui/src
+
       - name: Type check
         working-directory: tierd-ui
         run: npx tsc --noEmit

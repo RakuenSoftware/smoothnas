@@ -764,7 +764,6 @@ export default function Network() {
                 <input
                   value={vlanForm.id}
                   onChange={e => setVlanForm(f => ({ ...f, id: e.target.value }))}
-                  placeholder="100"
                 />
               </label>
             </div>
@@ -785,7 +784,6 @@ export default function Network() {
                   <input
                     value={vlanForm.ipv4}
                     onChange={e => setVlanForm(f => ({ ...f, ipv4: e.target.value }))}
-                    placeholder="10.0.100.5/24"
                   />
                 </label>
                 <label>
@@ -793,7 +791,6 @@ export default function Network() {
                   <input
                     value={vlanForm.gateway4}
                     onChange={e => setVlanForm(f => ({ ...f, gateway4: e.target.value }))}
-                    placeholder="10.0.100.1"
                   />
                 </label>
               </div>
@@ -861,7 +858,6 @@ export default function Network() {
                 <input
                   value={routeForm.destination}
                   onChange={e => setRouteForm(f => ({ ...f, destination: e.target.value }))}
-                  placeholder="10.0.0.0/8 or default"
                 />
               </label>
               <label>
@@ -869,7 +865,6 @@ export default function Network() {
                 <input
                   value={routeForm.gateway}
                   onChange={e => setRouteForm(f => ({ ...f, gateway: e.target.value }))}
-                  placeholder="192.168.1.1"
                 />
               </label>
             </div>
@@ -879,7 +874,6 @@ export default function Network() {
                 <input
                   value={routeForm.iface}
                   onChange={e => setRouteForm(f => ({ ...f, iface: e.target.value }))}
-                  placeholder="bond0 / enp1s0"
                 />
               </label>
               <label>
@@ -887,7 +881,6 @@ export default function Network() {
                 <input
                   value={routeForm.metric}
                   onChange={e => setRouteForm(f => ({ ...f, metric: e.target.value }))}
-                  placeholder="100"
                 />
               </label>
             </div>
@@ -1051,7 +1044,6 @@ export default function Network() {
                   <input
                     value={editForm.ipv4}
                     onChange={e => setEditForm(f => ({ ...f, ipv4: e.target.value }))}
-                    placeholder="192.168.1.10/24"
                   />
                 </label>
                 <label>
@@ -1059,7 +1051,6 @@ export default function Network() {
                   <input
                     value={editForm.gateway4}
                     onChange={e => setEditForm(f => ({ ...f, gateway4: e.target.value }))}
-                    placeholder="192.168.1.1"
                   />
                 </label>
               </div>
@@ -1069,7 +1060,6 @@ export default function Network() {
                   <input
                     value={editForm.ipv6}
                     onChange={e => setEditForm(f => ({ ...f, ipv6: e.target.value }))}
-                    placeholder="2001:db8::10/64"
                   />
                 </label>
                 <label>
@@ -1077,7 +1067,6 @@ export default function Network() {
                   <input
                     value={editForm.gateway6}
                     onChange={e => setEditForm(f => ({ ...f, gateway6: e.target.value }))}
-                    placeholder="fe80::1"
                   />
                 </label>
               </div>
@@ -1089,7 +1078,6 @@ export default function Network() {
               <input
                 value={editForm.mtu}
                 onChange={e => setEditForm(f => ({ ...f, mtu: e.target.value }))}
-                placeholder="1500"
               />
             </label>
             <label>
@@ -1097,7 +1085,6 @@ export default function Network() {
               <input
                 value={editForm.dns}
                 onChange={e => setEditForm(f => ({ ...f, dns: e.target.value }))}
-                placeholder="1.1.1.1, 1.0.0.1"
               />
             </label>
           </div>

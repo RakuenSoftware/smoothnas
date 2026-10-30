@@ -169,7 +169,7 @@ export default function SmoothfsPools() {
                 <option value="cache">{t('storage.mode.cache')}</option>
               </select>
             </label>
-            <label>{t('datasets.col.name')} <input value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} placeholder="tank" /></label>
+            <label>{t('datasets.col.name')} <input value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} /></label>
             <label>{t('smoothfs.field.uuid')}
               <input value={form.uuid} onChange={e => setForm(p => ({ ...p, uuid: e.target.value }))}
                      placeholder={t('smoothfs.field.uuidPlaceholder')} />
@@ -180,7 +180,6 @@ export default function SmoothfsPools() {
               {t('smoothfs.field.tierPaths')}
               <textarea rows={4} value={form.tiersText}
                         onChange={e => setForm(p => ({ ...p, tiersText: e.target.value }))}
-                        placeholder={"/mnt/nvme-tier\n/mnt/sas-tier"}
                         style={{ fontFamily: 'monospace', width: '100%' }} />
             </label>
           </div>
