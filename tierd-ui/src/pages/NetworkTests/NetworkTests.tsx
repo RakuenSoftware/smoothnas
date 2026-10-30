@@ -122,7 +122,7 @@ export default function NetworkTests() {
 
         {testType === 'local' && (
           <div className="form-row">
-            <label>{t('benchmarks.net.targetHost')} <input value={host} onChange={e => setHost(e.target.value)} placeholder="192.168.1.100" /></label>
+            <label>{t('benchmarks.net.targetHost')} <input value={host} onChange={e => setHost(e.target.value)} /></label>
             <label>{t('benchmarks.net.port')} <NumberInput value={port} onChange={setPort} /></label>
             <label>{t('benchmarks.io.duration')} <NumberInput value={duration} onChange={setDuration} min={5} max={120} /></label>
             <label>{t('benchmarks.net.streams')} <NumberInput value={streams} onChange={setStreams} min={1} max={32} /></label>

@@ -94,7 +94,7 @@ export default function NfsExports() {
               </select>
             </label>
             <label>{t('nfs.field.allowedNetworks')}
-              <input value={newExport.networks} onChange={e => setNewExport(p => ({ ...p, networks: e.target.value }))} placeholder="10.0.0.0/24, 192.168.1.0/24" />
+              <input value={newExport.networks} onChange={e => setNewExport(p => ({ ...p, networks: e.target.value }))} />
             </label>
           </div>
           <div className="form-row">

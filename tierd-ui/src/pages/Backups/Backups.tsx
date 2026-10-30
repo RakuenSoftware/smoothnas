@@ -292,8 +292,7 @@ export default function Backups() {
 
           <div className="form-row">
             <label>{t('datasets.col.name')}
-              {/* i18n-allow: example value, illustrative placeholder */}
-              <input value={form.name} onChange={e => setField('name', e.target.value)} placeholder="e.g. nightly-push" />
+              <input value={form.name} onChange={e => setField('name', e.target.value)} />
             </label>
             <label>{t('backups.field.direction')}
               <select value={form.direction} onChange={e => setField('direction', e.target.value as any)}>
@@ -359,13 +358,12 @@ export default function Backups() {
 
           <div className="form-row">
             <label>{t('backups.field.host')}
-              <input value={form.host} onChange={e => setField('host', e.target.value)} placeholder="192.168.1.10" />
+              <input value={form.host} onChange={e => setField('host', e.target.value)} />
             </label>
             <label>{(form.method === 'rsync' && form.use_ssh) ? t('backups.field.remotePath') : (form.target_type === 'nfs' ? t('backups.field.exportPath') : t('backups.field.shareName'))}
               <input
                 value={form.share}
                 onChange={e => setField('share', e.target.value)}
-                placeholder={(form.method === 'rsync' && form.use_ssh) ? '/volume1/backup' : (form.target_type === 'nfs' ? '/exports/backup' : 'backup')}
               />
             </label>
           </div>
@@ -374,7 +372,7 @@ export default function Backups() {
             <div className="form-row">
               <label title={t('backups.tooltip.sshUser')}>
                 {t('backups.field.sshUser')}
-                <input value={form.ssh_user} onChange={e => setField('ssh_user', e.target.value)} placeholder="root" />
+                <input value={form.ssh_user} onChange={e => setField('ssh_user', e.target.value)} />
               </label>
               <label title={t('backups.tooltip.sshPass')}>
                 {t('backups.field.sshPass')}
@@ -425,7 +423,7 @@ export default function Backups() {
                   ))}
                 </select>
               ) : (
-                <input value={form.local_path} onChange={e => setField('local_path', e.target.value)} placeholder="/mnt/mypool" />
+                <input value={form.local_path} onChange={e => setField('local_path', e.target.value)} />
               )}
             </label>
             {localPaths.length > 0 && (
@@ -433,12 +431,11 @@ export default function Backups() {
                 <input
                   value={form.local_path}
                   onChange={e => setField('local_path', e.target.value)}
-                  placeholder="/mnt/mypool"
                 />
               </label>
             )}
             <label>{t('backups.field.remoteSubpath')}
-              <input value={form.remote_path} onChange={e => setField('remote_path', e.target.value)} placeholder="backups/server1" />
+              <input value={form.remote_path} onChange={e => setField('remote_path', e.target.value)} />
             </label>
           </div>
 

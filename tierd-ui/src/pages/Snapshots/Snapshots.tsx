@@ -98,10 +98,10 @@ export default function Snapshots() {
           <h3>{t('snapshots.create.title')}</h3>
           <div className="form-row">
             <label>{t('snapshots.field.dataset')}
-              <input value={newSnap.dataset} onChange={e => setNewSnap(p => ({ ...p, dataset: e.target.value }))} placeholder="tank/data" />
+              <input value={newSnap.dataset} onChange={e => setNewSnap(p => ({ ...p, dataset: e.target.value }))} />
             </label>
             <label>{t('snapshots.field.name')}
-              <input value={newSnap.name} onChange={e => setNewSnap(p => ({ ...p, name: e.target.value }))} placeholder="backup-2026" />
+              <input value={newSnap.name} onChange={e => setNewSnap(p => ({ ...p, name: e.target.value }))} />
             </label>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>

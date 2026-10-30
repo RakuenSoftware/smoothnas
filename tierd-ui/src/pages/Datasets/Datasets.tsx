@@ -82,10 +82,10 @@ export default function Datasets() {
           <h3>{t('datasets.create.title')}</h3>
           <div className="form-row">
             <label>{t('datasets.field.name')}
-              <input value={newDs.name} onChange={e => setNewDs(p => ({ ...p, name: e.target.value }))} placeholder="tank/data" />
+              <input value={newDs.name} onChange={e => setNewDs(p => ({ ...p, name: e.target.value }))} />
             </label>
             <label>{t('datasets.field.mountPoint')}
-              <input value={newDs.mount_point} onChange={e => setNewDs(p => ({ ...p, mount_point: e.target.value }))} placeholder="/mnt/data" />
+              <input value={newDs.mount_point} onChange={e => setNewDs(p => ({ ...p, mount_point: e.target.value }))} />
             </label>
           </div>
           <div className="form-row">

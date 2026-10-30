@@ -843,7 +843,6 @@ const en: LanguageTranslations = {
   'tiers.section.create': 'Create Tier',
   'tiers.section.levels': 'Tier Levels',
   'tiers.field.tierName': 'Tier Name',
-  'tiers.field.levelNamePlaceholder': 'e.g. NVME',
   'tiers.field.metaOnFastest': 'Store all tier metadata on the fastest tier only',
   'tiers.field.unassignedOption': '— unassigned —',
   'tiers.create.mountHintPrefix': 'Tier mount point will be ',
@@ -1298,7 +1297,6 @@ const en: LanguageTranslations = {
   'plugins.install.source.catalog.bundledHint': 'Shipped with SmoothNAS — installs offline, no GitHub fetch required.',
   'plugins.install.source.heading': 'Paste manifest YAML',
   'plugins.install.source.description': 'The plugin manifest the operator received from the plugin author. Use this for plugins not in the catalog (private builds, sideloaded forks, in-development plugins).',
-  'plugins.install.source.placeholder': 'apiVersion: smoothnas.io/v1\nkind: Plugin\n…',
   'plugins.install.source.continue': 'Continue',
   'plugins.install.preview.heading': 'Manifest preview',
   'plugins.install.preview.image': 'Image',
@@ -1356,7 +1354,6 @@ const en: LanguageTranslations = {
   'plugins.detail.image.heading': 'Image override',
   'plugins.detail.image.help':
     "Pin a specific container image for this plugin's main service instead of the manifest's. Persists across plugin updates. Applied immediately — a running plugin is restarted onto the new image. Leave empty to use the manifest image.",
-  'plugins.detail.image.placeholder': 'ghcr.io/owner/image:tag',
   'plugins.detail.image.apply': 'Set image',
   'plugins.detail.image.clear': 'Clear override',
   'plugins.detail.image.applying': 'Applying image — pulling and restarting the plugin…',
