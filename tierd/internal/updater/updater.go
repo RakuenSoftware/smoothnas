@@ -49,7 +49,10 @@ func GetRebootStatus() RebootStatus {
 		st.Reasons = append(st.Reasons, "SmoothKernel "+installed+" is installed; running "+running)
 	}
 	for _, m := range dkmsModules {
-		loaded := readFirstLine(sysModuleDir + "/" + m.module + "/version")
+		// Both sides reduced to the upstream version: the loaded module can
+		// carry a build suffix ("2.4.4-80") that the package version
+		// ("2.4.4-1") does not share.
+		loaded := upstreamVersion(readFirstLine(sysModuleDir + "/" + m.module + "/version"))
 		installed := upstreamVersion(installedVersion(m.pkg))
 		if loaded != "" && installed != "" && loaded != installed {
 			st.Reasons = append(st.Reasons, m.name+" "+installed+" is installed; running "+loaded)

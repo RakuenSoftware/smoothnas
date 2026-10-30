@@ -39,10 +39,19 @@ type updateRawZFSSpindownRequest struct {
 type ZFSHandler struct {
 	store           *db.Store
 	afterPoolImport func(string) error
+	// afterDisksChanged clears the disk listing cache (owned by the disks
+	// handler) after a wipe, so a wiped disk does not keep showing its old
+	// assignment for up to the cache TTL.
+	afterDisksChanged func()
 	poolsCache      *cache.Entry[[]zfs.Pool]
 	datasetsCache   *cache.Entry[[]zfs.Dataset]
 	zvolsCache      *cache.Entry[[]zfs.Zvol]
 	snapshotsCache  *cache.Entry[[]zfs.Snapshot]
+}
+
+// SetAfterDisksChanged registers the disk-cache invalidation hook.
+func (h *ZFSHandler) SetAfterDisksChanged(fn func()) {
+	h.afterDisksChanged = fn
 }
 
 func (h *ZFSHandler) SetAfterPoolImport(fn func(string) error) {
@@ -259,6 +268,9 @@ func (h *ZFSHandler) wipeZFSMemberDisks(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		h.poolsCache.Invalidate()
+		if h.afterDisksChanged != nil {
+			h.afterDisksChanged()
+		}
 		jobs.Complete(jobID, map[string]string{"status": "wiped"})
 	}()
 

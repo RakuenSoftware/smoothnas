@@ -91,6 +91,13 @@ func TestRebootStatusForDKMSModules(t *testing.T) {
 		t.Fatalf("pending smoothfs: %+v", st)
 	}
 
+	// A build suffix on the loaded version is not a pending update.
+	write("smoothfs", "0.3.2")
+	write("zfs", "2.3.4-80")
+	if st := GetRebootStatus(); st.Required {
+		t.Fatalf("loaded build suffix reported as pending: %+v", st)
+	}
+
 	// After the reboot the loaded module matches.
 	write("smoothfs", "0.3.2")
 	if st := GetRebootStatus(); st.Required {

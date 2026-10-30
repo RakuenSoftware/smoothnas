@@ -98,6 +98,7 @@ func newRouterFull(store *db.Store, version string, startTime time.Time, history
 	// Off by default in the constructor so unit tests make no background calls.
 	pluginsHandler.catalogRefreshEnabled = true
 	zfsHandler := NewZFSHandler(store)
+	zfsHandler.SetAfterDisksChanged(disksHandler.InvalidateDisks)
 	userPrefsHandler := NewUserPrefsHandler(store)
 	sharingHandler := NewSharingHandler(store)
 	networkHandler := NewNetworkHandler(store)

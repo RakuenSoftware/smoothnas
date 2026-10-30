@@ -39,6 +39,9 @@ export default function Updates() {
   const [restarting, setRestarting] = useState(false);
   const [log, setLog] = useState('');
   const [showLog, setShowLog] = useState(false);
+  // The action this page started; the run log names it only once the run
+  // has begun writing, so the first polls cannot tell a check from an install.
+  const [startedAction, setStartedAction] = useState<'check' | 'install' | null>(null);
   const offsetRef = useRef(0);
   const logRef = useRef<HTMLPreElement>(null);
 
@@ -100,6 +103,7 @@ export default function Updates() {
         offsetRef.current = 0;
         setLog('');
         setShowLog(true);
+        setStartedAction(action);
         setStatus(s => s ? { ...s, running: true } : s);
       })
       .catch(e => setError(extractError(e, t('updates.error.start'))));
@@ -114,6 +118,7 @@ export default function Updates() {
   }
 
   const last = status?.last_run;
+  const runningAction = (last?.finished_at ? null : last?.action) || startedAction;
   const lastFailed = !!last && !status?.running && last.exit_code !== undefined && last.exit_code !== 0;
   const available = status?.available ?? [];
 
@@ -134,7 +139,7 @@ export default function Updates() {
           <>
             {status.running ? (
               <div style={{ background: '#e0f2fe', borderRadius: 8, padding: 16, marginBottom: 12 }}>
-                <strong>{t(last?.action === 'check' ? 'updates.label.checking' : 'updates.label.installing')}</strong>
+                <strong>{t(runningAction === 'check' ? 'updates.label.checking' : 'updates.label.installing')}</strong>
               </div>
             ) : lastFailed ? (
               <div className="error-msg" style={{ marginBottom: 12 }}>
