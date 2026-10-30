@@ -42,6 +42,8 @@ if [ -d /run/systemd/system ]; then
 		systemctl --no-block try-restart smoothnas-runtime.service || true
 	fi
 	systemctl --no-block restart tierd.service || true
+	# Picks up the hourly schedule in the timers' smoothnas-hourly.conf.
+	systemctl try-restart apt-daily.timer apt-daily-upgrade.timer || true
 	# The web UI's certificate, and nginx, which cannot start without it: on a
 	# fresh install this package is configured on the first boot, after nginx
 	# has already failed for want of the certificate.
