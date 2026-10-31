@@ -22,9 +22,9 @@ updated module as well as the backend.
 This is a development branch, not a released appliance feature. The live
 results below cover the explicitly listed test baseline. Before shipping:
 
-- Merge and release the smoothfs directory-sync and inode-reuse fixes from
-  `fix/pbs-storage-durability`. This branch ports the validated fixes onto
-  smoothfs 0.3.4; its head is `e85ea3a251262e4bea95efa8862d91258e76f880`. It also adds a
+- Require smoothfs 0.3.5, released after merging
+  [the tested storage fixes](https://github.com/RakuenSoftware/smoothfs/pull/209).
+  It contains tested ref `e85ea3a251262e4bea95efa8862d91258e76f880` and adds a
   durable cleanup acknowledgement so an object can move repeatedly,
   corrects mkdir failure cleanup across supported kernel versions, and fixes
   non-root enumeration of snapshots spread over several backing tiers. It now
@@ -35,11 +35,11 @@ results below cover the explicitly listed test baseline. Before shipping:
   PBS 4.2.0. Its locally built image passed the checks below; the plugin still
   references the failing upstream baseline, rather than an unavailable test
   registry. Publishing and pinning a suitable image remains a release blocker.
-- Publish the corresponding `smoothfs-dkms` and `smoothfs-samba-vfs` packages.
-  `scripts/ci/smoothfs-ref` requires that fixed ref; the existing minimum-version
-  check deliberately refuses an appliance build until a release contains it.
+- Require the corresponding `smoothfs-dkms` and `smoothfs-samba-vfs` packages
+  from the archive. `scripts/ci/smoothfs-ref` requires that tested ref; the
+  minimum-version check now resolves it to release 0.3.5.
 - Build the pinned runtime with the retained downstream bridge patch. The pin
-  includes the credential-logging fixes from `fix/container-request-secrets`.
+  includes the [merged credential-logging fixes](https://github.com/games-on-whales/LXC2Docker/pull/160).
 - Validate the resulting appliance package on a fresh guest, including loading
   its packaged module and repeating backup, restore, movement and reboot checks.
 
@@ -534,6 +534,6 @@ tests did not modify that guest. Sanitized evidence and the candidate OCI image
 were retained locally.
 
 Multi-day retention, physical tier loss, host power failure and the packaged
-appliance remain unvalidated. Publishing/pinning the patched image and releasing
-the required smoothfs packages are still required. The plugin's installation
+appliance remain unvalidated. Publishing/pinning the patched image and verifying availability of the
+required smoothfs 0.3.5 packages are still required. The plugin's installation
 description continues to state the observed default-image corruption risk.
