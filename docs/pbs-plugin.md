@@ -522,6 +522,17 @@ registry addresses containing `:port` are split incorrectly during image pull.
 The test used a fixture-local hostname on standard HTTPS after capturing the
 failure. This does not establish support for registry-port references.
 
+Final cleanup was independently audited. It caught one native restore VM missed
+by a test-helper ownership flag; that flag was corrected and the verified-owned
+VM removed. Main fixture teardown also needed a retry to clear a Proxmox
+`lock: destroyed` marker after its disks were removed. The final inventory
+confirmed all owned guests, volumes, temporary storage entries and credentials,
+leases, mounts, helper process, backup logs, cloud-init snippet and host scratch
+were gone. Pre-existing VM 8168 remained running. The host audit separately
+records CT 9474's removal by its own `#3088` validation run at 22:23:45; these PBS
+tests did not modify that guest. Sanitized evidence and the candidate OCI image
+were retained locally.
+
 Multi-day retention, physical tier loss, host power failure and the packaged
 appliance remain unvalidated. Publishing/pinning the patched image and releasing
 the required smoothfs packages are still required. The plugin's installation
