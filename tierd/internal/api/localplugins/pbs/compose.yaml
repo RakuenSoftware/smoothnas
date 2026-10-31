@@ -5,8 +5,9 @@ name: pbs
 x-smoothnas:
   description: >
     Proxmox Backup Server — receive deduplicated VM and container backups from
-    Proxmox VE. Experimental: validate backup, restore and garbage collection
-    on your storage before relying on it. Open https://<nas>:8007 and sign in
+    Proxmox VE. Experimental: power-loss testing found corrupted snapshot
+    manifests. Use disposable backups until this plugin ships a validated image
+    with durable manifest updates. Open https://<nas>:8007 and sign in
     as admin@pbs using your initial password. Add a datastore at /datastore.
     Configuration and backups survive uninstall; reinstall on the same tiers
     to reconnect them. Uses the unofficial ayufan PBS container image.

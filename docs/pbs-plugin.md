@@ -7,9 +7,16 @@ Sending SmoothNAS files to an external PBS is a separate integration.
 
 ## Delivery status
 
-PBS on smoothfs requires every fix through `65794ec7eba2`. Older development
-builds can omit live snapshots during garbage collection and lose backups.
-The startup directory-sync probe does not detect that defect; load the required
+**The current PBS image is blocked for production use.** A later power-loss
+repeat left all nine tested snapshot manifests empty. Their archive indexes
+and referenced chunks remained intact, but normal verification failed. The
+locally rebuilt manifest-sync candidate passed the additional tests below, but
+the default plugin image remains the failing baseline.
+
+PBS on smoothfs requires every fix through `e85ea3a25126`, including interrupted
+movement recovery and a real lower-filesystem `syncfs` barrier. Older development
+builds can also omit live snapshots during GC and lose chunks. The startup
+directory-sync probe does not detect these other defects; load the required
 updated module as well as the backend.
 
 This is a development branch, not a released appliance feature. The live
@@ -17,10 +24,17 @@ results below cover the explicitly listed test baseline. Before shipping:
 
 - Merge and release the smoothfs directory-sync and inode-reuse fixes from
   `fix/pbs-storage-durability`. This branch ports the validated fixes onto
-  smoothfs 0.3.4; its head is `65794ec7eba28487c52365aeef6a12639b9c3b79`. It also adds a
+  smoothfs 0.3.4; its head is `e85ea3a251262e4bea95efa8862d91258e76f880`. It also adds a
   durable cleanup acknowledgement so an object can move repeatedly,
   corrects mkdir failure cleanup across supported kernel versions, and fixes
-  non-root enumeration of snapshots spread over several backing tiers.
+  non-root enumeration of snapshots spread over several backing tiers. It now
+  reconciles interrupted moves with live kernel placement and flushes each
+  backing filesystem when `syncfs` completes.
+- Publish a PBS image with durable manifest replacement and pin its immutable
+  digest. [The validated candidate patch](patches/pbs-manifest-fsync.patch) targets
+  PBS 4.2.0. Its locally built image passed the checks below; the plugin still
+  references the failing upstream baseline, rather than an unavailable test
+  registry. Publishing and pinning a suitable image remains a release blocker.
 - Publish the corresponding `smoothfs-dkms` and `smoothfs-samba-vfs` packages.
   `scripts/ci/smoothfs-ref` requires that fixed ref; the existing minimum-version
   check deliberately refuses an appliance build until a release contains it.
@@ -194,7 +208,9 @@ The successful live run used these dependency refs:
 | LXC2Docker | `ff6d6d8f9f6f62ea4b2fe7592e88a10ed20569bb` | Stop logging full create requests and failure configurations containing credentials. |
 
 The delivery branch now pins the forward-ported smoothfs fixes at
-`v0.3.5-0.20261031184644-65794ec7eba2` in both the Go module and protocol gate.
+`v0.3.5-0.20261031200503-e85ea3a25126` in both the Go module and protocol gate.
+The older successful matrix used the earlier refs recorded in each section;
+the continuation below reports the newer failures and fixes.
 The extended run below tests the forward-ported code, movement completion,
 full-filesystem mkdir error handling, and directory enumeration. The final
 packaged appliance still requires validation after its dependency packages are
@@ -337,3 +353,176 @@ pairs, all owned volumes, temporary PBS storage entries and credentials, leases,
 cloud-init snippet, host scratch directory and local private credential copies
 were removed. The pre-existing VM 8168 and CT 9474 remained running. Sanitized
 failure and success logs were retained locally for review.
+
+
+## Continued failure testing — 31 October 2026
+
+A third fresh guest on `.252` used Linux 7.2.11 and two dedicated XFS backing
+filesystems. All virtual disks used ZFS `sync=standard` during testing. The
+initial root-disk package provisioning and later PBS compilation temporarily
+disabled root-disk sync, restoring it before validation. Both backing disks
+remained on normal sync throughout. Existing guests were left alone.
+
+Four clients completed another six rounds of file backups: 24 successful
+224 MiB snapshots. Twelve initial restores matched, then another concurrent
+backup cycle ran alongside GC. Pruning retained exactly two snapshots per group,
+and all eight retained snapshots restored. A separate archive roundtrip preserved
+POSIX access/default ACLs, binary user xattrs, UID/GID, setuid/setgid modes, hard
+links, Unicode names, dangling symlinks, a FIFO, sparse-file contents and empty
+files/directories.
+
+### Interrupted movement
+
+Stopping the worker after source cleanup but before its completion acknowledgement
+reproduced a live bug: the old startup recovery reported `placed` in SQLite while
+the kernel stayed `switched`, so the next movement failed with `EBUSY`. The backup
+remained readable. Commit `bbf034674eea` fixes the actual startup service path:
+
+- Persist a full-sync movement intent and its log before the first kernel plan.
+- Use kernel placement to resolve the cutover/database transition gap.
+- Remove the non-authoritative copy and sync its parent before acknowledging
+  completion or rollback; leave failed or uncertain recovery pending.
+- Instantiate a persisted path when the post-boot OID index is cold, verify its
+  identity, then inspect it through the expected pool.
+
+The original stuck object recovered without rebooting, then moved successfully.
+Four worker-exit cases passed: after planning, after copying, after cutover before
+its SQLite transition, and immediately before the cleanup acknowledgement. Each
+allowed subsequent movements and preserved all 18 retained archive indexes and
+267 referenced chunks byte-for-byte. Live guards rejected stale rollback and
+rollback after cutover; retries after a completed rollback were idempotent. The
+standalone kernel probe passed four rollbacks and four moves with a held file
+descriptor. Go tests, race checks, static checks, and builds against Linux 6.18
+and 7.2 headers passed.
+
+### Corruption detection and power-loss failure
+
+A deliberate one-byte mutation in a disposable referenced chunk caused verification
+to fail and PBS to quarantine that chunk as `.0.bad`. Restore rejected the affected
+snapshot. The test validated the quarantined bytes against the exact injected
+mutation, restored the saved original, and checked its hash. Restore and strict
+verification of all nine expected snapshots then passed; all 18 archive indexes
+and 267 referenced chunk hashes still matched.
+
+The subsequent forced guest power-off exposed a separate critical failure. The
+pool/runtime restarted automatically, cold-index movement recovery completed,
+and the next movements preserved the referenced data. However, all nine
+`index.json.blob` manifests were now zero length, on both the presented filesystem
+and its raw XFS backing. Verification failed for every snapshot. The empty
+manifests, original archive indexes, hashes and failure logs were preserved as
+evidence. The manifests were not reconstructed, and these snapshots were not
+claimed as recovered or successfully restored.
+
+Two findings require separate treatment:
+
+1. Smoothfs `syncfs` returned success without flushing lower file data. An isolated
+   XFS test demonstrated delayed allocation remaining on both backing filesystems
+   and an upper-written file after successful `syncfs`. Commit `e85ea3a25126` now
+   flushes every distinct lower superblock and reports errors. The old test failed;
+   the corrected module passed. In a power-off comparison, the old callback lost
+   all 16 new upper replacements, retaining their older contents. With the fix,
+   a single upper `syncfs` preserved all 32 new control and upper replacements.
+2. PBS 4.2.0 replaces manifests without requesting file sync when updating
+   verification state. The exact release's
+   [manifest update](https://git.proxmox.com/?p=proxmox-backup.git;a=blob;f=pbs-datastore/src/backup_info.rs;hb=v4.2.0)
+   calls `replace_file` with sync disabled; its
+   [verification path](https://git.proxmox.com/?p=proxmox-backup.git;a=blob;f=src/backup/verify.rs;hb=v4.2.0)
+   invokes that update. A direct-XFS control reproduced eight empty unsynced
+   replacements after power loss, while all eight file-synced controls survived.
+   This supports the manifest-durability diagnosis; the filesystem fix alone is
+   not acceptance evidence for an image that does not request a barrier after
+   verification. The candidate patch enables file sync before manifest rename.
+
+### Backing-tier I/O failure and GC
+
+A separate valid datastore held one 64 MiB file archive with two indexes and
+19 referenced chunks. Its indexes stayed on the slow tier; one live chunk was
+moved to the fast tier alongside a disposable orphan. All 20 test chunks were
+aged three days while preserving mtime, so an incomplete reference scan could
+have deleted the live fast-tier chunk.
+
+A reversible device-mapper error target made the slow tier return actual `EIO`.
+GC failed during phase 1 while opening the dynamic index. Both the live chunk
+and the orphan on the healthy fast tier remained present. After restoring the
+linear mapping, listing and checksum restore succeeded without restarting PBS.
+Both indexes and all 19 chunk hashes matched. Healthy GC then removed exactly
+one orphan (1.716 MiB), retained the referenced chunk, and verification plus
+another actual restore passed. This separate datastore does not repair or
+supersede the nine failed manifests described above.
+
+### Built manifest-sync candidate
+
+The candidate was built from the exact PBS `v4.2.0` source commit
+`035c449897fafc228c8bbf3a5b5ba38564478ac7`, with only the single-line manifest-sync
+patch. All three binaries were rebuilt: API, proxy and manager. Their dynamic
+library dependencies resolved inside the clean runtime image, and deployed binary
+hashes matched the build outputs. The added image layer contained exactly these
+three binaries, with no live container configuration or credentials.
+
+The base was pinned to
+`sha256:01f685a010025233b649417a317cc175b27920cd64f0429abfdc46a0d8d2e88a`.
+The tested registry manifest digest was
+`sha256:fb5b209705b6b169b374e1b55e15cb39c38eaf5e2b335bfeff5e7cf9aee43edc`.
+The image was installed through the actual plugin installer, lifecycle and
+Compose backend. Existing TLS identity, token and administrator credentials
+survived. A syscall trace observed a successful temporary-manifest `fsync`
+before its rename, where the original image's trace had no such sync.
+
+A fresh candidate datastore passed:
+
+- Four concurrent file clients, three rounds of 224 MiB archives: all 12 initial
+  restores matched. Pruning retained exactly two versions per group, and all
+  eight retained archives restored again.
+- Rich metadata and encrypted backup/restore, including wrong-key rejection.
+- Native Proxmox CT backup and `pct restore` of a 515.638 MiB OS filesystem,
+  with matching sentinel content, UID and mode. The backup took 322 seconds
+  under heavy shared-host I/O pressure; this is correctness evidence, not a
+  performance measurement.
+- Native VM backup and `qmrestore` of a 1 GiB logical disk, with its random
+  payload matching after restore.
+- Exactly 12 retained snapshots across eight groups. The inventory includes
+  dynamic and fixed indexes for file, CT and VM archives: 23 indexes and 391
+  distinct referenced chunks.
+- The production movement worker moved 24 referenced chunks and eight retained
+  archive indexes to the slow tier while the CT backup was active. Tiered file
+  and encrypted restores passed.
+- GC with all 435 test chunks aged three days while preserving mtime. It removed
+  44 unreferenced chunks (179.109 MiB), including the control orphan. All 23
+  retained indexes and 391 referenced chunk hashes still matched.
+
+The candidate passed three power-loss tests: an initial one-snapshot smoke test
+and two full 12-snapshot repeats after GC. The second full repeat followed
+uninstall/reinstall with a different initial password: the original password and
+TLS identity survived, and the replacement password and public default were
+rejected. Each forced power-off immediately followed
+verification, without an added sync barrier. Pool, runtime and PBS restarted
+automatically. Strict verification visited every expected snapshot; actual file,
+encrypted, rich-metadata, native CT and native VM restores passed after the full
+power cut. Each full repeat used fresh native restore guests, then destroyed
+them and their temporary PBS storage entry. The 23-index/391-chunk inventory
+also matched after both repeats. The nine original empty
+manifests were not reconstructed and are not counted as recovered.
+
+[The amd64 build recipe](../scripts/pbs-image/Dockerfile) records the source,
+patch, base and compatible Debian Rust dependency versions. The tested build ran
+these commands in a disposable Debian 13 guest and repacked the clean base with
+`umoci`; the Dockerfile itself has not been executed. Cargo's lockfile, package
+versions, binary hashes and an OCI image archive are retained with the test
+evidence. Remaining rolling package inputs mean this is not a claim of a
+bit-for-bit reproducible rebuild.
+
+The final loaded module matched the required build. The final PBS cgroup had a
+4 GiB memory limit with no OOM events or kills, and runtime journals contained
+neither test administrator password nor the API token. Linux 7.2 emitted one
+nonfatal heat-drain workqueue deprecation notice; the final kernel audit found
+no BUG, Oops, blocked-task or OOM diagnostic.
+
+Candidate deployment also reproduced a separate, unfixed runtime issue:
+registry addresses containing `:port` are split incorrectly during image pull.
+The test used a fixture-local hostname on standard HTTPS after capturing the
+failure. This does not establish support for registry-port references.
+
+Multi-day retention, physical tier loss, host power failure and the packaged
+appliance remain unvalidated. Publishing/pinning the patched image and releasing
+the required smoothfs packages are still required. The plugin's installation
+description continues to state the observed default-image corruption risk.

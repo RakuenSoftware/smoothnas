@@ -1,0 +1,11 @@
+--- a/pbs-datastore/src/backup_info.rs
++++ b/pbs-datastore/src/backup_info.rs
+@@ -1008,7 +1008,7 @@
+         path.push(MANIFEST_BLOB_NAME.as_ref());
+ 
+         // atomic replace invalidates flock - no other writes past this point!
+-        replace_file(&path, raw_data, CreateOptions::new(), false)?;
++        replace_file(&path, raw_data, CreateOptions::new(), true)?;
+         Ok(())
+     }
+ 
