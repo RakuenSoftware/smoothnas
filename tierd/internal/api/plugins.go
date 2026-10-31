@@ -303,6 +303,7 @@ func splitNameVerb(rest string) (name, verb string) {
 // (the raw DB row is exposed under .plugin so future fields don't
 // need a UI churn).
 type pluginListItem struct {
+	WebUI                    *compose.WebUI           `json:"webUI,omitempty"`
 	Name                     string                   `json:"name"`
 	Version                  string                   `json:"version"`
 	State                    string                   `json:"state"`
@@ -351,7 +352,12 @@ func toPluginListItem(rec *plugin.PluginRecord) pluginListItem {
 	if profiles == nil {
 		profiles = []string{}
 	}
+	var webUI *compose.WebUI
+	if m, err := plugin.ParseManifest([]byte(r.ManifestYAML)); err == nil {
+		webUI = m.WebUI
+	}
 	return pluginListItem{
+		WebUI:                    webUI,
 		Name:                     r.Name,
 		Version:                  r.Version,
 		State:                    r.State,

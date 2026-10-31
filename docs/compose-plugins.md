@@ -93,3 +93,26 @@ services:
 SmoothNAS-specific concerns compose doesn't: tiered-volume bind resolution + pin,
 the cross-project host-port guard, and treating `docker compose ps` as the source
 of truth for state (cached, with a periodic reconcile sweep).
+
+## Direct web interfaces
+
+For an application that needs its own HTTPS origin, declare a direct link
+instead of `x-smoothnas.ui` (the iframe/proxy target):
+
+```yaml
+x-smoothnas:
+  webUI:
+    scheme: https
+    port: 8007
+    path: /
+services:
+  server:
+    image: example/server:1.0
+    ports: ["8007:8007"]
+```
+
+`webUI.port` must match a fixed published TCP port; `scheme` is `http` or
+`https`, and `path` is an absolute path. The Open action uses the hostname of
+the current appliance page and opens a new tab. It does not route through
+SmoothNAS nginx or inject authentication. The application owns its certificate
+and login. See [the PBS plugin guide](pbs-plugin.md) for a complete example.

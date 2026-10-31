@@ -23,7 +23,16 @@ type Meta struct {
 	Description string
 	Vendor      string
 	Homepage    string
+	WebUI       *WebUI  // optional direct link on the appliance hostname, outside the iframe proxy
 	UI          *MetaUI // nil = headless (no console iframe; catalog shows description only)
+}
+
+// WebUI describes a directly published web interface. The browser supplies the
+// appliance hostname; plugins cannot inject arbitrary external URLs.
+type WebUI struct {
+	Scheme string `json:"scheme" yaml:"scheme"`
+	Port   int    `json:"port" yaml:"port"`
+	Path   string `json:"path" yaml:"path"`
 }
 
 // MetaUI selects and describes the service whose HTTP UI the SmoothNAS console
@@ -46,6 +55,7 @@ type xsDoc struct {
 		Description string `yaml:"description"`
 		Vendor      string `yaml:"vendor"`
 		Homepage    string `yaml:"homepage"`
+		WebUI       *WebUI `yaml:"webUI"`
 		UI          *struct {
 			Service string `yaml:"service"`
 			Port    int    `yaml:"port"`
@@ -66,7 +76,7 @@ func ParseMeta(composeYAML []byte) (Meta, error) {
 	if doc.XS == nil {
 		return Meta{}, nil
 	}
-	m := Meta{Description: doc.XS.Description, Vendor: doc.XS.Vendor, Homepage: doc.XS.Homepage}
+	m := Meta{Description: doc.XS.Description, Vendor: doc.XS.Vendor, Homepage: doc.XS.Homepage, WebUI: doc.XS.WebUI}
 	if doc.XS.UI != nil {
 		m.UI = &MetaUI{Service: doc.XS.UI.Service, Port: doc.XS.UI.Port, Path: doc.XS.UI.Path, Auth: doc.XS.UI.Auth}
 	}
@@ -96,6 +106,18 @@ func ServiceNames(composeYAML []byte) ([]string, error) {
 // valid TCP port, and its path (if set) must be absolute. Returns nil for a
 // headless plugin (no ui block).
 func ValidateMeta(m Meta, serviceNames []string) error {
+	if w := m.WebUI; w != nil {
+		if w.Scheme != "http" && w.Scheme != "https" {
+			return fmt.Errorf("x-smoothnas.webUI.scheme must be http or https")
+		}
+		if w.Port < 1 || w.Port > 65535 {
+			return fmt.Errorf("x-smoothnas.webUI.port must be in 1..65535")
+		}
+		if w.Path != "" && (!strings.HasPrefix(w.Path, "/") || strings.HasPrefix(w.Path, "//") || strings.ContainsAny(w.Path, "\\\r\n")) {
+			return fmt.Errorf("x-smoothnas.webUI.path must be an absolute path without a host")
+		}
+	}
+
 	if m.UI == nil {
 		return nil
 	}

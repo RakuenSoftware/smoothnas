@@ -19,19 +19,19 @@ The build target writes `bin/docker-lxc-daemon`. Appliance installs
 place it at `/usr/lib/smoothnas/docker-lxc-daemon` and install
 `runtime/smoothnas-runtime.service`.
 
-The upstream source is pinned to the reviewed LXC2Docker commit:
+The upstream source is pinned to the tested LXC2Docker commit that removes
+container request and failure-config logging of credentials:
 
 ```text
 https://github.com/games-on-whales/LXC2Docker.git
-7171568494541a1c9a776670a1623f3db64d7e46
+ff6d6d8f9f6f62ea4b2fe7592e88a10ed20569bb
 ```
 
 Set `LXC2DOCKER_REF=<branch-or-commit-or-tag>` to evaluate a newer revision.
 Downstream corrections are applied by the same build path used for releases.
 
-
 SmoothNAS carries runtime corrections in `runtime/patches/`. The build script
 applies them after checking out LXC2Docker; a patch that no longer applies fails
-the build. The bridge correction replaces only the owned postrouting chain in
-one nft transaction, preserving published port DNAT rules and removing old
-duplicate masquerade rules. Bridge and port-forward mutations share `nftMu`.
+the build. The pinned upstream already bounds masquerade rules in one nft transaction.
+The bridge correction serializes bridge and port-forward mutations with
+`nftMu` and checks that published port DNAT rules survive repeated reconciliation.

@@ -87,11 +87,11 @@ make install-runtime   # installs the daemon + smoothnas-runtime.service
 ```
 
 The runtime wraps [LXC2Docker](https://github.com/games-on-whales/LXC2Docker)
-(defaulting to upstream `main`; pin with `LXC2DOCKER_REF`). Build hosts need
+(pinned to a tested upstream commit; override with `LXC2DOCKER_REF`). Build hosts need
 `golang-go`, `pkg-config`, `build-essential`, and `lxc-dev`; runtime hosts
 need `lxc`, `lxc-templates`, `skopeo`, `umoci`, `rsync`, `nftables`,
-`iptables`, `iproute2`, and `uidmap`. SmoothNAS carries no local LXC2Docker
-patches — fixes land upstream and are picked up on the next runtime build.
+`iptables`, `iproute2`, and `uidmap`. Runtime fixes are pinned upstream; reviewed downstream corrections in
+`runtime/patches/` are applied by the same build path used for releases.
 See [../runtime/README.md](../runtime/README.md) for detail.
 
 ### Kernel and OpenZFS

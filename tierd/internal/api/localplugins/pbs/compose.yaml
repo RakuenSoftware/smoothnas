@@ -1,0 +1,152 @@
+# Experimental; see docs/pbs-plugin.md for required dependency releases and validation.
+# This image is an unofficial container build of PBS, not a Proxmox image.
+name: pbs
+
+x-smoothnas:
+  description: >
+    Proxmox Backup Server — receive deduplicated VM and container backups from
+    Proxmox VE. Experimental: validate backup, restore and garbage collection
+    on your storage before relying on it. Open https://<nas>:8007 and sign in
+    as admin@pbs using your initial password. Add a datastore at /datastore.
+    Configuration and backups survive uninstall; reinstall on the same tiers
+    to reconnect them. Uses the unofficial ayufan PBS container image.
+  vendor: smoothnas
+  homepage: https://pbs.proxmox.com/docs/
+  webUI:
+    scheme: https
+    port: 8007
+    path: /
+  config:
+    - key: PBS_ADMIN_PASSWORD
+      label: Initial administrator password
+      type: string
+      secret: true
+      description: >
+        Required on first start: at least 12 characters, without line breaks.
+        Creates admin@pbs before the API starts. Afterwards change passwords
+        in PBS; this field never resets an existing installation's password.
+    - key: TZ
+      label: Timezone
+      type: string
+      default: Etc/UTC
+    - key: MEMORY_LIMIT
+      label: Container memory
+      type: string
+      default: 4GiB
+      description: Raise for large datastores; budget at least another GiB per TiB.
+
+services:
+  pbs:
+    image: ayufan/proxmox-backup-server:v4.2.0-1
+    restart: unless-stopped
+    ports:
+      - "8007:8007"
+    mem_limit: "${MEMORY_LIMIT:-4GiB}"
+    stop_signal: SIGHUP
+    stop_grace_period: 2m
+    tmpfs:
+      - /run
+    healthcheck:
+      # Bash is part of the pinned image. Check the HTTPS listener without
+      # needing curl or installing a client credential in the healthcheck.
+      test: ["CMD", "/bin/bash", "-ec", "exec 3<>/dev/tcp/127.0.0.1/8007"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    environment:
+      PBS_ADMIN_PASSWORD: "${PBS_ADMIN_PASSWORD:-}"
+      TZ: "${TZ:-Etc/UTC}"
+    # No disk devices, SYS_RAWIO, host networking, or privileged mode. SmoothNAS
+    # owns storage; PBS manages files inside the datastore directory.
+    volumes:
+      - config:/etc/proxmox-backup
+      - state:/var/lib/proxmox-backup
+      - logs:/var/log/proxmox-backup
+      - datastore:/datastore
+    # Run a mounted script: LXC init commands must fit on one config line.
+    # Bootstrap finishes before any PBS daemon can install upstream defaults.
+    # Perl + JSON::PP are installed by the PBS image.
+    entrypoint: ["/bin/bash", "-eu", "/smoothnas-bootstrap.sh"]
+    configs:
+      - source: bootstrap
+        target: /smoothnas-bootstrap.sh
+
+configs:
+  bootstrap:
+    content: |
+        umask 077
+        # smoothfs presents tier-backed files as UID/GID 1000. Match that
+        # identity without weakening PBS's private directory permissions.
+        if [ "$$(id -g backup)" != 1000 ]; then groupmod --gid 1000 backup; fi
+        if [ "$$(id -u backup)" != 1000 ]; then usermod --uid 1000 --gid backup backup; fi
+        # Refuse storage without a working namespace durability barrier. In
+        # particular, older smoothfs modules did not implement directory fsync.
+        perl -MIO::Handle -e 'open(my $$dir, "<", "/datastore") or die "Open datastore: $$!\n"; $$dir->sync or die "PBS requires working datastore directory fsync: $$!\n";'
+        perl - /etc/proxmox-backup <<'PERL'
+        use strict;
+        use warnings;
+        use JSON::PP;
+        my $$dir = shift @ARGV or die "Missing configuration directory\n";
+        if (-f "$$dir/.smoothnas-initialized") {
+            for my $$file (qw(user.cfg acl.cfg shadow.json .initialized)) {
+                -f "$$dir/$$file" or die "Incomplete PBS configuration: $$file\n";
+            }
+            exit 0;
+        }
+        # Refuse to overwrite imported installations. The pending marker permits
+        # retrying an interrupted bootstrap, during which no daemon has started.
+        unless (-f "$$dir/.smoothnas-bootstrap-pending") {
+            opendir(my $$dh, $$dir) or die "Read PBS configuration: $$!\n";
+            my @existing = grep { $$_ ne '.' && $$_ ne '..' } readdir($$dh);
+            closedir($$dh);
+            @existing == 0 or die "Existing PBS configuration: import it explicitly; refusing to overwrite\n";
+        }
+        my $$password = $$ENV{PBS_ADMIN_PASSWORD} // '';
+        length($$password) >= 12 && $$password !~ /[\r\n\0]/
+            or die "PBS_ADMIN_PASSWORD must contain at least 12 characters without line breaks\n";
+        open(my $$random, '<:raw', '/dev/urandom') or die "Open random source: $$!\n";
+        read($$random, my $$bytes, 16) == 16 or die "Read random source\n";
+        close($$random);
+        my $$salt = '$$6$$' . substr(unpack('H*', $$bytes), 0, 16) . '$$';
+        my $$hash = crypt($$password, $$salt);
+        defined($$hash) && $$hash =~ /^\$$6\$$/ or die "SHA-512 password hashing unavailable\n";
+        sub write_config {
+            my ($$name, $$contents) = @_;
+            open(my $$fh, '>', "$$dir/$$name.tmp") or die "Write $$name: $$!\n";
+            print {$$fh} $$contents or die "Write $$name: $$!\n";
+            close($$fh) or die "Close $$name: $$!\n";
+            rename("$$dir/$$name.tmp", "$$dir/$$name") or die "Commit $$name: $$!\n";
+        }
+        write_config('.smoothnas-bootstrap-pending', '');
+        write_config('user.cfg', "user: admin\@pbs\n\tenable true\n\texpire 0\n");
+        write_config('acl.cfg', "acl:1:/:admin\@pbs:Admin\n");
+        write_config('shadow.json', encode_json({ admin => $$hash }));
+        write_config('.initialized', '');
+        rename("$$dir/.smoothnas-bootstrap-pending", "$$dir/.smoothnas-initialized")
+            or die "Commit bootstrap: $$!\n";
+        PERL
+        unset PBS_ADMIN_PASSWORD
+        chown backup:backup /etc/proxmox-backup /etc/proxmox-backup/* /etc/proxmox-backup/.[!.]*
+        chmod 700 /etc/proxmox-backup
+        chown backup:backup /datastore
+        umask 022
+        exec /runit/entrypoint.sh runsvdir /runit
+
+volumes:
+  config:
+    x-smoothnas:
+      tier: media
+      minSize: 1G
+  state:
+    x-smoothnas:
+      tier: media
+      minSize: 4G
+  logs:
+    x-smoothnas:
+      tier: media
+      minSize: 1G
+  datastore:
+    x-smoothnas:
+      tier: media
+      minSize: 100G
