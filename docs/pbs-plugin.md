@@ -7,12 +7,20 @@ Sending SmoothNAS files to an external PBS is a separate integration.
 
 ## Delivery status
 
+PBS on smoothfs requires every fix through `65794ec7eba2`. Older development
+builds can omit live snapshots during garbage collection and lose backups.
+The startup directory-sync probe does not detect that defect; load the required
+updated module as well as the backend.
+
 This is a development branch, not a released appliance feature. The live
 results below cover the explicitly listed test baseline. Before shipping:
 
 - Merge and release the smoothfs directory-sync and inode-reuse fixes from
   `fix/pbs-storage-durability`. This branch ports the validated fixes onto
-  smoothfs 0.3.4; its head is `c1392ccd1bde24dc89d5166d5d9b403497ca3dda`.
+  smoothfs 0.3.4; its head is `65794ec7eba28487c52365aeef6a12639b9c3b79`. It also adds a
+  durable cleanup acknowledgement so an object can move repeatedly,
+  corrects mkdir failure cleanup across supported kernel versions, and fixes
+  non-root enumeration of snapshots spread over several backing tiers.
 - Publish the corresponding `smoothfs-dkms` and `smoothfs-samba-vfs` packages.
   `scripts/ci/smoothfs-ref` requires that fixed ref; the existing minimum-version
   check deliberately refuses an appliance build until a release contains it.
@@ -81,6 +89,21 @@ datastore configuration and backup contents remain intact. A different tier
 selects a different directory and does not migrate the old data. Reinstalling
 also requires reentering any SmoothNAS configuration settings because its
 database records and initial secret were removed.
+
+An abrupt power-off can leave an incomplete snapshot. In live testing PBS
+listed the interrupted entry with no archive files or completed manifest;
+restore failed, and verification reported that entry as a failure while all
+completed snapshots verified successfully. Remove an entry only after
+confirming it is the known interrupted backup without a completed manifest,
+then rerun verification and restore checks.
+
+Use the required fixed kernel module for full-store recovery. The extended
+test found a smoothfs mkdir error-path lock bug: after `ENOSPC`, some subsequent
+lookups blocked, PBS retained a backup-group lock, and an application restart
+could not finish. Existing snapshots remained readable, but freeing space did
+not repair the damaged lock. The isolated test VM needed a forced reset to
+load the corrected module. This was a filesystem defect, rather than evidence
+that restarting PBS is sufficient recovery on the affected module.
 
 Keep configuration and datastore together in a recovery plan. A datastore
 recovered without its configuration can be attached to a fresh PBS installation
@@ -171,8 +194,11 @@ The successful live run used these dependency refs:
 | LXC2Docker | `ff6d6d8f9f6f62ea4b2fe7592e88a10ed20569bb` | Stop logging full create requests and failure configurations containing credentials. |
 
 The delivery branch now pins the forward-ported smoothfs fixes at
-`v0.3.5-0.20261031173954-c1392ccd1bde` in both the Go module and protocol gate.
-That rebased ref has not repeated the full live matrix recorded here.
+`v0.3.5-0.20261031184644-65794ec7eba2` in both the Go module and protocol gate.
+The extended run below tests the forward-ported code, movement completion,
+full-filesystem mkdir error handling, and directory enumeration. The final
+packaged appliance still requires validation after its dependency packages are
+published.
 
 Deploy the updated runtime **and rebuild/load the updated smoothfs module**
 with the plugin. Reboot an existing appliance to load its rebuilt module;
@@ -198,7 +224,116 @@ Cleanup was verified: all five temporary guests, their disks, temporary PBS
 storage entries, credentials, leases, snippets and host scratch files were
 removed. The host's existing guests were left running.
 
-The plugin remains experimental. This run does not cover full-datastore or
-backing-disk loss, abrupt power failure, sustained load, or every lower
-filesystem. The immediate GC test exercises the age cutoff with disposable
+The plugin remains experimental. This initial run did not cover full-datastore
+failure, backing-disk loss, abrupt power failure, sustained load, or every lower
+filesystem; the extended run below adds several of these checks. The immediate GC test exercises the age cutoff with disposable
 chunk timestamps; it does not replace a multi-day retention soak.
+
+## Extended live validation — 31 October 2026
+
+A second fresh guest on `.252` ran the delivery branch with smoothfs based on
+0.3.4, Linux `7.2.11+deb13-cloud-amd64`, two 8 GiB XFS backing disks, and the
+pinned PBS image/runtime plus the retained runtime bridge patch. All three
+virtual disks used ZFS `sync=standard` for the tests. Root-disk sync was disabled
+only during initial package provisioning and restored before loading the pool.
+
+The first 412 referenced chunks moved successfully, but an immediate reverse
+move failed with `EBUSY`: the kernel remained `switched` after userspace had
+finished cleanup. Commit `e2d838d1fe8f` adds `MOVE_COMPLETE` after source unlink
+and directory sync, then returns the object to `placed`. A failed unlink or
+acknowledgement remains an incomplete cleanup. New worker tests cover these
+failures; the live kernel regression covers four moves with a held descriptor,
+premature/stale acknowledgements, and an idempotent completion retry.
+
+Checks completed on this fixture:
+
+| Check | Result |
+|---|---|
+| Concurrent backups | Four clients completed nine rounds: 36 successful file snapshots, including shared-content deduplication and incremental changes. Twelve of these ran after the final directory-enumeration fix. |
+| Restore integrity | All 12 initial snapshots restored with matching hashes, modes and symlinks. Four more restores passed during movement; pruning retained exactly the latest two snapshots per group, and all eight retained snapshots restored. |
+| Repeated movement | On the fixed module, 32 retained chunks each completed three additional moves while four restores ran. Both kernel and SQLite states returned to `placed` after every move. |
+| Encrypted backups | Correct-key restore matched hashes, modes and symlinks; a wrong key was rejected. All three referenced encrypted-archive/catalog chunks moved in both directions, and encrypted restore passed afterwards. |
+| Native Proxmox backups | Fresh CT `vzdump`/`pct restore` and VM `vzdump`/`qmrestore` passed, including sentinel bytes/mode/ownership and raw-disk payload checks. A VM-create attempt hit the shared host's storage lock; its serial rerun passed. |
+| Cancellation | An active client was interrupted with SIGINT; retrying its 512 MiB archive and restoring it passed. |
+| Forced guest power-off | The guest was stopped during a throttled upload. Boot ID changed; the pool mounted and PBS restarted automatically. All eight retained snapshots restored, the 512 MiB upload retried and restored, and the encrypted archive restored. The known incomplete snapshot required explicit removal before verification passed. |
+| Normal maintenance | Verification passed during movement. GC respected its age cutoff and queued 464.281 MiB in 116 unreferenced chunks without prematurely deleting recent data. |
+| Kernel/runtime checks | Directory sync, inode reuse, open-FD/getattr/nested cutover, repeated movement, and the isolated network-namespace NAT test passed. Go tests, race tests, static checks and kernel builds passed. The 4 GiB container memory limit was enforced; observed final peak was 3.24 GiB, with no OOM events. |
+
+The capacity test exposed another kernel defect. Linux 6.18 consumes the child
+dentry on `vfs_mkdir` failure while leaving its parent locked; 6.19+ also unlocks
+the parent. The old materialization path unlocked twice on newer kernels, while
+the direct mkdir path failed to unlock on 6.18. Commit `13b3b03983c7` normalizes
+the error contract in the compatibility helper. A small two-tier ENOSPC probe
+hung on the old module and passed on the fix, including responsive lookup and
+write recovery. Builds passed against both 6.18 and 7.2 headers; live regression
+execution used 7.2.11. See the primary
+[6.18 implementation](https://github.com/torvalds/linux/blob/v6.18/fs/namei.c) and
+[6.19 implementation](https://github.com/torvalds/linux/blob/v6.19/fs/namei.c).
+
+With the mkdir fix, both backing filesystems were filled to 32 MiB free. PBS
+correctly failed a 512 MiB upload with `ENOSPC`. After removing only the test
+fillers, existing snapshots restored and the same group's new 512 MiB backup
+and restore succeeded without restarting PBS. The original failing run had
+kept its group locked and blocked application shutdown; a forced VM reset was
+needed to discard that damaged kernel state before loading the fix.
+
+Post-GC checksum restore then exposed a separate data-loss defect. PBS's
+UID 1000 could enumerate only the canonical directory below root-owned private
+backing parents, while a root probe saw the union of both tiers. A snapshot
+created on the other tier after full-store recovery disappeared from PBS's
+listing. Verification incorrectly returned `TASK OK` with zero snapshots in
+that group, and GC deleted 134 archive chunks and one catalog chunk still
+referenced by the snapshot. The failed snapshot's manifest, indexes and failure
+logs were preserved as test evidence before its metadata was explicitly removed; its lost chunks
+were not recovered.
+
+Commit `65794ec7eba2` performs backing traversal with the mount credentials,
+matching normal lookup, and propagates contributing-tier errors rather than
+returning a partial listing. Upper DAC still applies. The old module failed a
+non-root merged-directory regression; the corrected module passed for UID 1000,
+a bind mount, denial of UID 1001, and propagation of a contributing-tier lookup
+error. With the corrected traversal PBS saw the previously hidden snapshot and
+verification correctly flagged its missing data.
+
+Acceptance checks now compare PBS's listing with the exact known completed
+snapshot set, require verification to visit every expected snapshot, and run
+checksum restores after GC. A successful task status or group count alone is
+insufficient.
+
+The final repeat used every fix through `65794ec7eba2` and rebuilt the lost test
+group with a new backup. Full-store failure, freeing space, retry and checksum
+restore passed without a restart. Another twelve concurrent file backups and
+pruning produced 14 known completed snapshots across ten groups. PBS listed
+all 14; verification visited every one. GC then removed 83 unreferenced chunks
+(339.585 MiB), retained 819 chunks, and strict verification plus checksum
+restores of all eight retained file snapshots, all three recovery archives and
+the encrypted archive passed.
+
+Managed uninstall/reinstall retained seven configuration files and ten selected
+live chunks byte-for-byte. The original password, certificate and token remained
+usable; a different initial password supplied on reinstall did not reset the
+installation, and both that replacement initial password and the image's public
+default were rejected.
+
+A final forced guest power-off interrupted another throttled upload on the final
+module. Boot ID changed, the same module and pool loaded, and PBS restarted
+automatically. After confirming and removing only the new incomplete snapshot,
+the upload retried and restored successfully. PBS listed all 15 expected
+completed snapshots across ten groups, and verification visited every snapshot
+with zero errors. All eight retained file snapshots, four recovery archives and
+the encrypted archive restored with matching data. Native `pct restore` and
+`qmrestore` of the original CT/VM backups also passed again after GC, reinstall
+and this power-off. Runtime journals contained neither the original nor the
+replacement administrator password nor the API token.
+
+The corrected repeat validates the tested source and fixture. Multi-day retention,
+physical backing-tier loss, host power failure and the final packaged appliance
+remain unvalidated. Both backing disks share one physical host storage pool.
+The package gate still refuses to ship this dependency ref until a smoothfs
+release and its archive packages contain all the fixes.
+
+Cleanup of the extended fixture was verified: VM 9601, both native source/restore
+pairs, all owned volumes, temporary PBS storage entries and credentials, leases,
+cloud-init snippet, host scratch directory and local private credential copies
+were removed. The pre-existing VM 8168 and CT 9474 remained running. Sanitized
+failure and success logs were retained locally for review.
