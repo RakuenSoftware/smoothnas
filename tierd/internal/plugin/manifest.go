@@ -77,12 +77,13 @@ const (
 // lives under a named Service: a plugin owns its services as a single
 // managed set (compose-style). See plugins-10-compose-services.
 type Manifest struct {
-	APIVersion string    `json:"apiVersion" yaml:"apiVersion"`
-	Kind       string    `json:"kind" yaml:"kind"`
-	Metadata   Metadata  `json:"metadata" yaml:"metadata"`
-	Instances  Instances `json:"instances" yaml:"instances"`
-	UI         *UI       `json:"ui,omitempty" yaml:"ui,omitempty"`
-	Profiles   []string  `json:"profiles,omitempty" yaml:"profiles"`
+	APIVersion string         `json:"apiVersion" yaml:"apiVersion"`
+	Kind       string         `json:"kind" yaml:"kind"`
+	Metadata   Metadata       `json:"metadata" yaml:"metadata"`
+	Instances  Instances      `json:"instances" yaml:"instances"`
+	WebUI      *compose.WebUI `json:"webUI,omitempty" yaml:"-"`
+	UI         *UI            `json:"ui,omitempty" yaml:"ui,omitempty"`
+	Profiles   []string       `json:"profiles,omitempty" yaml:"profiles"`
 
 	// Config is the plugin-level operator-tunable schema for a plain-compose
 	// plugin (from x-smoothnas.config), surfaced so the install wizard renders a
@@ -335,8 +336,24 @@ func manifestFromCompose(data []byte) (*Manifest, error) {
 	if err := compose.ValidateMeta(meta, svcNames); err != nil {
 		return nil, fmt.Errorf("parse compose manifest: %w", err)
 	}
+	if meta.WebUI != nil {
+		ports, err := compose.HostPorts(data)
+		if err != nil {
+			return nil, err
+		}
+		published := false
+		for _, port := range ports {
+			if port.Port == meta.WebUI.Port && port.Protocol == "tcp" {
+				published = true
+			}
+		}
+		if !published {
+			return nil, fmt.Errorf("x-smoothnas.webUI.port must name a fixed published TCP port")
+		}
+	}
 	m := &Manifest{
 		isCompose: true,
+		WebUI:     meta.WebUI,
 		Metadata: Metadata{
 			Name:        name,
 			Description: meta.Description,
