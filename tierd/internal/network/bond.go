@@ -147,6 +147,26 @@ func readINIValue(data []byte, section, key string) string {
 	return ""
 }
 
+// PreserveBondIdentity retains the DHCP identity of an existing bond during
+// an ordinary edit. An absent MAC or ClientIdentifier is intentional: the
+// existing networkd default must not silently become a new DHCP client.
+func PreserveBondIdentity(networkDir string, bond BondConfig) (string, string, error) {
+	mac, clientID, err := ExistingBondIdentity(networkDir, bond.Name)
+	if err != nil { return "", "", err }
+	// An existing bond must not inherit a different member's permanent MAC.
+	bond.MACAddress = mac
+	netdev := GenerateBondNetdev(bond)
+	networkFile := GenerateBondNetwork(bond)
+	if bond.DHCP4 && clientID != "mac" {
+		// GenerateNetworkFile defaults to ClientIdentifier=mac for new
+		// bonds. Existing bonds without that setting used networkd's
+		// default client identity and must keep it.
+		networkFile = strings.Replace(networkFile, "\\n[DHCPv4]\\nClientIdentifier=mac\\n", "\\n", 1)
+		if clientID != "" { networkFile += "\\n[DHCPv4]\\nClientIdentifier=" + clientID + "\\n" }
+	}
+	return netdev, networkFile, nil
+}
+
 // GenerateBondMemberNetwork generates a .network file for a bond member interface.
 func GenerateBondMemberNetwork(memberName, bondName string) string {
 	var b strings.Builder
