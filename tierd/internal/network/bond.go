@@ -108,6 +108,45 @@ func MemberMAC(sysRoot string, members []string) string {
 	return ""
 }
 
+// ExistingBondIdentity reads an existing bond's configured MAC and DHCP
+// client identifier without inventing a new identity. Existing deployments
+// must not be silently migrated to MemberMAC/ClientIdentifier=mac: that
+// changes the DHCP client and can move the NAS to another address.
+func ExistingBondIdentity(networkDir, bondName string) (mac, clientID string, err error) {
+	if err = ValidateBondName(bondName); err != nil { return "", "", err }
+	netdevNames := []string{"05-" + bondName + ".netdev"}
+	networkNames := []string{"10-" + bondName + ".network"}
+	if bondName == DefaultBondName {
+		netdevNames = append(netdevNames, DefaultBondNetdevFilename)
+		networkNames = append(networkNames, DefaultBondNetworkFilename)
+	}
+	for _, name := range netdevNames {
+		data, readErr := os.ReadFile(filepath.Join(networkDir, name))
+		if readErr != nil { if os.IsNotExist(readErr) { continue }; return "", "", readErr }
+		mac = readINIValue(data, "NetDev", "MACAddress")
+		break
+	}
+	for _, name := range networkNames {
+		data, readErr := os.ReadFile(filepath.Join(networkDir, name))
+		if readErr != nil { if os.IsNotExist(readErr) { continue }; return "", "", readErr }
+		clientID = readINIValue(data, "DHCPv4", "ClientIdentifier")
+		break
+	}
+	return mac, clientID, nil
+}
+
+func readINIValue(data []byte, section, key string) string {
+	current := ""
+	for _, raw := range strings.Split(string(data), "\\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") { current = strings.Trim(line, "[]"); continue }
+		if current != section || strings.HasPrefix(line, "#") { continue }
+		k, v, ok := strings.Cut(line, "=")
+		if ok && strings.TrimSpace(k) == key { return strings.TrimSpace(v) }
+	}
+	return ""
+}
+
 // GenerateBondMemberNetwork generates a .network file for a bond member interface.
 func GenerateBondMemberNetwork(memberName, bondName string) string {
 	var b strings.Builder
