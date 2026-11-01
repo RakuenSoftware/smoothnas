@@ -804,6 +804,7 @@ const nl: LanguageTranslations = {
   "error.backup.encrypted_target_fixed": "Het account en de map van een versleutelde taak liggen vast in de herstelkit; maak een nieuwe taak voor een andere bestemming",
   "error.backup.recovery_required": "Download de herstelkit en bevestig dat deze veilig is opgeslagen",
   'backups.google.fixedTarget': 'Het versleutelde account en de map liggen vast in de herstelkit. Maak een nieuwe taak voor een andere bestemming.',
+  'backups.google.excludesHelp': 'Bijvoorbeeld: /video/** sluit alles in de map video uit.',
   'backups.google.folder': 'Drive-map',
   'backups.field.direction': 'Richting',
   'backups.direction.push': 'Push (lokaal → remote)',

@@ -505,7 +505,7 @@ export default function Backups() {
                 <option value="">{t('backups.google.selectAccount')}</option>
                 {googleAccounts.map(a => <option key={a.id} value={a.id}>{a.label} {a.email}</option>)}
               </select></label>
-              <label>{t('backups.google.excludes')}<textarea value={form.excludes} placeholder="/video/**" onChange={e => setField('excludes', e.target.value)} /></label>
+              <label>{t('backups.google.excludes')}<textarea value={form.excludes} onChange={e => setField('excludes', e.target.value)} /><small>{t('backups.google.excludesHelp')}</small></label>
             </div>
             <label><input type="checkbox" checked={form.encrypt} disabled={!!configs.find(c => c.id === editingId)?.has_run} onChange={e => setField('encrypt', e.target.checked)} /> {t('backups.google.encrypt')}</label>
             <p>{t('backups.google.recoveryWarning')}</p>

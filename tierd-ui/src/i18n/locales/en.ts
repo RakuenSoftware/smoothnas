@@ -784,6 +784,7 @@ const en: LanguageTranslations = {
   "error.backup.encrypted_target_fixed": "encrypted jobs keep the account and folder recorded in their recovery kit; create a new job for another destination",
   "error.backup.recovery_required": "download and acknowledge the recovery kit before saving",
   'backups.google.fixedTarget': 'The encrypted account and folder stay fixed to match your recovery kit. Create a new job for another destination.',
+  'backups.google.excludesHelp': 'For example, /video/** excludes everything in the video folder.',
   'backups.google.folder': 'Drive folder',
   'backups.field.direction': 'Direction',
   'backups.direction.push': 'Push (local → remote)',
