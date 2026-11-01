@@ -154,6 +154,13 @@ func PreserveBondIdentity(networkDir string, bond BondConfig) (string, string, e
 	mac, clientID, err := ExistingBondIdentity(networkDir, bond.Name)
 	if err != nil { return "", "", err }
 	// An existing bond must not inherit a different member's permanent MAC.
+	// If its netdev has no explicit MAC, pin the current runtime bond MAC
+	// rather than asking networkd to generate a different one on recreation.
+	if mac == "" {
+		if data, readErr := os.ReadFile(filepath.Join("/sys/class/net", bond.Name, "address")); readErr == nil {
+			mac = strings.TrimSpace(string(data))
+		}
+	}
 	bond.MACAddress = mac
 	netdev := GenerateBondNetdev(bond)
 	networkFile := GenerateBondNetwork(bond)
