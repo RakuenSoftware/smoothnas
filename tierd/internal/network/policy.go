@@ -210,9 +210,10 @@ func GenerateDefaultBondVethUnmanagedNetwork() string {
 // plugged in later would unexpectedly get auto-bonded). Operators with
 // no NICs at first boot use the GUI to add a bond once cabling is in.
 func ApplyDefaultBondPolicy(store ConfigStore, networkDir, sysRoot string) error {
-	if err := RemoveLegacyCatchAllDHCP(networkDir); err != nil {
-		return fmt.Errorf("remove legacy DHCP catch-all: %w", err)
-	}
+	// Never remove the installer DHCP fallback before determining whether
+	// bootstrap can replace it. An already-bootstrapped host may have no
+	// surviving tierd .network files; deleting its only DHCP configuration
+	// here would leave the machine reachable only over loopback.
 	done, err := store.GetBoolConfig(NetworkBootstrapCompleteKey, false)
 	if err != nil {
 		return fmt.Errorf("read bootstrap marker: %w", err)
