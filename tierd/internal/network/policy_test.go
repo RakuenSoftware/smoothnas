@@ -346,6 +346,8 @@ func TestApplyDefaultBondPolicyRefreshesExistingCatchAllAfterMarker(t *testing.T
 	if err := os.WriteFile(oldCatchAll, []byte("[Match]\nType=ether\n\n[Network]\nBond=bond0\n"), 0o644); err != nil {
 		t.Fatalf("write old catch-all: %v", err)
 	}
+		writeFakeFile(t, filepath.Join(netDir, DefaultBondNetdevFilename), "[NetDev]\\nName=bond0\\nKind=bond\\n")
+	writeFakeFile(t, filepath.Join(netDir, DefaultBondNetworkFilename), "[Match]\\nName=bond0\\n")
 	sysRoot := makeFakeSysClassNet(t, map[string]string{
 		"enp1s0": "physical-eth",
 	})
@@ -657,5 +659,19 @@ func TestApplyDefaultBondPolicyPreservesLegacyDHCPAfterBootstrap(t *testing.T) {
 	}
 	if string(data) != original {
 		t.Fatalf("legacy DHCP unexpectedly changed: %q", data)
+	}
+}
+
+func TestRefreshDefaultBondMembersSkipsOrphanedBond(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, DefaultBondMembersFilename)
+	original := "[Match]\\nType=ether\\n\\n[Network]\\nBond=bond0\\n"
+	writeFakeFile(t, path, original)
+	if err := refreshDefaultBondMembersIfPresent(dir); err != nil { t.Fatal(err) }
+	data, err := os.ReadFile(path)
+	if err != nil { t.Fatal(err) }
+	if string(data) != original { t.Fatalf("orphaned bond member rule was rewritten") }
+	if _, err := os.Stat(filepath.Join(dir, DefaultBondVethUnmanagedFilename)); !os.IsNotExist(err) {
+		t.Fatalf("orphaned bond generated a new veth rule: %v", err)
 	}
 }
