@@ -259,6 +259,15 @@ func refreshDefaultBondMembersIfPresent(networkDir string) error {
 		}
 		return err
 	}
+	// Do not rewrite membership rules if the corresponding bond was
+	// removed or its configuration is incomplete. A stale catch-all must
+	// never take physical NICs away from their standalone network config.
+	for _, required := range []string{DefaultBondNetdevFilename, DefaultBondNetworkFilename} {
+		if _, err := os.Stat(filepath.Join(networkDir, required)); err != nil {
+			if os.IsNotExist(err) { return nil }
+			return err
+		}
+	}
 	if err := WriteConfigFile(networkDir, DefaultBondVethUnmanagedFilename, GenerateDefaultBondVethUnmanagedNetwork()); err != nil {
 		return fmt.Errorf("write default bond veth unmanaged: %w", err)
 	}
