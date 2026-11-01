@@ -690,3 +690,21 @@ func TestExistingBondIdentityPreservesLegacyDHCP(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	if mac != "aa:bb:cc:dd:ee:ff" || clientID != "mac" { t.Fatalf("identity: %q %q", mac, clientID) }
 }
+
+
+func TestPreserveBondIdentityOnEdit(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeFile(t, filepath.Join(dir, DefaultBondNetdevFilename), "[NetDev]\\nName=bond0\\nKind=bond\\nMACAddress=aa:bb:cc:dd:ee:ff\\n")
+	writeFakeFile(t, filepath.Join(dir, DefaultBondNetworkFilename), "[Match]\\nName=bond0\\n\\n[Network]\\nDHCP=ipv4\\n")
+	bond := BondConfig{Name: "bond0", Mode: "active-backup", DHCP4: true, Members: []string{"enp1s0"}, MACAddress: "11:22:33:44:55:66"}
+	netdev, networkFile, err := PreserveBondIdentity(dir, bond)
+	if err != nil { t.Fatal(err) }
+	if !strings.Contains(netdev, "MACAddress=aa:bb:cc:dd:ee:ff") || strings.Contains(netdev, "11:22:33:44:55:66") {
+		t.Fatalf("bond MAC changed: %s", netdev)
+	}
+	if strings.Contains(networkFile, "ClientIdentifier=mac") { t.Fatalf("legacy DHCP identity changed: %s", networkFile) }
+	writeFakeFile(t, filepath.Join(dir, DefaultBondNetworkFilename), "[Match]\\nName=bond0\\n\\n[Network]\\nDHCP=ipv4\\n\\n[DHCPv4]\\nClientIdentifier=mac\\n")
+	_, networkFile, err = PreserveBondIdentity(dir, bond)
+	if err != nil { t.Fatal(err) }
+	if !strings.Contains(networkFile, "ClientIdentifier=mac") { t.Fatalf("explicit DHCP identity lost: %s", networkFile) }
+}
