@@ -539,16 +539,20 @@ func (h *NetworkHandler) updateBond(w http.ResponseWriter, r *http.Request, name
 		return
 	}
 
-	bond.MACAddress = network.MemberMAC(defaultSysClassNet, bond.Members)
+	// Keep the existing DHCP identity, even for an IP-only edit.
+	// Replacing it with the first member's MAC would make the DHCP server
+	// treat a working NAS as a different client.
+	netdevContent, networkContent, err := network.PreserveBondIdentity(h.networkDir, bond)
+	if err != nil { serverError(w, err); return }
 
-	err := h.safeApply.Apply("Update bond "+name, func() error {
+	err = h.safeApply.Apply("Update bond "+name, func() error {
 		if err := network.RemoveLegacyCatchAllDHCP(h.networkDir); err != nil {
 			return err
 		}
-		if err := network.WriteConfigFile(h.networkDir, "05-"+name+".netdev", network.GenerateBondNetdev(bond)); err != nil {
+		if err := network.WriteConfigFile(h.networkDir, "05-"+name+".netdev", netdevContent); err != nil {
 			return err
 		}
-		if err := network.WriteConfigFile(h.networkDir, "10-"+name+".network", network.GenerateBondNetwork(bond)); err != nil {
+		if err := network.WriteConfigFile(h.networkDir, "10-"+name+".network", networkContent); err != nil {
 			return err
 		}
 		for _, member := range bond.Members {
