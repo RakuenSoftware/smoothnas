@@ -343,3 +343,74 @@ Two specific cleanup tracks are still open and should be treated as engineering 
 The source deep dive calls both out in more detail:
 
 - [../src/README.md](../src/README.md)
+
+## Google Drive backups
+
+The **Backups** page supports Google Drive alongside NFS, SMB and rsync. The
+appliance needs `rclone >= 1.60`; the SmoothNAS package and installer include it.
+For a source checkout on an existing machine, install rclone before creating an
+encrypted job or starting a Drive run.
+
+1. Open [Google Cloud Console](https://console.cloud.google.com/), create or
+   select a project, and enable the **Google Drive API**.
+2. Configure the OAuth consent screen as **External** and publish it to
+   **Production**. Tokens issued while the app is in Testing expire after seven
+   days. Personal-use apps can proceed through Google's unverified-app warning.
+3. Create an OAuth client of type **TVs and Limited Input devices**. Copy its
+   client ID and client secret.
+4. In **Backups → Google accounts → Connect Google account**, enter a label and
+   the client credentials. Open the Google link and approve the displayed code.
+   The NAS polls Google; no public callback URL or HTTPS reverse proxy is needed.
+5. Add a backup job with method **Google Drive**, choose the account, an absolute
+   local path and a relative Drive folder such as `smoothnas/storage`. Choose
+   **Push** to back up or **Pull** to restore. Restores always copy and never
+   delete local files. Push deletion mode mirrors the selected folder.
+6. Enter any exclude patterns, one per line (for example `/video/**` and
+   `/models/**`). These are rclone exclusion patterns, not `+`/`-` filter rules.
+7. Optionally enable encryption. **Prepare recovery kit** produces a private
+   `smoothnas-recovery.conf`; download it and confirm it is safely stored before
+   saving. Preparation expires after 30 minutes and is lost on daemon restart.
+   If it expires, cancel and reopen the form to prepare another kit.
+8. Enable a schedule, select weekdays and set a time in the **NAS's local time
+   zone**. Existing jobs remain manual until scheduling is enabled.
+
+Encryption covers file contents, filenames and directory names. Encryption
+cannot change after the first run. An encrypted job keeps the Google account
+and folder recorded in its recovery kit; create a new job for another target.
+The kit includes the OAuth credentials, refresh token and encryption keys, so
+keep it private and store it somewhere other than the NAS. The API never
+exports saved encryption keys. Losing both the NAS and its kit makes encrypted
+backups unrecoverable.
+
+To restore an encrypted job through SmoothNAS, edit the original job and change
+its direction to **Pull**, retaining its encryption setting. A newly created
+encrypted job generates new keys and cannot decrypt a different job's backup.
+
+To restore without SmoothNAS, install stock rclone on another machine and run:
+
+```bash
+rclone --config ./smoothnas-recovery.conf copy sncrypt: /path/to/restore
+```
+
+Keep the original Google Cloud project and OAuth client. SmoothNAS requests
+`drive.file`, so it can only see files created through that project. Connecting
+through a different project cannot discover the old backup. Disconnecting an
+unused account removes its credentials from SmoothNAS and leaves Drive files
+intact. Google access can be revoked separately in Google Account settings;
+revocation may also affect other clients in the same project.
+
+Schedules check every 30 seconds. A missed slot in the last 24 hours is caught
+up once, and an already running job causes that slot to be skipped. Repeated
+DST hours run once; nonexistent times run at the first valid minute afterward.
+A daily Google upload cap ends the run with a continuation summary; the next
+scheduled run copies remaining changes. Full Drive storage and other errors
+remain failures in run history.
+
+Credentials and encryption keys use the existing SQLite secrets posture. They
+are omitted from JSON, command arguments and run errors. Runs use environment
+configuration rather than a persistent rclone configuration file.
+
+Implementation checks include mocked Google device-flow tests and real rclone
+local-backend backup, restore and independent recovery-kit tests. A real Google
+account connection, encrypted upload and recovery on a second machine still
+need operator validation before a release is described as live-validated.

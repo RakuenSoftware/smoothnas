@@ -37,7 +37,7 @@ If you know Linux and you want an appliance that still feels like Linux, this is
 - Create named storage tiers with slot-based array assignment for `NVME`, `SSD`, and `HDD`.
 - Run ZFS pools, datasets, zvols, and snapshots alongside the mdadm/LVM path.
 - Publish storage over SMB, NFS, and iSCSI.
-- Schedule backups of your storage with live progress, throughput, and cancel control.
+- Schedule backups over NFS, SMB, SSH or Google Drive, with live progress, throughput, and cancel control. Google Drive jobs support optional encryption and an independent recovery kit.
 - Run co-located apps as managed plugins (local LLM inference, runners, media tools) in isolated containers.
 - Benchmark local and remote targets with live fio-driven telemetry.
 - Monitor disk health and system alerts, and spin idle disks down to save power.
