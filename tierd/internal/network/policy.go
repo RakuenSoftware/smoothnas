@@ -219,12 +219,36 @@ func ApplyDefaultBondPolicy(store ConfigStore, networkDir, sysRoot string) error
 		return fmt.Errorf("read bootstrap marker: %w", err)
 	}
 	if done {
+		// Remove the old broad DHCP match only when a replacement network
+		// configuration already exists. Otherwise it may be the host's
+		// only route to the LAN after an upgrade or failed migration.
+		if hasReplacementNetworkConfig(networkDir) {
+			if err := RemoveLegacyCatchAllDHCP(networkDir); err != nil {
+				return fmt.Errorf("remove superseded DHCP fallback: %w", err)
+			}
+		}
 		if err := refreshDefaultBondMembersIfPresent(networkDir); err != nil {
 			return fmt.Errorf("refresh default bond members: %w", err)
 		}
 		return nil
 	}
 	return writeDefaultBondFiles(store, networkDir, sysRoot)
+}
+
+// hasReplacementNetworkConfig checks for a tierd-managed bond or standalone
+// network file before retiring the installer fallback. Merely having a
+// bootstrap marker does not prove those files survived an upgrade.
+func hasReplacementNetworkConfig(networkDir string) bool {
+	entries, err := os.ReadDir(networkDir)
+	if err != nil { return false }
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || name == LegacyDHCPNetworkFilename { continue }
+		if (strings.HasPrefix(name, "10-") || name == DefaultBondNetworkFilename) && strings.HasSuffix(name, ".network") {
+			return true
+		}
+	}
+	return false
 }
 
 func refreshDefaultBondMembersIfPresent(networkDir string) error {
