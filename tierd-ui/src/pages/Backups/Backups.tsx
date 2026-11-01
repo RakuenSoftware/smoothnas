@@ -1,14 +1,16 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useI18n } from '@rakuensoftware/smoothgui';
 import { api } from '../../api/api';
 import { useToast } from '../../contexts/ToastContext';
 import ConfirmDialog from '../../components/ConfirmDialog/ConfirmDialog';
 import NumberInput from '../../components/NumberInput/NumberInput';
 
+import GoogleAccounts, { type GoogleAccount } from './GoogleAccounts';
+
 interface BackupConfig {
   id: number;
   name: string;
-  target_type: 'nfs' | 'smb';
+  target_type: 'nfs' | 'smb' | 'gdrive';
   host: string;
   share: string;
   smb_user: string;
@@ -18,11 +20,19 @@ interface BackupConfig {
   local_path: string;
   remote_path: string;
   direction: 'push' | 'pull';
-  method: 'cp' | 'rsync';
+  method: 'cp' | 'rsync' | 'rclone';
   parallelism: number;
   use_ssh: boolean;
   compress: boolean;
   delete_mode: boolean;
+  google_account_id: number | null;
+  excludes: string;
+  encrypt: boolean;
+  has_run: boolean;
+  schedule_enabled: boolean;
+  schedule_time: string;
+  schedule_days: number;
+  next_run_at: string;
   created_at: string;
 }
 
@@ -41,8 +51,14 @@ interface BackupRun {
 }
 
 const EMPTY_FORM = {
+  google_account_id: null as number | null,
+  excludes: '',
+  encrypt: false,
+  schedule_enabled: false,
+  schedule_time: '02:00',
+  schedule_days: 127,
   name: '',
-  target_type: 'nfs' as 'nfs' | 'smb',
+  target_type: 'nfs' as 'nfs' | 'smb' | 'gdrive',
   host: '',
   share: '',
   smb_user: '',
@@ -52,7 +68,7 @@ const EMPTY_FORM = {
   local_path: '',
   remote_path: '',
   direction: 'push' as 'push' | 'pull',
-  method: 'rsync' as 'cp' | 'rsync',
+  method: 'rsync' as 'cp' | 'rsync' | 'rclone',
   parallelism: 4,
   use_ssh: false,
   compress: false,
@@ -85,6 +101,10 @@ export default function Backups() {
   const { t } = useI18n();
   const { success: toastSuccess, error: toastError } = useToast();
   const [configs, setConfigs] = useState<BackupConfig[]>([]);
+  const [googleAccounts, setGoogleAccounts] = useState<GoogleAccount[]>([]);
+  const refreshGoogle = useCallback(() => { api.getGoogleBackupAccounts().then(setGoogleAccounts).catch(e => toastError(e.message)); }, [toastError]);
+  const [recovery, setRecovery] = useState<{ session_id: string; recovery_kit: string } | null>(null);
+  const [recoveryConfirmed, setRecoveryConfirmed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ ...EMPTY_FORM });
@@ -105,13 +125,30 @@ export default function Backups() {
     // Capture pollRefs.current at effect-setup time so the cleanup
     // sees the same map even if pollRefs is reassigned later.
     const intervals = pollRefs.current;
+    // Discover runs started by the scheduler while this page stays open.
+    let disposed = false;
+    const schedulePoll = setInterval(() => {
+      Promise.all([api.getBackupConfigs(), api.listBackupRuns()]).then(([cfgs, active]) => {
+        if (disposed) return;
+        setConfigs(cfgs);
+        for (const run of active as BackupRun[]) {
+          if (!intervals[run.config_id]) {
+            setRuns(previous => ({ ...previous, [run.config_id]: run }));
+            pollRun(run.config_id, run.id);
+          }
+        }
+      }).catch(() => {});
+    }, 10000);
     return () => {
+      disposed = true;
+      clearInterval(schedulePoll);
       Object.values(intervals).forEach(clearInterval);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function load() {
+    refreshGoogle();
     setLoading(true);
     Promise.all([
       api.getBackupConfigs(),
@@ -132,6 +169,7 @@ export default function Backups() {
   }
 
   function setField(key: keyof typeof EMPTY_FORM, value: string | number | boolean) {
+    setRecovery(null); setRecoveryConfirmed(false);
     setForm(f => ({ ...f, [key]: value }));
   }
 
@@ -144,11 +182,18 @@ export default function Backups() {
     setFormError('');
     setSaving(true);
     try {
-      if (editingId != null) {
-        await api.updateBackupConfig(editingId, form);
-      } else {
-        await api.createBackupConfig(form);
+      if (form.encrypt && !configs.find(c => c.id === editingId)?.encrypt && !recovery) {
+        setRecovery(await api.prepareGoogleBackupRecovery(form));
+        setRecoveryConfirmed(false);
+        return;
       }
+      const payload = { ...form, recovery_session: recovery?.session_id || '', recovery_confirmed: recoveryConfirmed };
+      if (editingId != null) {
+        await api.updateBackupConfig(editingId, payload);
+      } else {
+        await api.createBackupConfig(payload);
+      }
+      setRecovery(null); setRecoveryConfirmed(false);
       setForm({ ...EMPTY_FORM });
       setShowForm(false);
       setEditingId(null);
@@ -164,7 +209,14 @@ export default function Backups() {
   function startEdit(cfg: BackupConfig) {
     // Passwords are never returned by the API — leave blank. The backend
     // treats blank smb_pass / ssh_pass on update as "keep existing secret".
+    setRecovery(null); setRecoveryConfirmed(false);
     setForm({
+      google_account_id: cfg.google_account_id,
+      excludes: cfg.excludes,
+      encrypt: cfg.encrypt,
+      schedule_enabled: cfg.schedule_enabled,
+      schedule_time: cfg.schedule_time || '02:00',
+      schedule_days: cfg.schedule_days,
       name: cfg.name,
       target_type: cfg.target_type,
       host: cfg.host,
@@ -188,6 +240,7 @@ export default function Backups() {
   }
 
   function cancelForm() {
+    setRecovery(null); setRecoveryConfirmed(false);
     setShowForm(false);
     setEditingId(null);
     setForm({ ...EMPTY_FORM });
@@ -230,17 +283,19 @@ export default function Backups() {
   }
 
   function pollRun(cfgId: number, runId: number) {
-    if (pollRefs.current[cfgId]) clearInterval(pollRefs.current[cfgId]);
+    if (pollRefs.current[cfgId]) { clearInterval(pollRefs.current[cfgId]); delete pollRefs.current[cfgId]; }
     stallRefs.current[cfgId] = { lastHealthyAt: Date.now(), notified: false };
     pollRefs.current[cfgId] = setInterval(() => {
       api.getBackupRun(runId).then((run: BackupRun) => {
         setRuns(prev => ({ ...prev, [cfgId]: run }));
         if (run.status === 'completed') {
           clearInterval(pollRefs.current[cfgId]);
+          delete pollRefs.current[cfgId];
           delete stallRefs.current[cfgId];
           toastSuccess(t('backups.toast.complete'));
         } else if (run.status === 'failed') {
           clearInterval(pollRefs.current[cfgId]);
+          delete pollRefs.current[cfgId];
           delete stallRefs.current[cfgId];
           if (run.error && run.error !== 'Cancelled') {
             toastError(t('backups.toast.stopped', { err: run.error }));
@@ -259,7 +314,10 @@ export default function Backups() {
             }
           }
         }
-      }).catch(() => clearInterval(pollRefs.current[cfgId]));
+      }).catch(() => {
+        clearInterval(pollRefs.current[cfgId]);
+        delete pollRefs.current[cfgId];
+      });
     }, 500);
   }
 
@@ -286,6 +344,7 @@ export default function Backups() {
         </button>
       </div>
 
+      <GoogleAccounts accounts={googleAccounts} refresh={refreshGoogle} />
       {showForm && (
         <div style={{ background: '#fff', borderRadius: 8, padding: 20, marginBottom: 24, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}>
           <h3 style={{ margin: '0 0 16px' }}>{editingId != null ? t('backups.form.editTitle') : t('backups.form.newTitle')}</h3>
@@ -295,13 +354,14 @@ export default function Backups() {
               <input value={form.name} onChange={e => setField('name', e.target.value)} />
             </label>
             <label>{t('backups.field.direction')}
-              <select value={form.direction} onChange={e => setField('direction', e.target.value as any)}>
+              <select value={form.direction} onChange={e => { setField('direction', e.target.value); if (e.target.value === 'pull' && form.method === 'rclone') setField('delete_mode', false); }}>
                 <option value="push">{t('backups.direction.push')}</option>
                 <option value="pull">{t('backups.direction.pull')}</option>
               </select>
             </label>
             <label>{t('backups.field.method')}
-              <select value={form.method} onChange={e => setField('method', e.target.value as any)}>
+              <select value={form.method} onChange={e => { const method = e.target.value as typeof form.method; setRecovery(null); setRecoveryConfirmed(false); setForm(f => ({ ...f, method, target_type: method === 'rclone' ? 'gdrive' : 'nfs', google_account_id: method === 'rclone' ? f.google_account_id : null, encrypt: method === 'rclone' ? f.encrypt : false, delete_mode: false })); }} disabled={!!configs.find(c => c.id === editingId)?.encrypt}>
+                <option value="rclone">{t('backups.google.method')}</option>
                 <option value="rsync">rsync</option>
                 <option value="cp">{t('backups.method.cp')}</option>
               </select>
@@ -356,7 +416,7 @@ export default function Backups() {
             </div>
           )}
 
-          <div className="form-row">
+          {form.method !== 'rclone' && <div className="form-row">
             <label>{t('backups.field.host')}
               <input value={form.host} onChange={e => setField('host', e.target.value)} />
             </label>
@@ -366,7 +426,7 @@ export default function Backups() {
                 onChange={e => setField('share', e.target.value)}
               />
             </label>
-          </div>
+          </div>}
 
           {form.method === 'rsync' && form.use_ssh && (
             <div className="form-row">
@@ -434,15 +494,45 @@ export default function Backups() {
                 />
               </label>
             )}
-            <label>{t('backups.field.remoteSubpath')}
-              <input value={form.remote_path} onChange={e => setField('remote_path', e.target.value)} />
+            <label>{form.method === 'rclone' ? t('backups.google.folder') : t('backups.field.remoteSubpath')}
+              <input disabled={!!configs.find(c => c.id === editingId)?.encrypt} value={form.remote_path} onChange={e => setField('remote_path', e.target.value)} />
             </label>
           </div>
 
+          {form.method === 'rclone' && <>
+            <div className="form-row">
+              <label>{t('backups.google.account')}<select disabled={!!configs.find(c => c.id === editingId)?.encrypt} value={form.google_account_id ?? ''} onChange={e => { setRecovery(null); setRecoveryConfirmed(false); setForm(f => ({ ...f, google_account_id: e.target.value ? Number(e.target.value) : null })); }}>
+                <option value="">{t('backups.google.selectAccount')}</option>
+                {googleAccounts.map(a => <option key={a.id} value={a.id}>{a.label} {a.email}</option>)}
+              </select></label>
+              <label>{t('backups.google.excludes')}<textarea value={form.excludes} onChange={e => setField('excludes', e.target.value)} /><small>{t('backups.google.excludesHelp')}</small></label>
+            </div>
+            <label><input type="checkbox" checked={form.encrypt} disabled={!!configs.find(c => c.id === editingId)?.has_run} onChange={e => setField('encrypt', e.target.checked)} /> {t('backups.google.encrypt')}</label>
+            <p>{t('backups.google.recoveryWarning')}</p>
+            {!!configs.find(c => c.id === editingId)?.encrypt && <p>{t('backups.google.fixedTarget')}</p>}
+            <label><input type="checkbox" checked={form.delete_mode} disabled={form.direction === 'pull'} onChange={e => setField('delete_mode', e.target.checked)} /> {t('backups.field.deleteExtraneous')}</label>
+          </>}
+          <div className="form-row">
+            <label><input type="checkbox" checked={form.schedule_enabled} onChange={e => setField('schedule_enabled', e.target.checked)} /> {t('backups.schedule.enabled')}</label>
+            {form.schedule_enabled && <>
+              <label>{t('backups.schedule.time')}<input type="time" value={form.schedule_time} onChange={e => setField('schedule_time', e.target.value)} /></label>
+              <div>{['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'].map((day, i) => <label key={day} style={{ display: 'inline-flex', marginRight: 8 }}>
+                <input type="checkbox" checked={!!(form.schedule_days & (1 << i))} onChange={e => setField('schedule_days', e.target.checked ? form.schedule_days | (1 << i) : form.schedule_days & ~(1 << i))} /> {t(`backups.schedule.${day}`)}
+              </label>)}</div>
+            </>}
+          </div>
+          {recovery && <div className="card">
+            <p>{t('backups.google.recoveryWarning')}</p>
+            <button className="btn secondary" onClick={() => {
+              const url = URL.createObjectURL(new Blob([recovery.recovery_kit], { type: 'text/plain' }));
+              const a = document.createElement('a'); a.href = url; a.download = 'smoothnas-recovery.conf'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+            }}>{t('backups.google.downloadKit')}</button>
+            <label><input type="checkbox" checked={recoveryConfirmed} onChange={e => setRecoveryConfirmed(e.target.checked)} /> {t('backups.google.kitSaved')}</label>
+          </div>}
           {formError && <div className="error-msg">{formError}</div>}
 
-          <button className="btn primary" onClick={saveConfig} disabled={saving} style={{ marginTop: 8 }}>
-            {saving ? t('backups.button.saving') : (editingId != null ? t('backups.button.update') : t('backups.button.save'))}
+          <button className="btn primary" onClick={saveConfig} disabled={saving || (!!recovery && !recoveryConfirmed)} style={{ marginTop: 8 }}>
+            {saving ? t('backups.button.saving') : (form.encrypt && !configs.find(c => c.id === editingId)?.encrypt && !recovery ? t('backups.google.prepareKit') : editingId != null ? t('backups.button.update') : t('backups.button.save'))}
           </button>
         </div>
       )}
@@ -473,7 +563,7 @@ export default function Backups() {
                 return (
                   <React.Fragment key={cfg.id}>
                     <tr>
-                      <td>{cfg.name}</td>
+                      <td>{cfg.name}{cfg.next_run_at && <div>{t('backups.schedule.next')}: {new Date(cfg.next_run_at).toLocaleString()}</div>}</td>
                       <td>
                         <span className={`badge ${cfg.direction === 'push' ? 'primary' : 'secondary'}`}>
                           {cfg.direction === 'push' ? t('backups.badge.push') : t('backups.badge.pull')}
@@ -481,12 +571,12 @@ export default function Backups() {
                       </td>
                       <td>
                         <span className="badge">
-                          {cfg.method === 'rsync' ? 'rsync' : 'cp+sha256'}
+                          {cfg.method === 'rclone' ? t('backups.google.method') : cfg.method === 'rsync' ? 'rsync' : 'cp+sha256'}
                         </span>
                       </td>
                       <td>{cfg.parallelism}</td>
                       <td>
-                        {cfg.method === 'rsync' && cfg.use_ssh ? (
+                        {cfg.method === 'rclone' ? <>{googleAccounts.find(a => a.id === cfg.google_account_id)?.label} {cfg.encrypt && t('backups.google.encrypted')}</> : cfg.method === 'rsync' && cfg.use_ssh ? (
                           <>
                             <span className="badge">SSH</span>{' '}
                             {cfg.ssh_user ? `${cfg.ssh_user}@` : ''}{cfg.host}:{cfg.share}

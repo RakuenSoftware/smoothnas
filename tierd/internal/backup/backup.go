@@ -226,6 +226,7 @@ func (t *speedTracker) format() string {
 
 // Config describes a single backup run.
 type Config struct {
+	Drive       DriveConfig
 	TargetType  string // "nfs" or "smb" — used only when Method=="cp"
 	Host        string
 	Share       string
@@ -260,6 +261,8 @@ func Run(ctx context.Context, cfg Config, progress func(msg string, done, total 
 		return "", err
 	}
 	switch cfg.Method {
+	case "rclone":
+		return runDrive(ctx, cfg, progress)
 	case "rsync":
 		if cfg.UseSSH {
 			return rsyncSSH(ctx, cfg, progress)

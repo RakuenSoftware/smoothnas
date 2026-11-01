@@ -11,14 +11,18 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/JBailes/SmoothNAS/tierd/internal/backup"
+	"github.com/JBailes/SmoothNAS/tierd/internal/backup/schedule"
 	"github.com/JBailes/SmoothNAS/tierd/internal/db"
 )
 
 // BackupHandler handles /api/backup/* endpoints.
 type BackupHandler struct {
-	store *db.Store
+	store    *db.Store
+	google   backupGoogleState
+	configMu sync.Mutex
 
 	mu          sync.Mutex
 	cancelFuncs map[int64]context.CancelFunc
@@ -55,6 +59,7 @@ var runBackupFunc = backup.Run
 func NewBackupHandler(store *db.Store) *BackupHandler {
 	return &BackupHandler{
 		store:        store,
+		google:       backupGoogleState{sessions: make(map[string]*googleSession), recovery: make(map[string]recoverySession)},
 		cancelFuncs:  make(map[int64]context.CancelFunc),
 		liveProgress: make(map[int64]liveRunProgress),
 	}
@@ -90,6 +95,12 @@ func (h *BackupHandler) BeginShutdown() {
 	h.mu.Lock()
 	h.draining = true
 	h.mu.Unlock()
+	h.google.Lock()
+	for id, s := range h.google.sessions {
+		s.cancel()
+		delete(h.google.sessions, id)
+	}
+	h.google.Unlock()
 }
 
 // ActiveRunCount returns the number of runs currently owned by this handler.
@@ -204,6 +215,9 @@ func (h *BackupHandler) Route(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
 	switch {
+	case strings.HasPrefix(path, "/api/backup/google/"):
+		w.Header().Set("Cache-Control", "no-store")
+		h.googleRoute(w, r)
 	case path == "/api/backup/configs" || path == "/api/backup/configs/":
 		switch r.Method {
 		case http.MethodGet:
@@ -299,26 +313,39 @@ func (h *BackupHandler) listConfigs(w http.ResponseWriter, r *http.Request) {
 	if cfgs == nil {
 		cfgs = []db.BackupConfig{}
 	}
+	for i := range cfgs {
+		if cfgs[i].ScheduleEnabled {
+			cfgs[i].NextRunAt = schedule.Next(time.Now(), cfgs[i].ScheduleTime, cfgs[i].ScheduleDays)
+		}
+	}
 	json.NewEncoder(w).Encode(cfgs)
 }
 
 type createBackupConfigRequest struct {
-	Name        string `json:"name"`
-	TargetType  string `json:"target_type"`
-	Host        string `json:"host"`
-	Share       string `json:"share"`
-	SMBUser     string `json:"smb_user"`
-	SMBPass     string `json:"smb_pass"`
-	SSHUser     string `json:"ssh_user"`
-	SSHPass     string `json:"ssh_pass"`
-	LocalPath   string `json:"local_path"`
-	RemotePath  string `json:"remote_path"`
-	Direction   string `json:"direction"`
-	Method      string `json:"method"`
-	Parallelism int    `json:"parallelism"`
-	UseSSH      bool   `json:"use_ssh"`  // method=rsync only
-	Compress    bool   `json:"compress"` // method=rsync only
-	DeleteMode  bool   `json:"delete_mode"`
+	ScheduleEnabled   bool   `json:"schedule_enabled"`
+	ScheduleTime      string `json:"schedule_time"`
+	ScheduleDays      int    `json:"schedule_days"`
+	GoogleAccountID   *int64 `json:"google_account_id"`
+	Excludes          string `json:"excludes"`
+	Encrypt           bool   `json:"encrypt"`
+	RecoverySession   string `json:"recovery_session"`
+	RecoveryConfirmed bool   `json:"recovery_confirmed"`
+	Name              string `json:"name"`
+	TargetType        string `json:"target_type"`
+	Host              string `json:"host"`
+	Share             string `json:"share"`
+	SMBUser           string `json:"smb_user"`
+	SMBPass           string `json:"smb_pass"`
+	SSHUser           string `json:"ssh_user"`
+	SSHPass           string `json:"ssh_pass"`
+	LocalPath         string `json:"local_path"`
+	RemotePath        string `json:"remote_path"`
+	Direction         string `json:"direction"`
+	Method            string `json:"method"`
+	Parallelism       int    `json:"parallelism"`
+	UseSSH            bool   `json:"use_ssh"`  // method=rsync only
+	Compress          bool   `json:"compress"` // method=rsync only
+	DeleteMode        bool   `json:"delete_mode"`
 }
 
 var spillFlagPathForUUID = func(uuid string) string {
@@ -326,6 +353,8 @@ var spillFlagPathForUUID = func(uuid string) string {
 }
 
 func (h *BackupHandler) createConfig(w http.ResponseWriter, r *http.Request) {
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
 	var req createBackupConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonInvalidRequestBody(w)
@@ -340,9 +369,12 @@ func (h *BackupHandler) createConfig(w http.ResponseWriter, r *http.Request) {
 	req.LocalPath = strings.TrimSpace(req.LocalPath)
 	req.RemotePath = strings.TrimSpace(req.RemotePath)
 	req.Name = strings.TrimSpace(req.Name)
+	if !req.ScheduleEnabled && req.ScheduleDays == 0 {
+		req.ScheduleDays = 127
+	}
 
 	if err := validateBackupConfig(req); err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		writeBackupValidationError(w, err)
 		return
 	}
 
@@ -357,23 +389,36 @@ func (h *BackupHandler) createConfig(w http.ResponseWriter, r *http.Request) {
 	if req.Method == "rsync" && req.UseSSH && targetType == "" {
 		targetType = "nfs"
 	}
+	password, salt, err := h.driveFields(req, nil)
+	if err != nil {
+		writeBackupValidationError(w, err)
+		return
+	}
 	cfg, err := h.store.CreateBackupConfig(db.BackupConfig{
-		Name:        req.Name,
-		TargetType:  targetType,
-		Host:        req.Host,
-		Share:       req.Share,
-		SMBUser:     req.SMBUser,
-		SMBPass:     req.SMBPass,
-		SSHUser:     req.SSHUser,
-		SSHPass:     req.SSHPass,
-		LocalPath:   req.LocalPath,
-		RemotePath:  req.RemotePath,
-		Direction:   req.Direction,
-		Method:      req.Method,
-		Parallelism: req.Parallelism,
-		UseSSH:      req.UseSSH,
-		Compress:    effectiveCompress(req.Method, req.UseSSH, req.Compress),
-		DeleteMode:  effectiveDeleteMode(req.Method, req.DeleteMode),
+		ScheduleEnabled: req.ScheduleEnabled,
+		ScheduleTime:    req.ScheduleTime,
+		ScheduleDays:    req.ScheduleDays,
+		GoogleAccountID: req.GoogleAccountID,
+		Excludes:        req.Excludes,
+		Encrypt:         req.Encrypt,
+		CryptPassword:   password,
+		CryptSalt:       salt,
+		Name:            req.Name,
+		TargetType:      targetType,
+		Host:            req.Host,
+		Share:           req.Share,
+		SMBUser:         req.SMBUser,
+		SMBPass:         req.SMBPass,
+		SSHUser:         req.SSHUser,
+		SSHPass:         req.SSHPass,
+		LocalPath:       req.LocalPath,
+		RemotePath:      req.RemotePath,
+		Direction:       req.Direction,
+		Method:          req.Method,
+		Parallelism:     req.Parallelism,
+		UseSSH:          req.UseSSH,
+		Compress:        effectiveCompress(req.Method, req.UseSSH, req.Compress),
+		DeleteMode:      effectiveDeleteMode(req.Method, req.DeleteMode),
 	})
 	if err != nil {
 		if err == db.ErrDuplicate {
@@ -384,11 +429,24 @@ func (h *BackupHandler) createConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.consumeRecovery(req.RecoverySession)
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(cfg)
 }
 
 func (h *BackupHandler) deleteConfig(w http.ResponseWriter, r *http.Request, id int64) {
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
+	runs, err := h.store.ListBackupRunsByConfig(id, true)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if len(runs) > 0 {
+		jsonErrorCoded(w, "Cannot delete a running backup", 409, "backup.cannot_edit_a_running_backup")
+		return
+	}
 	if err := h.store.DeleteBackupConfig(id); err != nil {
 		if err == db.ErrNotFound {
 			jsonErrorCoded(w, "backup config not found", http.StatusNotFound, "backup.config_not_found")
@@ -406,6 +464,8 @@ func (h *BackupHandler) deleteConfig(w http.ResponseWriter, r *http.Request, id 
 // unchanged" — the UI never receives stored secrets, so a blank field on
 // the edit form shouldn't silently clear them.
 func (h *BackupHandler) updateConfig(w http.ResponseWriter, r *http.Request, id int64) {
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
 	var req createBackupConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonInvalidRequestBody(w)
@@ -416,9 +476,12 @@ func (h *BackupHandler) updateConfig(w http.ResponseWriter, r *http.Request, id 
 	req.LocalPath = strings.TrimSpace(req.LocalPath)
 	req.RemotePath = strings.TrimSpace(req.RemotePath)
 	req.Name = strings.TrimSpace(req.Name)
+	if !req.ScheduleEnabled && req.ScheduleDays == 0 {
+		req.ScheduleDays = 127
+	}
 
 	if err := validateBackupConfig(req); err != nil {
-		jsonError(w, err.Error(), http.StatusBadRequest)
+		writeBackupValidationError(w, err)
 		return
 	}
 
@@ -450,23 +513,45 @@ func (h *BackupHandler) updateConfig(w http.ResponseWriter, r *http.Request, id 
 		sshPass = old.SSHPass
 	}
 
+	active, err := h.store.ListBackupRunsByConfig(id, true)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if len(active) > 0 {
+		jsonErrorCoded(w, "Cannot edit a running backup", 409, "backup.cannot_edit_a_running_backup")
+		return
+	}
+	password, salt, err := h.driveFields(req, old)
+	if err != nil {
+		writeBackupValidationError(w, err)
+		return
+	}
 	cfg, err := h.store.UpdateBackupConfig(id, db.BackupConfig{
-		Name:        req.Name,
-		TargetType:  targetType,
-		Host:        req.Host,
-		Share:       req.Share,
-		SMBUser:     req.SMBUser,
-		SMBPass:     smbPass,
-		SSHUser:     req.SSHUser,
-		SSHPass:     sshPass,
-		LocalPath:   req.LocalPath,
-		RemotePath:  req.RemotePath,
-		Direction:   req.Direction,
-		Method:      req.Method,
-		Parallelism: req.Parallelism,
-		UseSSH:      req.UseSSH,
-		Compress:    effectiveCompress(req.Method, req.UseSSH, req.Compress),
-		DeleteMode:  effectiveDeleteMode(req.Method, req.DeleteMode),
+		ScheduleEnabled: req.ScheduleEnabled,
+		ScheduleTime:    req.ScheduleTime,
+		ScheduleDays:    req.ScheduleDays,
+		GoogleAccountID: req.GoogleAccountID,
+		Excludes:        req.Excludes,
+		Encrypt:         req.Encrypt,
+		CryptPassword:   password,
+		CryptSalt:       salt,
+		Name:            req.Name,
+		TargetType:      targetType,
+		Host:            req.Host,
+		Share:           req.Share,
+		SMBUser:         req.SMBUser,
+		SMBPass:         smbPass,
+		SSHUser:         req.SSHUser,
+		SSHPass:         sshPass,
+		LocalPath:       req.LocalPath,
+		RemotePath:      req.RemotePath,
+		Direction:       req.Direction,
+		Method:          req.Method,
+		Parallelism:     req.Parallelism,
+		UseSSH:          req.UseSSH,
+		Compress:        effectiveCompress(req.Method, req.UseSSH, req.Compress),
+		DeleteMode:      effectiveDeleteMode(req.Method, req.DeleteMode),
 	})
 	if err != nil {
 		switch err {
@@ -480,6 +565,7 @@ func (h *BackupHandler) updateConfig(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
+	h.consumeRecovery(req.RecoverySession)
 	// GetBackupConfig leaks stored passwords — strip them before responding.
 	cfg.SMBPass = ""
 	cfg.SSHPass = ""
@@ -487,6 +573,8 @@ func (h *BackupHandler) updateConfig(w http.ResponseWriter, r *http.Request, id 
 }
 
 func (h *BackupHandler) runBackup(w http.ResponseWriter, r *http.Request, id int64) {
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
 	if h.isDraining() {
 		jsonErrorCoded(w, "backup service is shutting down; try again after restart", http.StatusConflict, "backup.service_shutting_down")
 		return
@@ -506,6 +594,10 @@ func (h *BackupHandler) runBackup(w http.ResponseWriter, r *http.Request, id int
 	}
 
 	runID, err := h.store.CreateBackupRun(id)
+	if err == db.ErrDuplicate {
+		jsonErrorCoded(w, "Backup is already running", 409, "backup.backup_is_already_running")
+		return
+	}
 	if err != nil {
 		serverError(w, err)
 		return
@@ -556,6 +648,20 @@ func (h *BackupHandler) startRun(runID int64, cfg *db.BackupConfig, resumed bool
 			h.setLiveProgress(runID, "Starting backup...", -1, -1)
 		}
 		runCfg := backupConfigFromDB(cfg)
+		if cfg.Method == "rclone" {
+			if cfg.GoogleAccountID == nil {
+				_ = h.store.FailBackupRun(runID, "Google account is missing")
+				return
+			}
+			account, err := h.store.GetBackupGoogleAccount(*cfg.GoogleAccountID)
+			if err != nil {
+				_ = h.store.FailBackupRun(runID, "Google account is unavailable")
+				return
+			}
+			runCfg.Drive.ClientID = account.ClientID
+			runCfg.Drive.ClientSecret = account.ClientSecret
+			runCfg.Drive.RefreshToken = account.RefreshToken
+		}
 		// Backups write through the smoothfs mountpoint and let the
 		// kernel module apply the documented placement policy: new
 		// files land on the fastest tier until that tier reaches
@@ -589,6 +695,7 @@ func (h *BackupHandler) startRun(runID int64, cfg *db.BackupConfig, resumed bool
 
 func backupConfigFromDB(cfg *db.BackupConfig) backup.Config {
 	return backup.Config{
+		Drive:       backup.DriveConfig{Encrypt: cfg.Encrypt, CryptPassword: cfg.CryptPassword, CryptSalt: cfg.CryptSalt, Excludes: cfg.Excludes},
 		TargetType:  cfg.TargetType,
 		Host:        cfg.Host,
 		Share:       cfg.Share,
@@ -682,6 +789,8 @@ func (h *BackupHandler) cancelRun(w http.ResponseWriter, r *http.Request, id int
 //
 // Returns the number of configs deleted.
 func (h *BackupHandler) PurgeBackupsUnderPath(mountPath string) (int, error) {
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
 	if mountPath == "" {
 		return 0, nil
 	}
@@ -715,6 +824,33 @@ func (h *BackupHandler) PurgeBackupsUnderPath(mountPath string) (int, error) {
 func validateBackupConfig(req createBackupConfigRequest) error {
 	if strings.TrimSpace(req.Name) == "" {
 		return fmt.Errorf("name is required")
+	}
+	if req.ScheduleEnabled && !schedule.Valid(req.ScheduleTime, req.ScheduleDays) {
+		return fmt.Errorf("schedule requires HH:MM and weekdays between 1 and 127")
+	}
+	if req.Method == "rclone" {
+		if req.TargetType != "gdrive" || req.GoogleAccountID == nil {
+			return fmt.Errorf("Google Drive requires a Google account")
+		}
+		if !validDrivePath(req.RemotePath) {
+			return fmt.Errorf("Drive folder must be a nonempty relative path")
+		}
+		if !filepath.IsAbs(req.LocalPath) {
+			return fmt.Errorf("local_path must be absolute")
+		}
+		if req.Direction != "push" && req.Direction != "pull" {
+			return fmt.Errorf("direction must be push or pull")
+		}
+		if req.Direction == "pull" && req.DeleteMode {
+			return fmt.Errorf("Drive restores never delete local files")
+		}
+		if strings.ContainsRune(req.Excludes, 0) || len(req.Excludes) > 65536 {
+			return fmt.Errorf("invalid excludes")
+		}
+		return nil
+	}
+	if req.Encrypt || req.GoogleAccountID != nil {
+		return fmt.Errorf("Google account and encryption require Google Drive")
 	}
 	if req.Method != "cp" && req.Method != "rsync" {
 		return fmt.Errorf("method must be 'cp' or 'rsync'")
@@ -803,5 +939,5 @@ func effectiveCompress(method string, useSSH, compress bool) bool {
 }
 
 func effectiveDeleteMode(method string, deleteMode bool) bool {
-	return deleteMode && method == "rsync"
+	return deleteMode && (method == "rsync" || method == "rclone")
 }

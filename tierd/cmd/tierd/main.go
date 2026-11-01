@@ -212,6 +212,9 @@ func main() {
 		zfsAdapter,
 	)
 	backupHandler.ResumeActiveRuns()
+	scheduleCtx, stopBackupSchedule := context.WithCancel(context.Background())
+	defer stopBackupSchedule()
+	backupHandler.StartScheduler(scheduleCtx)
 
 	// Boot-time adapter reconciliation: ensures smoothfs-backed namespace
 	// processes exist for all healthy pools. Runs in the background so it
@@ -295,6 +298,7 @@ func main() {
 
 	<-done
 	log.Println("shutting down...")
+	stopBackupSchedule()
 	backupHandler.BeginShutdown()
 
 	forceDone := make(chan struct{})

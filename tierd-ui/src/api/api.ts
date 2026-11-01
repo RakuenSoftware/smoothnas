@@ -311,6 +311,12 @@ export const api = {
   getUpdateLog: (offset: number) => apiFetch('GET', `/system/updates/log?offset=${offset}`),
 
   // --- Backup ---
+  getGoogleBackupAccounts: () => apiFetch<Array<{ id: number; label: string; email: string; jobs: number }>>('GET', '/backup/google/accounts'),
+  deleteGoogleBackupAccount: (id: number) => apiFetch('DELETE', `/backup/google/accounts/${id}`),
+  startGoogleBackupSession: (credentials: { label: string; client_id: string; client_secret: string }) => apiFetch<{ session_id: string; user_code: string; verification_url: string }>('POST', '/backup/google/device/start', credentials),
+  getGoogleBackupSession: (id: string) => apiFetch<{ status: string }>('GET', `/backup/google/device/${id}`),
+  cancelGoogleBackupSession: (id: string) => apiFetch('DELETE', `/backup/google/device/${id}`),
+  prepareGoogleBackupRecovery: (config: any) => apiFetch<{ session_id: string; recovery_kit: string }>('POST', '/backup/google/recovery', config),
   getBackupConfigs: () => apiFetch<any[]>('GET', '/backup/configs'),
   createBackupConfig: (cfg: any) => apiFetch('POST', '/backup/configs', cfg),
   updateBackupConfig: (id: number, cfg: any) => apiFetch('PUT', `/backup/configs/${id}`, cfg),
