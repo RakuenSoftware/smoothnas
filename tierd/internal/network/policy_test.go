@@ -635,3 +635,25 @@ func TestApplyDefaultBondPolicyPinsFirstNICMAC(t *testing.T) {
 		t.Fatalf("default bond DHCP does not identify by MAC\n%s", bondNetwork)
 	}
 }
+
+
+func TestApplyDefaultBondPolicyPreservesLegacyDHCPAfterBootstrap(t *testing.T) {
+	store := newStubConfigStore()
+	store.bools[NetworkBootstrapCompleteKey] = true
+	netDir := t.TempDir()
+	legacy := filepath.Join(netDir, LegacyDHCPNetworkFilename)
+	original := "[Match]\nType=ether\n\n[Network]\nDHCP=yes\n"
+	writeFakeFile(t, legacy, original)
+	sysRoot := makeFakeSysClassNet(t, map[string]string{"enp1s0": "physical-eth"})
+
+	if err := ApplyDefaultBondPolicy(store, netDir, sysRoot); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	data, err := os.ReadFile(legacy)
+	if err != nil {
+		t.Fatalf("existing DHCP fallback must remain: %v", err)
+	}
+	if string(data) != original {
+		t.Fatalf("legacy DHCP unexpectedly changed: %q", data)
+	}
+}
