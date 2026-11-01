@@ -675,3 +675,18 @@ func TestRefreshDefaultBondMembersSkipsOrphanedBond(t *testing.T) {
 		t.Fatalf("orphaned bond generated a new veth rule: %v", err)
 	}
 }
+
+
+func TestExistingBondIdentityPreservesLegacyDHCP(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeFile(t, filepath.Join(dir, DefaultBondNetdevFilename), "[NetDev]\\nName=bond0\\nKind=bond\\n")
+	writeFakeFile(t, filepath.Join(dir, DefaultBondNetworkFilename), "[Match]\\nName=bond0\\n\\n[Network]\\nDHCP=ipv4\\n")
+	mac, clientID, err := ExistingBondIdentity(dir, "bond0")
+	if err != nil { t.Fatal(err) }
+	if mac != "" || clientID != "" { t.Fatalf("legacy identity unexpectedly rewritten: %q %q", mac, clientID) }
+	writeFakeFile(t, filepath.Join(dir, DefaultBondNetdevFilename), "[NetDev]\\nName=bond0\\nKind=bond\\nMACAddress=aa:bb:cc:dd:ee:ff\\n")
+	writeFakeFile(t, filepath.Join(dir, DefaultBondNetworkFilename), "[Match]\\nName=bond0\\n\\n[DHCPv4]\\nClientIdentifier=mac\\n")
+	mac, clientID, err = ExistingBondIdentity(dir, "bond0")
+	if err != nil { t.Fatal(err) }
+	if mac != "aa:bb:cc:dd:ee:ff" || clientID != "mac" { t.Fatalf("identity: %q %q", mac, clientID) }
+}
