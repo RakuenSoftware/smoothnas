@@ -378,6 +378,8 @@ func TestApplyDefaultBondPolicyRemovesLegacyDHCPAfterMarker(t *testing.T) {
 	if err := os.WriteFile(legacy, []byte("[Match]\nType=ether\n\n[Network]\nDHCP=yes\nIPv6AcceptRA=yes\n"), 0o644); err != nil {
 		t.Fatalf("write legacy dhcp: %v", err)
 	}
+	// A replacement configuration must exist before the fallback is retired.
+	writeFakeFile(t, filepath.Join(netDir, DefaultBondNetworkFilename), "[Match]\\nName=bond0\\n\\n[Network]\\nDHCP=ipv4\\n")
 	sysRoot := makeFakeSysClassNet(t, map[string]string{
 		"enp1s0": "physical-eth",
 	})
