@@ -6,8 +6,10 @@ API responses are fixtures. The real application and routing run.
 
 The page lists available updates, checks for and installs them on request
 while following the run's log, shows a failed run's errors (an unreachable
-archive must not be silent), says whether a restart is needed and why, and
-restarts only after the operator confirms.
+archive must not be silent), says when a failed install has since been
+superseded by successful unattended upgrades and when an install succeeded
+although a package source couldn't be refreshed, says whether a restart is
+needed and why, and restarts only after the operator confirms.
 """
 import json
 import os
@@ -18,6 +20,7 @@ from playwright.sync_api import sync_playwright, expect
 base = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:5173"
 REASON = "smoothfs 0.3.2 is installed; running 0.3.1"
 RESOLVE_ERR = "Err:5 https://updates.rakuensoftware.com/public common InRelease: Temporary failure resolving 'updates.rakuensoftware.com'"
+BCACHEFS_ERR = "Err:4 https://apt.bcachefs.org/trixie bcachefs-tools-release InRelease: Could not connect to apt.bcachefs.org:443 (5.161.236.196). - connect (111: Connection refused)"
 LOG = "== smoothnas-update start install 2026-10-29T18:10:00Z\nSetting up smoothfs-dkms (0.3.2-1) ...\n"
 
 
@@ -34,6 +37,23 @@ def status(scenario, state):
                     "last_run": {"action": "install", "started_at": "t0", "finished_at": "t1", "exit_code": 0, "errors": []}}
         return {"running": False, "available": [], "reboot": no_reboot,
                 "last_run": {"action": "check", "started_at": "t0", "finished_at": "2026-10-29T18:00:00Z", "exit_code": 0, "errors": []}}
+    # The WTR Max on 2026-11-02: an install started here failed on Nov 1
+    # because apt.bcachefs.org was down; unattended upgrades have succeeded
+    # since. That failure is history, not an error.
+    if scenario == "install_failed_superseded":
+        return {"running": False, "available": [], "reboot": no_reboot,
+                "last_run": {"action": "install", "started_at": "2026-11-01T15:36:21Z", "finished_at": "2026-11-01T15:36:28Z",
+                             "exit_code": 100, "errors": [BCACHEFS_ERR], "superseded_at": "2026-11-02T13:38:27Z"}}
+    # Negative control: the same failure, nothing has succeeded since.
+    if scenario == "install_failed":
+        return {"running": False, "available": [], "reboot": no_reboot,
+                "last_run": {"action": "install", "started_at": "2026-11-01T15:36:21Z", "finished_at": "2026-11-01T15:36:28Z",
+                             "exit_code": 100, "errors": [BCACHEFS_ERR]}}
+    # A source was down, but the install went ahead and succeeded.
+    if scenario == "installed_refresh_failed":
+        return {"running": False, "available": [], "reboot": no_reboot,
+                "last_run": {"action": "install", "started_at": "t0", "finished_at": "2026-11-02T15:00:00Z",
+                             "exit_code": 0, "refresh_failed": True, "errors": [BCACHEFS_ERR]}}
     if scenario == "check_failed":
         return {"running": False, "available": [], "reboot": no_reboot,
                 "last_run": {"action": "check", "started_at": "t0", "finished_at": "t1", "exit_code": 100, "errors": [RESOLVE_ERR]}}
@@ -50,7 +70,8 @@ with sync_playwright() as playwright:
     if os.environ.get("CHROMIUM_PATH"):
         options["executable_path"] = os.environ["CHROMIUM_PATH"]
     browser = playwright.chromium.launch(**options)
-    for scenario in ("restart_needed", "up_to_date", "check_failed", "available"):
+    for scenario in ("restart_needed", "up_to_date", "check_failed", "install_failed_superseded",
+                     "install_failed", "installed_refresh_failed", "available"):
         context = browser.new_context(ignore_https_errors=os.environ.get("ALLOW_INSECURE_TLS") == "1")
         context.add_init_script("localStorage.setItem('sn_session','true'); localStorage.setItem('sn_user','qa');")
         reboots = []
@@ -107,6 +128,19 @@ with sync_playwright() as playwright:
             page.get_by_role("button", name="Check for updates", exact=True).click()
             expect(page.get_by_text("Checking for updates…", exact=True)).to_be_visible()
             assert page.get_by_text("Installing updates…", exact=False).count() == 0, "a check was labelled as an install"
+        elif scenario == "install_failed_superseded":
+            expect(page.get_by_text("SmoothNAS is up to date.", exact=False)).to_be_visible()
+            expect(page.get_by_text("automatic updates have installed successfully since (2026-11-02T13:38:27Z)", exact=False)).to_be_visible()
+            assert page.get_by_text("Installing updates failed", exact=False).count() == 0, "a superseded failure is shown as current"
+            assert page.locator(".error-msg").count() == 0, "a superseded failure is shown as an error"
+        elif scenario == "install_failed":
+            expect(page.get_by_text("Installing updates failed (2026-11-01T15:36:28Z).", exact=True)).to_be_visible()
+            expect(page.get_by_text(BCACHEFS_ERR, exact=True)).to_be_visible()
+            assert page.get_by_text("automatic updates have installed", exact=False).count() == 0
+        elif scenario == "installed_refresh_failed":
+            expect(page.get_by_text("Updates were installed (2026-11-02T15:00:00Z), but these package sources could not be refreshed:", exact=True)).to_be_visible()
+            expect(page.get_by_text(BCACHEFS_ERR, exact=True)).to_be_visible()
+            assert page.get_by_text("Installing updates failed", exact=False).count() == 0, "a successful install is shown as failed"
         elif scenario == "check_failed":
             expect(page.get_by_text("Checking for updates failed", exact=False)).to_be_visible()
             expect(page.get_by_text(RESOLVE_ERR, exact=True)).to_be_visible()

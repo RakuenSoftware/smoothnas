@@ -25,6 +25,11 @@ interface UpdateStatus {
     finished_at?: string;
     exit_code?: number;
     errors: string[];
+    // An install whose package-list refresh failed for some source; the
+    // install still ran and exit_code is its result.
+    refresh_failed?: boolean;
+    // A failed install that unattended upgrades have since succeeded past.
+    superseded_at?: string;
   } | null;
   reboot: RebootStatus;
 }
@@ -119,7 +124,9 @@ export default function Updates() {
 
   const last = status?.last_run;
   const runningAction = (last?.finished_at ? null : last?.action) || startedAction;
-  const lastFailed = !!last && !status?.running && last.exit_code !== undefined && last.exit_code !== 0;
+  const lastFailed = !!last && !status?.running && last.exit_code !== undefined && last.exit_code !== 0 && !last.superseded_at;
+  const refreshFailed = !!last && !status?.running && last.exit_code === 0 && !!last.refresh_failed;
+  const superseded = !!last && !status?.running && !!last.superseded_at;
   const available = status?.available ?? [];
 
   return (
@@ -150,12 +157,24 @@ export default function Updates() {
                   </ul>
                 )}
               </div>
+            ) : refreshFailed ? (
+              <div style={{ background: '#fef3c7', borderRadius: 8, padding: 16, marginBottom: 12 }}>
+                <strong>{t('updates.label.installedRefreshFailed', { time: last!.finished_at || last!.started_at })}</strong>
+                <ul style={{ margin: '8px 0 0' }}>
+                  {last!.errors.map((e, i) => <li key={i} style={{ fontFamily: 'monospace', fontSize: 12 }}>{e}</li>)}
+                </ul>
+              </div>
             ) : available.length === 0 ? (
               <p style={{ color: '#16a34a', marginBottom: 12 }}>
                 {t('updates.label.upToDate')}
-                {last?.finished_at && <span style={{ color: '#666' }}> {t('updates.label.lastChecked', { time: last.finished_at })}</span>}
+                {last?.finished_at && !superseded && <span style={{ color: '#666' }}> {t('updates.label.lastChecked', { time: last.finished_at })}</span>}
               </p>
             ) : null}
+            {superseded && (
+              <p style={{ fontSize: 13, color: '#666', marginBottom: 12 }}>
+                {t('updates.label.installFailedSuperseded', { failed: last!.finished_at || last!.started_at, time: last!.superseded_at! })}
+              </p>
+            )}
 
             {available.length > 0 && !status.running && (
               <div style={{ marginBottom: 12 }}>

@@ -1106,6 +1106,8 @@ const en: LanguageTranslations = {
   'updates.label.installing': 'Installing updates… This continues even if you leave this page.',
   'updates.label.checkFailed': 'Checking for updates failed ({time}).',
   'updates.label.installFailed': 'Installing updates failed ({time}).',
+  'updates.label.installFailedSuperseded': 'An update started here failed ({failed}); automatic updates have installed successfully since ({time}).',
+  'updates.label.installedRefreshFailed': 'Updates were installed ({time}), but these package sources could not be refreshed:',
   'updates.label.upToDate': 'SmoothNAS is up to date.',
   'updates.label.lastChecked': '(last checked {time})',
   'updates.label.available': '{count} update(s) available',
