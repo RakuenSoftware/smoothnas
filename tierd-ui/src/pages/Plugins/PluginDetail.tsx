@@ -5,6 +5,7 @@ import { api } from '../../api/api';
 import { extractError } from '../../utils/errors';
 import Spinner from '../../components/Spinner/Spinner';
 import ConfirmDialog from '../../components/ConfirmDialog/ConfirmDialog';
+import { pluginWebURL } from '../../utils/pluginWebUI';
 
 // Detail mirrors the JSON shape POST /api/plugins/<name> returns.
 // Loose typing — the backend's PluginRecord adds fields over time;
@@ -150,6 +151,7 @@ export default function PluginDetail() {
       </div>
     );
   }
+  const webURL = detail.plugin.state === 'running' ? pluginWebURL(detail.plugin.webUI) : null;
 
   return (
     <div className="page">
@@ -166,6 +168,11 @@ export default function PluginDetail() {
             </span>
           </div>
         </div>
+        {webURL && (
+          <a className="btn" href={webURL} target="_blank" rel="noopener noreferrer">
+            {t('plugins.action.open')}
+          </a>
+        )}
         <Link to="/plugins" className="btn">
           {t('plugins.detail.backToList')}
         </Link>

@@ -1,3 +1,4 @@
 /etc/apt/sources.list.d/smoothapt.sources
 /etc/apt/apt.conf.d/52smoothnas-upgrades
 /etc/apt/apt.conf.d/21smoothnas-auto-upgrades
+/etc/apt/apt.conf.d/53smoothnas-dkms

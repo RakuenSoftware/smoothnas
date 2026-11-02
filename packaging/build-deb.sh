@@ -31,7 +31,7 @@ samba, smbclient, cifs-utils, nfs-kernel-server, targetcli-fb, python3-rtslib-fb
 nginx, nftables, iptables, iproute2, openssl, curl, \
 lxc, lxc-templates, skopeo, umoci, uidmap, docker-cli, \
 btrfs-progs, xfsprogs, thin-provisioning-tools, smartmontools, hdparm, nvme-cli, \
-gdisk, fio, psmisc, rsync, sshpass, iperf3, mokutil, unattended-upgrades"
+gdisk, fio, psmisc, rsync, rclone (>= 1.60), sshpass, iperf3, mokutil, unattended-upgrades"
 RECOMMENDS="bcachefs-tools, bcachefs-kernel-dkms, samba-testsuite"
 
 [ -x "$TIERD_BIN" ] || { echo "ERROR: tierd binary not found: ${TIERD_BIN}" >&2; exit 1; }
@@ -47,7 +47,8 @@ install -D -m 755 "$TIERD_BIN" "$root/usr/sbin/tierd"
 install -D -m 755 "$RUNTIME_BIN" "$root/usr/lib/smoothnas/docker-lxc-daemon"
 mkdir -p "$root/usr/share/tierd-ui"
 cp -r "$UI_DIR/." "$root/usr/share/tierd-ui/"
-chmod 755 "$root/DEBIAN/postinst" "$root/usr/sbin/smoothnas-tls-init" "$root/usr/lib/smoothnas/gpu-init.sh"
+chmod 755 "$root/DEBIAN/postinst" "$root/usr/sbin/smoothnas-tls-init" "$root/usr/lib/smoothnas/gpu-init.sh" \
+	"$root/usr/lib/smoothnas/network-fallback.sh" "$root/usr/lib/smoothnas/dkms-autoinstall.sh"
 
 cat > "$root/DEBIAN/control" <<EOF
 Package: smoothnas

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Operator-started update runs. unattended-upgrades keeps the NAS current on
@@ -24,6 +25,10 @@ const runUnit = "smoothnas-update"
 
 var (
 	runLogPath = "/var/log/smoothnas/update.log"
+
+	// apt.systemd.daily touches this only when unattended-upgrade exits 0, so
+	// its time is when updates last installed without an error.
+	upgradeStampPath = "/var/lib/apt/periodic/upgrade-stamp"
 
 	// systemctl and systemd-run are vars so tests can fake them.
 	unitActive = func() bool {
@@ -61,6 +66,14 @@ const aptRepair = "{ dpkg --configure -a || true; } && " +
 	"apt-get -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef " +
 	"-o Dpkg::Options::=--force-confold -y --fix-broken install"
 
+// installCmd refreshes the package lists, then installs whatever they offer.
+// A source that can't be refreshed (a third-party archive that is down) must
+// not stop SmoothNAS's own updates from installing: the refresh result is
+// recorded on its own line and reported, and the install still runs, from
+// the lists as of the last successful refresh for that source.
+const installCmd = aptUpdate + "; refresh=$?; echo \"" + refreshMarker + " $refresh\"; " +
+	aptRepair + " && " + aptUpgrade
+
 // Run actions.
 const (
 	ActionCheck   = "check"
@@ -80,7 +93,7 @@ func Start(action string) error {
 	case ActionCheck:
 		script = runScript(ActionCheck, aptUpdate, runLogPath)
 	case ActionInstall:
-		script = runScript(ActionInstall, aptUpdate+" && "+aptRepair+" && "+aptUpgrade, runLogPath)
+		script = runScript(ActionInstall, installCmd, runLogPath)
 	default:
 		return fmt.Errorf("unknown update action %q", action)
 	}
@@ -102,8 +115,9 @@ func runScript(action, cmd, logPath string) string {
 }
 
 const (
-	startMarker = "== smoothnas-update start"
-	endMarker   = "== smoothnas-update exit"
+	startMarker   = "== smoothnas-update start"
+	endMarker     = "== smoothnas-update exit"
+	refreshMarker = "== smoothnas-update refresh-exit"
 )
 
 // Package is an update available for an installed package.
@@ -120,6 +134,13 @@ type LastRun struct {
 	FinishedAt string   `json:"finished_at,omitempty"`
 	ExitCode   *int     `json:"exit_code,omitempty"`
 	Errors     []string `json:"errors"`
+	// RefreshFailed: an install whose package-list refresh failed for some
+	// source; the install itself still ran, and ExitCode is its result.
+	RefreshFailed bool `json:"refresh_failed,omitempty"`
+	// SupersededAt: this failed install is older than a later unattended
+	// run that installed updates without an error, at this time. The
+	// failure is history, not the NAS's current state.
+	SupersededAt string `json:"superseded_at,omitempty"`
 }
 
 // UpdateStatus is what the Updates page shows.
@@ -141,7 +162,27 @@ func GetUpdateStatus() UpdateStatus {
 		st.LastRun = parseRunLog(f)
 		f.Close()
 	}
+	markSuperseded(st.LastRun)
 	return st
+}
+
+// markSuperseded sets SupersededAt on a failed install that unattended
+// upgrades have since succeeded past. A failed check is left alone: the
+// unattended refresh runs in apt's default mode, which exits 0 even when an
+// archive is unreachable, so it can't show that a check would now pass.
+func markSuperseded(run *LastRun) {
+	if run == nil || run.Action != ActionInstall || run.ExitCode == nil || *run.ExitCode == 0 {
+		return
+	}
+	failed, err := time.Parse(time.RFC3339, run.FinishedAt)
+	if err != nil {
+		return
+	}
+	info, err := os.Stat(upgradeStampPath)
+	if err != nil || !info.ModTime().After(failed) {
+		return
+	}
+	run.SupersededAt = info.ModTime().UTC().Format(time.RFC3339)
 }
 
 // ReadLog returns the run log from byte offset on, and the offset to read
@@ -210,6 +251,10 @@ func parseRunLog(r io.Reader) *LastRun {
 			}
 			if len(f) > 1 {
 				run.StartedAt = f[1]
+			}
+		case run != nil && strings.HasPrefix(line, refreshMarker+" "):
+			if code, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, refreshMarker+" "))); err == nil {
+				run.RefreshFailed = code != 0
 			}
 		case run != nil && strings.HasPrefix(line, endMarker+" "):
 			f := strings.Fields(strings.TrimPrefix(line, endMarker+" "))

@@ -6,11 +6,13 @@ import { extractError } from '../../utils/errors';
 import Spinner from '../../components/Spinner/Spinner';
 import ConfirmDialog from '../../components/ConfirmDialog/ConfirmDialog';
 import { pluginCatalogRepositories } from '../../data/pluginCatalog';
+import { pluginWebURL, type PluginWebUI } from '../../utils/pluginWebUI';
 
 // PluginRow mirrors the JSON shape the phase-06a backend returns
 // from GET /api/plugins under the "plugins" key. Kept loose because
 // the detail page reads more fields than this list view needs.
 type PluginRow = {
+  webUI?: PluginWebUI;
   name: string;
   version: string;
   state: string;
@@ -249,6 +251,7 @@ function PluginCard({
 }) {
   const { t } = useI18n();
   const isRunning = plugin.state === 'running';
+  const webURL = pluginWebURL(plugin.webUI);
   const isStopped = plugin.state === 'stopped' || plugin.state === 'installed' || plugin.state === 'failed';
   const needsMaterialise = plugin.state === 'installed';
   const containerRefs = plugin.containerRefs ?? [];
@@ -407,14 +410,20 @@ function PluginCard({
         >
           {t('plugins.action.configure')}
         </button>
-        <button
-          className="btn"
-          onClick={onOpen}
-          disabled={!isRunning}
-          title={isRunning ? '' : t('plugins.embed.notRunning.title')}
-        >
-          {t('plugins.action.open')}
-        </button>
+        {webURL && isRunning ? (
+          <a className="btn" href={webURL} target="_blank" rel="noopener noreferrer">
+            {t('plugins.action.open')}
+          </a>
+        ) : (
+          <button
+            className="btn"
+            onClick={onOpen}
+            disabled={!isRunning}
+            title={isRunning ? '' : t('plugins.embed.notRunning.title')}
+          >
+            {t('plugins.action.open')}
+          </button>
+        )}
         <button
           className="btn danger"
           disabled={busy}

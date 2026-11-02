@@ -11,7 +11,7 @@ import (
 type BackupRun struct {
 	ID          int64  `json:"id"`
 	ConfigID    int64  `json:"config_id"`
-	Status      string `json:"status"`       // "running", "completed", "failed"
+	Status      string `json:"status"` // "running", "completed", "failed"
 	Progress    string `json:"progress"`
 	FilesDone   int    `json:"files_done"`
 	FilesTotal  int    `json:"files_total"`
@@ -26,11 +26,15 @@ type BackupRun struct {
 func (s *Store) CreateBackupRun(configID int64) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := s.db.Exec(
-		`INSERT INTO backup_runs (config_id, status, started_at) VALUES (?, 'running', ?)`,
-		configID, now,
+		`INSERT INTO backup_runs (config_id, status, started_at) SELECT ?, 'running', ? WHERE NOT EXISTS (SELECT 1 FROM backup_runs WHERE config_id=? AND status='running')`,
+		configID, now, configID,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("create backup run: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return 0, ErrDuplicate
 	}
 	id, _ := res.LastInsertId()
 	return id, nil

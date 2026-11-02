@@ -1,0 +1,14 @@
+[Unit]
+Description=SmoothNAS DHCP fallback when the configured network does not come up
+Documentation=file:///usr/lib/smoothnas/network-fallback.sh
+After=systemd-networkd.service
+Wants=systemd-networkd.service
+
+[Service]
+# simple: it can wait indefinitely for carrier, and must not hold up boot.
+Type=simple
+ExecStart=/usr/lib/smoothnas/network-fallback.sh
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

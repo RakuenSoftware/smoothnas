@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/RakuenSoftware/nonraid v0.0.0-20260513211115-f1f6d113a548
-	github.com/RakuenSoftware/smoothfs v0.2.28-0.20261013112058-94cdfdec50ef
+	github.com/RakuenSoftware/smoothfs v0.3.5
 	github.com/RakuenSoftware/smoothgui/auth v0.2.4
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/creack/pty/v2 v2.0.1
@@ -12,6 +12,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.47
 	github.com/pressly/goose/v3 v3.27.0
 	go.etcd.io/bbolt v1.5.0
+	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sys v0.47.0
 	gopkg.in/yaml.v3 v3.0.1
 	nhooyr.io/websocket v1.8.17

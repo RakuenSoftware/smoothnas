@@ -23,42 +23,56 @@ const DefaultBackupParallelism = 4
 
 // BackupConfig stores a named backup job configuration.
 type BackupConfig struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	TargetType  string `json:"target_type"` // "nfs" or "smb" (used by method=cp; ignored for method=rsync)
-	Host        string `json:"host"`
-	Share       string `json:"share"`
-	SMBUser     string `json:"smb_user"`
-	SMBPass     string `json:"-"` // never exposed in JSON
-	HasCreds    bool   `json:"has_creds"`
-	SSHUser     string `json:"ssh_user"`
-	SSHPass     string `json:"-"` // never exposed in JSON
-	HasSSHCreds bool   `json:"has_ssh_creds"`
-	LocalPath   string `json:"local_path"`
-	RemotePath  string `json:"remote_path"` // subdirectory on share/remote path, may be empty
-	Direction   string `json:"direction"`   // "push" or "pull"
-	Method      string `json:"method"`      // "cp" or "rsync"
-	Parallelism int    `json:"parallelism"` // worker count for cp; partitioned worker count for rsync (mount path). 1 = single stream.
-	UseSSH      bool   `json:"use_ssh"`     // rsync transport: true=direct SSH, false=mount NFS/SMB and rsync locally (method=="rsync" only)
-	Compress    bool   `json:"compress"`    // rsync --compress when method=="rsync"
-	DeleteMode  bool   `json:"delete_mode"` // rsync --delete when method=="rsync"
-	CreatedAt   string `json:"created_at"`
+	ID              int64  `json:"id"`
+	Name            string `json:"name"`
+	TargetType      string `json:"target_type"` // "nfs" or "smb" (used by method=cp; ignored for method=rsync)
+	Host            string `json:"host"`
+	Share           string `json:"share"`
+	SMBUser         string `json:"smb_user"`
+	SMBPass         string `json:"-"` // never exposed in JSON
+	HasCreds        bool   `json:"has_creds"`
+	SSHUser         string `json:"ssh_user"`
+	SSHPass         string `json:"-"` // never exposed in JSON
+	HasSSHCreds     bool   `json:"has_ssh_creds"`
+	LocalPath       string `json:"local_path"`
+	RemotePath      string `json:"remote_path"` // subdirectory on share/remote path, may be empty
+	Direction       string `json:"direction"`   // "push" or "pull"
+	Method          string `json:"method"`      // "cp" or "rsync"
+	Parallelism     int    `json:"parallelism"` // worker count for cp; partitioned worker count for rsync (mount path). 1 = single stream.
+	UseSSH          bool   `json:"use_ssh"`     // rsync transport: true=direct SSH, false=mount NFS/SMB and rsync locally (method=="rsync" only)
+	Compress        bool   `json:"compress"`    // rsync --compress when method=="rsync"
+	DeleteMode      bool   `json:"delete_mode"` // rsync --delete when method=="rsync"
+	ScheduleEnabled bool   `json:"schedule_enabled"`
+	ScheduleTime    string `json:"schedule_time"`
+	ScheduleDays    int    `json:"schedule_days"`
+	LastScheduledAt string `json:"last_scheduled_at"`
+	NextRunAt       string `json:"next_run_at"`
+	GoogleAccountID *int64 `json:"google_account_id"`
+	Excludes        string `json:"excludes"`
+	Encrypt         bool   `json:"encrypt"`
+	CryptPassword   string `json:"-"`
+	CryptSalt       string `json:"-"`
+	HasRun          bool   `json:"has_run"`
+	CreatedAt       string `json:"created_at"`
 }
 
 func (s *Store) CreateBackupConfig(cfg BackupConfig) (*BackupConfig, error) {
+	if cfg.ScheduleDays == 0 && !cfg.ScheduleEnabled {
+		cfg.ScheduleDays = 127
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	if cfg.Parallelism < 1 {
 		cfg.Parallelism = DefaultBackupParallelism
 	}
 	res, err := s.db.Exec(
 		`INSERT INTO backup_configs
-		 (name, target_type, host, share, smb_user, smb_pass, ssh_user, ssh_pass, local_path, remote_path, direction, method, parallelism, use_ssh, compress, delete_mode, created_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 (name, target_type, host, share, smb_user, smb_pass, ssh_user, ssh_pass, local_path, remote_path, direction, method, parallelism, use_ssh, compress, delete_mode, schedule_enabled, schedule_time, schedule_days, google_account_id, excludes, encrypt, crypt_password, crypt_salt, created_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		cfg.Name, cfg.TargetType, cfg.Host, cfg.Share,
 		cfg.SMBUser, cfg.SMBPass, cfg.SSHUser, cfg.SSHPass,
 		cfg.LocalPath, cfg.RemotePath,
 		cfg.Direction, cfg.Method, cfg.Parallelism,
-		boolToInt(cfg.UseSSH), boolToInt(cfg.Compress), boolToInt(cfg.DeleteMode), now,
+		boolToInt(cfg.UseSSH), boolToInt(cfg.Compress), boolToInt(cfg.DeleteMode), boolToInt(cfg.ScheduleEnabled), cfg.ScheduleTime, cfg.ScheduleDays, cfg.GoogleAccountID, cfg.Excludes, boolToInt(cfg.Encrypt), cfg.CryptPassword, cfg.CryptSalt, now,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -78,7 +92,7 @@ func (s *Store) CreateBackupConfig(cfg BackupConfig) (*BackupConfig, error) {
 func (s *Store) ListBackupConfigs() ([]BackupConfig, error) {
 	rows, err := s.db.Query(
 		`SELECT id, name, target_type, host, share, smb_user, smb_pass, ssh_user, ssh_pass,
-		        local_path, remote_path, direction, method, parallelism, use_ssh, compress, delete_mode, created_at
+		        local_path, remote_path, direction, method, parallelism, use_ssh, compress, delete_mode, schedule_enabled, schedule_time, schedule_days, google_account_id, excludes, encrypt, crypt_password, crypt_salt, last_scheduled_at, created_at, EXISTS(SELECT 1 FROM backup_runs WHERE config_id=backup_configs.id)
 		 FROM backup_configs ORDER BY id`,
 	)
 	if err != nil {
@@ -94,7 +108,7 @@ func (s *Store) ListBackupConfigs() ([]BackupConfig, error) {
 			&c.ID, &c.Name, &c.TargetType, &c.Host, &c.Share,
 			&c.SMBUser, &c.SMBPass, &c.SSHUser, &c.SSHPass,
 			&c.LocalPath, &c.RemotePath, &c.Direction, &c.Method, &c.Parallelism,
-			&useSSH, &compress, &deleteMode, &c.CreatedAt,
+			&useSSH, &compress, &deleteMode, &c.ScheduleEnabled, &c.ScheduleTime, &c.ScheduleDays, &c.GoogleAccountID, &c.Excludes, &c.Encrypt, &c.CryptPassword, &c.CryptSalt, &c.LastScheduledAt, &c.CreatedAt, &c.HasRun,
 		); err != nil {
 			return nil, err
 		}
@@ -118,13 +132,13 @@ func (s *Store) GetBackupConfig(id int64) (*BackupConfig, error) {
 	var useSSH, compress, deleteMode int
 	err := s.db.QueryRow(
 		`SELECT id, name, target_type, host, share, smb_user, smb_pass, ssh_user, ssh_pass,
-		        local_path, remote_path, direction, method, parallelism, use_ssh, compress, delete_mode, created_at
+		        local_path, remote_path, direction, method, parallelism, use_ssh, compress, delete_mode, schedule_enabled, schedule_time, schedule_days, google_account_id, excludes, encrypt, crypt_password, crypt_salt, last_scheduled_at, created_at, EXISTS(SELECT 1 FROM backup_runs WHERE config_id=backup_configs.id)
 		 FROM backup_configs WHERE id = ?`, id,
 	).Scan(
 		&c.ID, &c.Name, &c.TargetType, &c.Host, &c.Share,
 		&c.SMBUser, &c.SMBPass, &c.SSHUser, &c.SSHPass,
 		&c.LocalPath, &c.RemotePath, &c.Direction, &c.Method, &c.Parallelism,
-		&useSSH, &compress, &deleteMode, &c.CreatedAt,
+		&useSSH, &compress, &deleteMode, &c.ScheduleEnabled, &c.ScheduleTime, &c.ScheduleDays, &c.GoogleAccountID, &c.Excludes, &c.Encrypt, &c.CryptPassword, &c.CryptSalt, &c.LastScheduledAt, &c.CreatedAt, &c.HasRun,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -155,13 +169,13 @@ func (s *Store) UpdateBackupConfig(id int64, cfg BackupConfig) (*BackupConfig, e
 		 SET name=?, target_type=?, host=?, share=?,
 		     smb_user=?, smb_pass=?, ssh_user=?, ssh_pass=?,
 		     local_path=?, remote_path=?, direction=?, method=?, parallelism=?,
-		     use_ssh=?, compress=?, delete_mode=?
+		     use_ssh=?, compress=?, delete_mode=?, schedule_enabled=?, schedule_time=?, schedule_days=?, google_account_id=?, excludes=?, encrypt=?, crypt_password=?, crypt_salt=?
 		 WHERE id=?`,
 		cfg.Name, cfg.TargetType, cfg.Host, cfg.Share,
 		cfg.SMBUser, cfg.SMBPass, cfg.SSHUser, cfg.SSHPass,
 		cfg.LocalPath, cfg.RemotePath,
 		cfg.Direction, cfg.Method, cfg.Parallelism,
-		boolToInt(cfg.UseSSH), boolToInt(cfg.Compress), boolToInt(cfg.DeleteMode),
+		boolToInt(cfg.UseSSH), boolToInt(cfg.Compress), boolToInt(cfg.DeleteMode), boolToInt(cfg.ScheduleEnabled), cfg.ScheduleTime, cfg.ScheduleDays, cfg.GoogleAccountID, cfg.Excludes, boolToInt(cfg.Encrypt), cfg.CryptPassword, cfg.CryptSalt,
 		id,
 	)
 	if err != nil {

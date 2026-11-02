@@ -26,9 +26,15 @@ rm -rf /opt/smoothnas/repo /opt/smoothnas/smoothfs-src /opt/smoothnas/package-ma
 rmdir /opt/smoothnas 2>/dev/null || true
 
 # reenable: an older install's links may point at the removed units above.
-for unit in smoothnas-gpu-init smoothnas-tls-init smoothnas-runtime tierd-host-init tierd; do
+for unit in smoothnas-gpu-init smoothnas-tls-init smoothnas-network-fallback smoothnas-runtime tierd-host-init tierd; do
 	systemctl reenable "$unit.service" >/dev/null 2>&1 || true
 done
+
+# Build DKMS modules for kernels that were configured before their headers:
+# a NAS upgraded that way boots without ZFS. Later dpkg runs are covered by
+# apt.conf.d/53smoothnas-dkms. A failed build must not leave smoothnas
+# unconfigured; the script reports which kernel failed.
+/usr/lib/smoothnas/dkms-autoinstall.sh || true
 
 if [ -d /run/systemd/system ]; then
 	systemctl daemon-reload

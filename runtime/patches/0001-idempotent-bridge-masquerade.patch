@@ -9,34 +9,6 @@
  	iface, err := net.InterfaceByName(BridgeName)
  	if err != nil || iface == nil {
  		// Bridge doesn't exist — create it and assign the gateway IP.
-@@ -69,18 +71,16 @@
- 		}
- 	}
- 
--	// Ensure the nftables table exists with the masquerade rule.
--	// Using "nft -f" with a table block is idempotent — it merges into any
--	// existing table rather than replacing it.
-+	// Reconcile only our postrouting chain in one atomic transaction.
-+	// A table block appends rules on every call; flush removes old duplicates
-+	// while retaining prerouting/output DNAT rules used by published ports.
- 	nftRule := fmt.Sprintf(`
--table ip %s {
--	chain postrouting {
--		type nat hook postrouting priority srcnat; policy accept;
--		ip saddr 10.100.0.0/24 oifname != "%s" masquerade
--		ct status dnat masquerade
--	}
--}
--`, NATTableName, BridgeName)
-+add table ip %s
-+add chain ip %s postrouting { type nat hook postrouting priority srcnat; policy accept; }
-+flush chain ip %s postrouting
-+add rule ip %s postrouting ip saddr 10.100.0.0/24 oifname != "%s" masquerade
-+add rule ip %s postrouting ct status dnat masquerade
-+`, NATTableName, NATTableName, NATTableName, NATTableName, BridgeName, NATTableName)
- 	cmd := exec.Command("nft", "-f", "-")
- 	cmd.Stdin = strings.NewReader(nftRule)
- 	if out, err := cmd.CombinedOutput(); err != nil {
 --- /dev/null
 +++ b/internal/lxc/network_nat_integration_test.go
 @@ -0,0 +1,51 @@
