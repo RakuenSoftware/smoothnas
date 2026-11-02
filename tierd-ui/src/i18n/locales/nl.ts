@@ -1126,6 +1126,8 @@ const nl: LanguageTranslations = {
   'updates.label.installing': 'Updates worden geïnstalleerd… Dit gaat door, ook als je deze pagina verlaat.',
   'updates.label.checkFailed': 'Zoeken naar updates mislukt ({time}).',
   'updates.label.installFailed': 'Installeren van updates mislukt ({time}).',
+  'updates.label.installFailedSuperseded': 'Een hier gestarte update is mislukt ({failed}); automatische updates zijn sindsdien wel geslaagd ({time}).',
+  'updates.label.installedRefreshFailed': 'Updates zijn geïnstalleerd ({time}), maar deze pakketbronnen konden niet worden vernieuwd:',
   'updates.label.upToDate': 'SmoothNAS is up-to-date.',
   'updates.label.lastChecked': '(laatst gecontroleerd {time})',
   'updates.label.available': '{count} update(s) beschikbaar',

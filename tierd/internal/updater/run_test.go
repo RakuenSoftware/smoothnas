@@ -1,10 +1,13 @@
 package updater
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseUpgradable(t *testing.T) {
@@ -84,7 +87,7 @@ func TestStart(t *testing.T) {
 	if data, _ := os.ReadFile(runLogPath); len(data) != 0 {
 		t.Errorf("expected the log truncated for a new run, got %q", data)
 	}
-	for _, want := range []string{"APT::Update::Error-Mode=any", "dpkg --configure -a", "--fix-broken install", "full-upgrade", "--force-confold", startMarker + " install", endMarker, runLogPath} {
+	for _, want := range []string{"APT::Update::Error-Mode=any", refreshMarker, "dpkg --configure -a", "--fix-broken install", "full-upgrade", "--force-confold", startMarker + " install", endMarker, runLogPath} {
 		if !strings.Contains(script, want) {
 			t.Errorf("install script missing %q: %s", want, script)
 		}
@@ -119,5 +122,170 @@ func TestReadLog(t *testing.T) {
 	text, next, _ = ReadLog(100)
 	if text != "abcdef" || next != 6 {
 		t.Fatalf("ReadLog past end = %q %d", text, next)
+	}
+}
+
+// The WTR Max's Updates page on 2026-11-02: an install started from the page
+// on Nov 1 failed because apt.bcachefs.org refused connections, and the
+// page still said "Installing updates failed" a day later, after unattended
+// upgrades had installed kernel 7.2.15-84 and OpenZFS without an error.
+const wtrMaxFailedInstall = `== smoothnas-update start install 2026-11-01T15:36:21Z
+Err:4 https://apt.bcachefs.org/trixie bcachefs-tools-release InRelease
+  Could not connect to apt.bcachefs.org:443 (5.161.236.196). - connect (111: Connection refused)
+E: Failed to fetch https://apt.bcachefs.org/trixie/dists/bcachefs-tools-release/InRelease  Cannot initiate the connection to apt.bcachefs.org:443 (2a01:4ff:f0:49f3::1). - connect (101: Network is unreachable)
+E: Some index files failed to download. They have been ignored, or old ones used instead.
+== smoothnas-update exit 100 2026-11-01T15:36:28Z
+`
+
+func writeStamp(t *testing.T, at time.Time) {
+	t.Helper()
+	upgradeStampPath = filepath.Join(t.TempDir(), "upgrade-stamp")
+	if err := os.WriteFile(upgradeStampPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(upgradeStampPath, at, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMarkSupersededAfterUnattendedSuccess(t *testing.T) {
+	writeStamp(t, time.Date(2026, 11, 2, 13, 38, 27, 0, time.UTC))
+	run := parseRunLog(strings.NewReader(wtrMaxFailedInstall))
+	markSuperseded(run)
+	if run.SupersededAt != "2026-11-02T13:38:27Z" {
+		t.Fatalf("failed install older than a successful unattended upgrade: SupersededAt = %q", run.SupersededAt)
+	}
+	if run.ExitCode == nil || *run.ExitCode != 100 || len(run.Errors) == 0 {
+		t.Fatalf("superseding must keep the failure's record: %+v", run)
+	}
+}
+
+func TestMarkSupersededLeavesCurrentFailures(t *testing.T) {
+	failedAt := time.Date(2026, 11, 1, 15, 36, 28, 0, time.UTC)
+	cases := []struct {
+		name  string
+		log   string
+		stamp *time.Time
+	}{
+		{"unattended last succeeded before the failure", wtrMaxFailedInstall, ptr(failedAt.Add(-time.Hour))},
+		{"unattended succeeded in the same second", wtrMaxFailedInstall, ptr(failedAt)},
+		{"no unattended success recorded", wtrMaxFailedInstall, nil},
+		{"failed check", strings.Replace(wtrMaxFailedInstall, "start install", "start check", 1), ptr(failedAt.Add(time.Hour))},
+		{"successful install", strings.Replace(wtrMaxFailedInstall, "exit 100", "exit 0", 1), ptr(failedAt.Add(time.Hour))},
+		{"unfinished install", "== smoothnas-update start install 2026-11-01T15:36:21Z\n", ptr(failedAt.Add(time.Hour))},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.stamp != nil {
+				writeStamp(t, *c.stamp)
+			} else {
+				upgradeStampPath = filepath.Join(t.TempDir(), "absent")
+			}
+			run := parseRunLog(strings.NewReader(c.log))
+			markSuperseded(run)
+			if run.SupersededAt != "" {
+				t.Fatalf("SupersededAt = %q, want empty", run.SupersededAt)
+			}
+		})
+	}
+	markSuperseded(nil) // no run yet: must not panic
+}
+
+func ptr(t time.Time) *time.Time { return &t }
+
+func TestGetUpdateStatusReportsSuperseded(t *testing.T) {
+	runLogPath = filepath.Join(t.TempDir(), "update.log")
+	if err := os.WriteFile(runLogPath, []byte(wtrMaxFailedInstall), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeStamp(t, time.Date(2026, 11, 2, 13, 38, 27, 0, time.UTC))
+	unitActive = func() bool { return false }
+	aptListUpgradable = func() ([]byte, error) { return []byte("Listing... Done\n"), nil }
+	st := GetUpdateStatus()
+	if st.LastRun == nil || st.LastRun.SupersededAt == "" {
+		t.Fatalf("status must report the failure as superseded: %+v", st.LastRun)
+	}
+}
+
+// Run the install script Start builds, with stub apt-get and dpkg, and read
+// its log back the way the Updates page does.
+func runInstallScript(t *testing.T, updateExit, upgradeExit int) (*LastRun, string) {
+	t.Helper()
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stub := fmt.Sprintf(`#!/bin/sh
+echo "$(basename "$0") $*" >> %[1]q
+case "$*" in
+  *" update") [ %[2]d -eq 0 ] || echo "E: Some index files failed to download."; exit %[2]d ;;
+  *full-upgrade*) exit %[3]d ;;
+esac
+exit 0
+`, calls, updateExit, upgradeExit)
+	for _, name := range []string{"apt-get", "dpkg"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(stub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runLogPath = filepath.Join(dir, "update.log")
+	unitActive = func() bool { return false }
+	var script string
+	startUnit = func(s string) error { script = s; return nil }
+	if err := Start(ActionInstall); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("script: %v: %s", err, out)
+	}
+	f, err := os.Open(runLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	got, _ := os.ReadFile(calls)
+	return parseRunLog(f), string(got)
+}
+
+// A source that can't be refreshed must not stop the install.
+func TestInstallRunsWhenRefreshFails(t *testing.T) {
+	run, calls := runInstallScript(t, 100, 0)
+	if !strings.Contains(calls, "full-upgrade") {
+		t.Fatalf("install did not run after the refresh failed; calls:\n%s", calls)
+	}
+	if run.ExitCode == nil || *run.ExitCode != 0 {
+		t.Fatalf("install succeeded, exit = %v", run.ExitCode)
+	}
+	if !run.RefreshFailed {
+		t.Fatal("refresh failure not recorded")
+	}
+	if len(run.Errors) == 0 {
+		t.Fatal("refresh errors not reported")
+	}
+}
+
+func TestInstallFailureStillReported(t *testing.T) {
+	run, _ := runInstallScript(t, 0, 100)
+	if run.ExitCode == nil || *run.ExitCode != 100 {
+		t.Fatalf("failed install must report its exit code, got %v", run.ExitCode)
+	}
+	if run.RefreshFailed {
+		t.Fatal("refresh succeeded but was reported as failed")
+	}
+}
+
+func TestInstallCleanRun(t *testing.T) {
+	run, calls := runInstallScript(t, 0, 0)
+	if run.ExitCode == nil || *run.ExitCode != 0 || run.RefreshFailed || len(run.Errors) != 0 {
+		t.Fatalf("clean run reported as %+v", run)
+	}
+	for _, want := range []string{"apt-get -o APT::Update::Error-Mode=any", "dpkg --configure -a", "--fix-broken install", "full-upgrade"} {
+		if !strings.Contains(calls, want) {
+			t.Errorf("install did not run %q; calls:\n%s", want, calls)
+		}
 	}
 }
