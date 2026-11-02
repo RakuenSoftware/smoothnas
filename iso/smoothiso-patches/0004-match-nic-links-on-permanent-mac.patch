@@ -1,0 +1,17 @@
+--- a/installer.sh
++++ b/installer.sh
+@@ -2683,9 +2683,13 @@
+         esac
+         seen_macs="${seen_macs} ${mac}"
+ 
++        # PermanentMACAddress=, not MACAddress=: SmoothNAS gives its bond the
++        # first member's MAC, and bond slaves take the bond's MAC. A match on
++        # the current MAC catches the bond too, and udev renames bond0 to
++        # net0 at boot, which leaves the NAS with no address.
+         cat > "$TARGET/etc/systemd/network/00-net${idx}.link" << LINK
+ [Match]
+-MACAddress=$mac
++PermanentMACAddress=$mac
+ 
+ [Link]
+ Name=net${idx}
