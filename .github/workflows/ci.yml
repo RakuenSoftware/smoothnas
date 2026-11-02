@@ -141,15 +141,17 @@ jobs:
           GOTOOLCHAIN=auto go test -c -o /tmp/runtime-network.test ./internal/lxc
           sudo env LXC2DOCKER_NETWORK_TEST=1 unshare --net /tmp/runtime-network.test -test.run '^TestEnsureBridgeNATRemainsBounded$' -test.v
 
-  test-network-boot:
-    # Boot-time networking regressions: the bond rename that took a NAS off
-    # the network, and the DHCP fallback for when the configured network
-    # doesn't come up.
+  test-boot-regressions:
+    # Boot regressions from the Aoostar WTR Max outage: the bond rename that
+    # took it off the network, the DHCP fallback for when the configured
+    # network doesn't come up, and kernels left without DKMS modules.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - name: DHCP fallback script
         run: sh packaging/tests/network-fallback-test.sh
+      - name: DKMS modules for kernels configured before their headers
+        run: sh packaging/tests/dkms-autoinstall-test.sh
       - name: NIC naming link files never rename a bond (real udev)
         run: sudo bash scripts/ci/test-link-bond-rename.sh
 
@@ -217,6 +219,27 @@ jobs:
             dkms status
             dkms status -k "$kver" | grep -E "^zfs/.*: installed"
             dkms status -k "$kver" | grep -E "^smoothfs/.*: installed"
+            # A kernel configured before its headers boots without ZFS: its
+            # DKMS hook skipped it, and the SmoothKernel headers package never
+            # reruns the hook. Recreate that state, prove it took (so the
+            # checks below cannot pass vacuously), and check that both repair
+            # paths rebuild the module.
+            unbuilt() {
+              dkms unbuild -m "$1" -v "$(dkms status -k "$kver" | sed -n "s|^$1/\([^,]*\),.*|\1|p")" -k "$kver"
+              if dkms status -k "$kver" | grep -E "^$1/.*: installed"; then echo "$1 is still installed for $kver" >&2; exit 1; fi
+              if [ -n "$(find "/lib/modules/$kver" -name "$1.ko*")" ]; then echo "$1.ko is still in /lib/modules/$kver" >&2; exit 1; fi
+            }
+            # Path 1: any later dpkg run (apt.conf.d/53smoothnas-dkms).
+            unbuilt zfs
+            apt-get install -y -qq --reinstall hdparm >/dev/null
+            dkms status -k "$kver" | grep -E "^zfs/.*: installed"
+            modinfo -k "$kver" zfs >/dev/null
+            # Path 2: the smoothnas postinst, which an upgrade runs. Not via apt,
+            # so the Post-Invoke hook cannot be what rebuilt it.
+            unbuilt smoothfs
+            DEBIAN_FRONTEND=noninteractive dpkg-reconfigure smoothnas
+            dkms status -k "$kver" | grep -E "^smoothfs/.*: installed"
+            modinfo -k "$kver" smoothfs >/dev/null
             # The package keeps its own apt source; apt reads it cleanly.
             apt-get update > /tmp/update.log 2>&1 || { cat /tmp/update.log; exit 1; }
             if grep -E "^(Err|E):" /tmp/update.log; then exit 1; fi

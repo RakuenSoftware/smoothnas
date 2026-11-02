@@ -1,0 +1,5 @@
+// Build DKMS modules (OpenZFS, smoothfs) for every installed kernel after each
+// dpkg run. SmoothKernel's headers package doesn't rerun the DKMS hook, so a
+// kernel configured before its headers would otherwise boot without ZFS.
+// See /usr/lib/smoothnas/dkms-autoinstall.sh.
+DPkg::Post-Invoke { "if [ -x /usr/lib/smoothnas/dkms-autoinstall.sh ]; then /usr/lib/smoothnas/dkms-autoinstall.sh || true; fi"; };
