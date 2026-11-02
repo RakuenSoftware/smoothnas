@@ -122,6 +122,15 @@ func main() {
 	// (NFS waits on tier mounts) so it never delays HTTP readiness.
 	go api.ReapplySharingServices(store)
 
+	// Installer NIC-naming .link files that match on MACAddress= also match a
+	// bond carrying its member's MAC, so udev renamed bond0 at boot. Pin them
+	// to the permanent MAC; udev uses the new match from the next boot.
+	if migrated, err := network.ReconcileLinkFiles(defaultNetworkDir); err != nil {
+		log.Printf("warning: could not migrate NIC naming link files %v: %v", migrated, err)
+	} else if len(migrated) > 0 {
+		log.Printf("network: NIC naming link files now match the permanent MAC: %v", migrated)
+	}
+
 	// First-boot default-bond policy: a fresh appliance gets bond0
 	// over every physical Ethernet NIC in active-backup mode, DHCPed.
 	// Once the bootstrap marker is set, this is a no-op so an

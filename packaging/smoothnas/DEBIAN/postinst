@@ -26,7 +26,7 @@ rm -rf /opt/smoothnas/repo /opt/smoothnas/smoothfs-src /opt/smoothnas/package-ma
 rmdir /opt/smoothnas 2>/dev/null || true
 
 # reenable: an older install's links may point at the removed units above.
-for unit in smoothnas-gpu-init smoothnas-tls-init smoothnas-runtime tierd-host-init tierd; do
+for unit in smoothnas-gpu-init smoothnas-tls-init smoothnas-network-fallback smoothnas-runtime tierd-host-init tierd; do
 	systemctl reenable "$unit.service" >/dev/null 2>&1 || true
 done
 
